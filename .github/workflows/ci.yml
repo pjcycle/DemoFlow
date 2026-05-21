@@ -41,14 +41,27 @@ jobs:
             -derivedDataPath Build \
             CODE_SIGNING_ALLOWED=NO
 
+      - name: Locate Build Products
+        run: |
+          echo "=== Working dir ==="
+          pwd
+          echo "=== Build tree ==="
+          find Build -name "*.app" -type d 2>/dev/null || echo "No .app found"
+          echo "=== Full tree (first 50) ==="
+          find Build -type d | head -50
+
       - name: Zip AppStore App
         run: |
-          cd Build/Build/Products/AppStore
+          APP_PATH=$(find Build -name "DemoFlow.app" -type d | grep -i appstore | head -1)
+          echo "Found: $APP_PATH"
+          cd "$(dirname "$APP_PATH")"
           ditto -c -k --sequesterRsrc DemoFlow.app DemoFlow-AppStore.zip
 
       - name: Zip Release App
         run: |
-          cd Build/Build/Products/Release
+          APP_PATH=$(find Build -name "DemoFlow.app" -type d | grep -vi appstore | head -1)
+          echo "Found: $APP_PATH"
+          cd "$(dirname "$APP_PATH")"
           ditto -c -k --sequesterRsrc DemoFlow.app DemoFlow-Release.zip
 
       - name: Upload AppStore Artifact
@@ -56,9 +69,11 @@ jobs:
         with:
           name: DemoFlow-AppStore
           path: Build/Build/Products/AppStore/DemoFlow-AppStore.zip
+          if-no-files-found: error
 
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DemoFlow-Release
           path: Build/Build/Products/Release/DemoFlow-Release.zip
+          if-no-files-found: error
