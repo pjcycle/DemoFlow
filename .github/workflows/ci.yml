@@ -28,6 +28,7 @@ jobs:
             -scheme DemoFlow \
             -configuration AppStore \
             -destination 'platform=macOS' \
+            -derivedDataPath Build \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Build Release
@@ -37,6 +38,7 @@ jobs:
             -scheme DemoFlow \
             -configuration Release \
             -destination 'platform=macOS' \
+            -derivedDataPath Build \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Zip AppStore App
