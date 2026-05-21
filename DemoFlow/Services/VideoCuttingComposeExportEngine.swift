@@ -75,32 +75,25 @@ final class VideoCuttingComposeExportEngine {
                 try audioCompTrack.insertTimeRange(range, of: sourceAudioTrack, at: timeline)
             }
 
-            var layerConfig = AVVideoCompositionLayerInstruction.Configuration(trackID: videoCompTrack.trackID)
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoCompTrack)
             let transform = cropTransform(
                 sourcePreferredTransform: sourcePreferredTransform,
                 cropPixels: request.cropPixels
             )
-            layerConfig.setTransform(transform, at: timeline)
-            let layer = AVVideoCompositionLayerInstruction(configuration: layerConfig)
+            layerInstruction.setTransform(transform, at: timeline)
 
-            let instruction = AVVideoCompositionInstruction(
-                configuration: .init(
-                    layerInstructions: [layer],
-                    timeRange: CMTimeRange(start: timeline, duration: range.duration)
-                )
-            )
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: timeline, duration: range.duration)
+            instruction.layerInstructions = [layerInstruction]
             instructions.append(instruction)
 
             timeline = timeline + range.duration
         }
 
-        let videoComposition = AVVideoComposition(
-            configuration: .init(
-                frameDuration: CMTime(value: 1, timescale: 30),
-                instructions: instructions,
-                renderSize: request.renderSize
-            )
-        )
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.instructions = instructions
+        videoComposition.renderSize = request.renderSize
 
         let hasAudioTrack = audioCompTrack != nil && sourceAudioTrack != nil
         let audioMix: AVAudioMix?

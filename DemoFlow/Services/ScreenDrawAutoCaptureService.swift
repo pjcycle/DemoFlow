@@ -73,11 +73,7 @@ struct ScreenDrawAutoCaptureService {
     }
 
     private func captureScreenImage(_ screen: NSScreen) async throws -> NSImage {
-        let captureRect = screen.visibleFrame
-        guard captureRect.width > 1, captureRect.height > 1 else {
-            throw ScreenDrawAutoCaptureError.screenCaptureFailed
-        }
-        let cgImage = try await captureDisplayImage(in: captureRect)
+        let cgImage = try await captureDisplayImage(screen: screen)
         let size = NSSize(width: cgImage.width, height: cgImage.height)
         return NSImage(cgImage: cgImage, size: size)
     }
@@ -132,19 +128,20 @@ struct ScreenDrawAutoCaptureService {
         return "draw_capture_\(formatter.string(from: Date())).png"
     }
 
-    private func captureDisplayImage(in rect: CGRect) async throws -> CGImage {
-        try await withCheckedThrowingContinuation { continuation in
-            SCScreenshotManager.captureImage(in: rect) { image, error in
-                if let image {
-                    continuation.resume(returning: image)
-                    return
-                }
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                continuation.resume(throwing: ScreenDrawAutoCaptureError.screenCaptureFailed)
-            }
+    private func captureDisplayImage(screen: NSScreen) async throws -> CGImage {
+        guard let displayID = screen.displayID else {
+            throw ScreenDrawAutoCaptureError.screenUnavailable
         }
+        let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard let contentDisplay = shareable.displays.first(where: { $0.displayID == displayID }) else {
+            throw ScreenDrawAutoCaptureError.screenCaptureFailed
+        }
+        let filter = SCContentFilter(display: contentDisplay, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.capturesAudio = false
+        config.width = Int(screen.frame.width * screen.backingScaleFactor)
+        config.height = Int(screen.frame.height * screen.backingScaleFactor)
+        config.scalesToFit = false
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
     }
 }

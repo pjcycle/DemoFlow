@@ -70,9 +70,19 @@ final class CompositionExportEngine {
         }
 
         let renderSize = try await orientedSize(of: screenVideoTrack)
-        var baseLayerConfig = AVVideoCompositionLayerInstruction.Configuration(trackID: screenCompTrack.trackID)
         let screenPreferredTransform = try await AVAssetAsyncLoaders.preferredTransform(of: screenVideoTrack)
-        baseLayerConfig.setTransform(
+
+        let pipRect = CGRect(
+            x: pipLayout.normalizedRect.minX * renderSize.width,
+            y: pipLayout.normalizedRect.minY * renderSize.height,
+            width: pipLayout.normalizedRect.width * renderSize.width,
+            height: pipLayout.normalizedRect.height * renderSize.height
+        )
+        let cameraSourceSize = try await orientedSize(of: cameraVideoTrack)
+        let cameraPreferredTransform = try await AVAssetAsyncLoaders.preferredTransform(of: cameraVideoTrack)
+
+        let baseLayerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: screenCompTrack)
+        baseLayerInstruction.setTransform(
             transformToFit(
                 preferredTransform: screenPreferredTransform,
                 sourceSize: renderSize,
@@ -81,24 +91,16 @@ final class CompositionExportEngine {
             at: .zero
         )
 
-        let pipRect = CGRect(
-            x: pipLayout.normalizedRect.minX * renderSize.width,
-            y: pipLayout.normalizedRect.minY * renderSize.height,
-            width: pipLayout.normalizedRect.width * renderSize.width,
-            height: pipLayout.normalizedRect.height * renderSize.height
-        )
-        var cameraLayerConfig = AVVideoCompositionLayerInstruction.Configuration(trackID: cameraCompTrack.trackID)
-        let cameraSourceSize = try await orientedSize(of: cameraVideoTrack)
-        let cameraPreferredTransform = try await AVAssetAsyncLoaders.preferredTransform(of: cameraVideoTrack)
+        let cameraLayerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: cameraCompTrack)
         let basePiPTransform = transformToFit(
             preferredTransform: cameraPreferredTransform,
             sourceSize: cameraSourceSize,
             renderRect: pipRect
         )
-        cameraLayerConfig.setTransform(basePiPTransform, at: .zero)
+        cameraLayerInstruction.setTransform(basePiPTransform, at: .zero)
         applyFaceFramingTransformRamps(
             keyframes: faceFramingKeyframes,
-            to: &cameraLayerConfig,
+            to: cameraLayerInstruction,
             cameraSourceSize: cameraSourceSize,
             cameraPreferredTransform: cameraPreferredTransform,
             pipRect: pipRect,
@@ -106,22 +108,14 @@ final class CompositionExportEngine {
             baseTransform: basePiPTransform
         )
 
-        let cameraLayer = AVVideoCompositionLayerInstruction(configuration: cameraLayerConfig)
-        let baseLayer = AVVideoCompositionLayerInstruction(configuration: baseLayerConfig)
-        let instruction = AVVideoCompositionInstruction(
-            configuration: .init(
-                layerInstructions: [cameraLayer, baseLayer],
-                timeRange: CMTimeRange(start: .zero, duration: screenDuration)
-            )
-        )
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: screenDuration)
+        instruction.layerInstructions = [cameraLayerInstruction, baseLayerInstruction]
 
-        let videoComposition = AVVideoComposition(
-            configuration: .init(
-                frameDuration: CMTime(value: 1, timescale: 30),
-                instructions: [instruction],
-                renderSize: renderSize
-            )
-        )
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.instructions = [instruction]
+        videoComposition.renderSize = renderSize
 
         try await export(
             composition: composition,
@@ -245,8 +239,8 @@ final class CompositionExportEngine {
         }
 
         let instructions: [AVVideoCompositionInstruction] = segments.map { segment in
-            var layerConfig = AVVideoCompositionLayerInstruction.Configuration(trackID: videoCompTrack.trackID)
-            layerConfig.setTransform(
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoCompTrack)
+            layerInstruction.setTransform(
                 transformToFit(
                     preferredTransform: segment.preferredTransform,
                     sourceSize: segment.sourceSize,
@@ -254,21 +248,15 @@ final class CompositionExportEngine {
                 ),
                 at: segment.timeRange.start
             )
-            let layer = AVVideoCompositionLayerInstruction(configuration: layerConfig)
-            return AVVideoCompositionInstruction(
-                configuration: .init(
-                    layerInstructions: [layer],
-                    timeRange: segment.timeRange
-                )
-            )
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = segment.timeRange
+            instruction.layerInstructions = [layerInstruction]
+            return instruction
         }
-        let videoComposition = AVVideoComposition(
-            configuration: .init(
-                frameDuration: CMTime(value: 1, timescale: 30),
-                instructions: instructions,
-                renderSize: renderSize
-            )
-        )
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.instructions = instructions
+        videoComposition.renderSize = renderSize
 
         try await export(
             composition: composition,
@@ -328,7 +316,7 @@ final class CompositionExportEngine {
 
     private func applyFaceFramingTransformRamps(
         keyframes: [FaceFramingKeyframe],
-        to layerConfig: inout AVVideoCompositionLayerInstruction.Configuration,
+        to layerInstruction: AVMutableVideoCompositionLayerInstruction,
         cameraSourceSize: CGSize,
         cameraPreferredTransform: CGAffineTransform,
         pipRect: CGRect,
@@ -357,7 +345,7 @@ final class CompositionExportEngine {
                     pipRect: pipRect,
                     fallback: baseTransform
                 )
-                layerConfig.setTransform(transform, at: CMTime(seconds: single.seconds, preferredTimescale: 600))
+                layerInstruction.setTransform(transform, at: CMTime(seconds: single.seconds, preferredTimescale: 600))
             }
             return
         }
@@ -382,14 +370,12 @@ final class CompositionExportEngine {
                 fallback: baseTransform
             )
 
-            layerConfig.addTransformRamp(
-                .init(
-                    timeRange: CMTimeRange(
-                        start: CMTime(seconds: current.seconds, preferredTimescale: 600),
-                        duration: CMTime(seconds: next.seconds - current.seconds, preferredTimescale: 600)
-                    ),
-                    start: fromTransform,
-                    end: toTransform
+            layerInstruction.setTransformRamp(
+                fromStart: fromTransform,
+                toEnd: toTransform,
+                timeRange: CMTimeRange(
+                    start: CMTime(seconds: current.seconds, preferredTimescale: 600),
+                    duration: CMTime(seconds: next.seconds - current.seconds, preferredTimescale: 600)
                 )
             )
         }
