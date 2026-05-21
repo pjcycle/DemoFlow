@@ -43,22 +43,22 @@ jobs:
 
       - name: Zip AppStore App
         run: |
-          cd Build/Products/AppStore
+          cd Build/Build/Products/AppStore
           ditto -c -k --sequesterRsrc DemoFlow.app DemoFlow-AppStore.zip
 
       - name: Zip Release App
         run: |
-          cd Build/Products/Release
+          cd Build/Build/Products/Release
           ditto -c -k --sequesterRsrc DemoFlow.app DemoFlow-Release.zip
 
       - name: Upload AppStore Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DemoFlow-AppStore
-          path: Build/Products/AppStore/DemoFlow-AppStore.zip
+          path: Build/Build/Products/AppStore/DemoFlow-AppStore.zip
 
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DemoFlow-Release
-          path: Build/Products/Release/DemoFlow-Release.zip
+          path: Build/Build/Products/Release/DemoFlow-Release.zip
