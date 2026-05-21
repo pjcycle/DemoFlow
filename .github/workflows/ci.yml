@@ -22,58 +22,45 @@ jobs:
         run: xcodebuild -resolvePackageDependencies -project DemoFlow.xcodeproj
 
       - name: Build AppStore
+        env:
+          CONFIGURATION_BUILD_DIR: ${{ github.workspace }}/Build/AppStore
         run: |
           xcodebuild build \
             -project DemoFlow.xcodeproj \
             -scheme DemoFlow \
             -configuration AppStore \
             -destination 'platform=macOS' \
-            -derivedDataPath Build \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Build Release
+        env:
+          CONFIGURATION_BUILD_DIR: ${{ github.workspace }}/Build/Release
         run: |
           xcodebuild build \
             -project DemoFlow.xcodeproj \
             -scheme DemoFlow \
             -configuration Release \
             -destination 'platform=macOS' \
-            -derivedDataPath Build \
             CODE_SIGNING_ALLOWED=NO
-
-      - name: Locate Build Products
-        run: |
-          echo "=== Working dir ==="
-          pwd
-          echo "=== Build tree ==="
-          find Build -name "*.app" -type d 2>/dev/null || echo "No .app found"
-          echo "=== Full tree (first 50) ==="
-          find Build -type d | head -50
 
       - name: Zip AppStore App
         run: |
-          APP_PATH=$(find Build -name "DemoFlow.app" -type d | grep -i appstore | head -1)
-          echo "Found: $APP_PATH"
-          cd "$(dirname "$APP_PATH")"
-          ditto -c -k --sequesterRsrc DemoFlow.app DemoFlow-AppStore.zip
+          cd Build/AppStore
+          zip -r -q ../DemoFlow-AppStore.zip DemoFlow.app
 
       - name: Zip Release App
         run: |
-          APP_PATH=$(find Build -name "DemoFlow.app" -type d | grep -vi appstore | head -1)
-          echo "Found: $APP_PATH"
-          cd "$(dirname "$APP_PATH")"
-          ditto -c -k --sequesterRsrc DemoFlow.app DemoFlow-Release.zip
+          cd Build/Release
+          zip -r -q ../DemoFlow-Release.zip DemoFlow.app
 
       - name: Upload AppStore Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DemoFlow-AppStore
-          path: Build/Build/Products/AppStore/DemoFlow-AppStore.zip
-          if-no-files-found: error
+          path: Build/DemoFlow-AppStore.zip
 
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DemoFlow-Release
-          path: Build/Build/Products/Release/DemoFlow-Release.zip
-          if-no-files-found: error
+          path: Build/DemoFlow-Release.zip
