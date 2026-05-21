@@ -1,113 +1,101 @@
 # DemoFlow
 
-DemoFlow is a macOS utility suite with five fixed modules:
+> [中文](README.zh-CN.md)
 
-1. Recording
-2. PiP Camera
-3. Screen Drawing
-4. Video Cutting
-5. Audio Extract (MP3)
+DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawing, video cutting, and audio extraction.
 
-For implementation constraints and product rules, see:
+## Modules
 
-- [SPEC.md](/Users/jamie/CodexAi/demoflow/SPEC.md)
-- [AGENTS.md](/Users/jamie/CodexAi/demoflow/AGENTS.md)
+### Recording
 
-## Module Overview
+- Full-screen recording on the primary display
+- Floating recording controller for stop/pause
+- Auto-hide main window during recording
 
-### 1) Recording
+### PiP Camera
 
-- QuickTime-style primary-display full-screen recording
-- Region recording is intentionally removed
-- Main window auto-hides after recording starts
-- Uses a dedicated floating recording controller for stop action
-- Restores main window on normal stop, startup failure, or unexpected stop
-
-### 2) PiP Camera
-
-- Independent floating camera utility (not a recording side panel)
-- Always-on-top preview across Spaces/full-screen contexts
-- Manual video/audio device selection (including Continuity Camera when available)
+- Independent floating camera preview (always-on-top, works across Spaces)
+- Video/audio device selection including Continuity Camera
 - Preview mute and real-time microphone level feedback
-- Aspect ratio: `Auto / 16:9 / 4:3`
-- Global hotkey: `⌘⌥P` (toggle show/hide)
+- Aspect ratio: Auto / 16:9 / 4:3
+- Global hotkey: `⌘⌥P`
 
-### 3) Screen Drawing
+### Screen Drawing
 
-- Decoupled drawing module with floating toolbar + transparent canvas
+- Floating toolbar + transparent canvas overlay
 - 6 tools: line, arrow, rectangle, ellipse, cross, check
-- 5 color presets: `1 red / 2 yellow / 3 green / 4 blue / 5 black`
-- Unified dismissal animation pipeline for clear/hide
-- Animation modes: `Random` or `Fixed`
-- Fixed effects: `Scatter & Fall`, `Left→Right`, `Right→Left`, `Top→Bottom`, `Bottom→Top`
+- 5 color presets: red / yellow / green / blue / black
+- Unified dismissal animation pipeline
 
-Current drawing hotkeys:
+Hotkeys:
+- `⌃⌥1~5` — color presets
+- `⌘⌥1~6` — drawing tools
+- `⌘⌃S` — toggle overlay
+- `⌘⌃X` — toggle canvas passthrough
 
-- `⌃⌥1~5`: select color presets
-- `⌘⌥1~6`: select drawing tools
-- `⌘⌃S`: toggle drawing overlay show/hide
-- `⌘⌃X`: toggle canvas passthrough/drawing interaction
+### Video Cutting
 
-### 4) Video Cutting
-
-- Popup-based smart cutting workflow
-- Drag-and-drop or file import for `.mp4/.mov`
+- Drag-and-drop or file import for `.mp4` / `.mov`
 - Timeline trimming, multi-range deletion, crop, audio denoise/EQ, export
-- Keeps pause state after import/reload (no forced autoplay)
 
-### 5) Audio Extract (MP3)
+### Audio Extract
 
-- Independent fifth module with isolated state channel
-- Input sources: local files (`mp4/mov/mkv/webm/mp3`) and online URLs
-- Output format: `mp3` only
-- Default output root: `~/Movies/DemoFlow/AudioExtract/`
-- Subfolder rule: `YYYYMMDD_HHMMSS_<source_tag>/`
-- Dependency policy: bundled `ffmpeg/ffprobe` first, bundled `yt-dlp_macos.bundle` only
-- Runtime install/decompress for `yt-dlp` is disabled
-- Unified failure format: `Cause: ...` and `Next command: ...`
-- Success validation requires all checks: file exists, file size > 0, `ffprobe` duration > 0
+- Extract MP3 from local files (`.mp4` / `.mov` / `.mkv` / `.webm` / `.mp3`)
+- Online URL extraction (full version only)
+- Default output: `~/Movies/DemoFlow/AudioExtract/`
 
-## State Isolation Rules
+## Requirements
 
-- Recording writes only `statusMessage`
-- PiP writes only `pipStatusMessage`
-- Screen Drawing writes only `drawStatusMessage`
-- Audio Extract writes only `AudioExtractViewModel.statusMessage`
-- PiP and Screen Drawing actions must not override recording status text
-- Audio Extract actions must not override recording/PiP/drawing status text
+- macOS 14.0 or later
+- Apple Silicon (arm64) — Intel not supported
 
 ## Permissions
 
-DemoFlow may request:
+DemoFlow requests:
 
-- Screen Recording
-- Camera
-- Microphone
+- **Screen Recording** — for screen capture
+- **Camera** — for PiP preview and camera recording
+- **Microphone** — for recording and PiP audio
 
-If global hotkeys are unavailable due to system constraints, the app falls back to foreground handling with readable status guidance.
+## Build
 
-## Build & Checks
+Open `DemoFlow.xcodeproj` in Xcode 16+, select the `DemoFlow` scheme, and build.
 
-From `/Users/jamie/CodexAi/DemoFlow/DemoFlow`:
+Or from the project root:
 
 ```bash
-Scripts/run_build.sh
-Scripts/run_logic_checks.sh
+xcodebuild -project DemoFlow.xcodeproj -scheme DemoFlow -destination 'platform=macOS' build
 ```
+
+## Dual-Channel Builds
+
+| Configuration | yt-dlp | Distribution |
+|---------------|--------|--------------|
+| **AppStore** (default) | Excluded | Mac App Store |
+| **Release** | Included | Direct download |
+
+See [BUILD_CHANNELS.md](BUILD_CHANNELS.md) for details.
 
 ## Repo Layout
 
-```text
-/Users/jamie/CodexAi/DemoFlow
-├── AGENTS.md
-├── SPEC.md
-├── README.md
-├── README.zh-CN.md
-├── spec/
-└── DemoFlow/
-    ├── AGENTS.md
-    ├── SPEC.md
-    ├── DemoFlow.xcodeproj
-    ├── DemoFlow/
-    └── Scripts/
 ```
+├── DemoFlow.xcodeproj
+├── DemoFlow/
+│   ├── DemoFlowApp.swift
+│   ├── Views/
+│   ├── Models/
+│   ├── Services/
+│   ├── ViewModels/
+│   ├── Lang/
+│   ├── Extensions/
+│   ├── ThirdParty/
+│   └── Assets.xcassets/
+├── Scripts/
+├── BUILD_CHANNELS.md
+├── README.md
+└── README.zh-CN.md
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE) for details.
