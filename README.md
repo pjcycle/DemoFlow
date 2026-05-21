@@ -4,6 +4,8 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">中文</a>
 </p>
 
+[![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
+
 DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawing, video cutting, and audio extraction.
 
 ## Modules
@@ -58,6 +60,15 @@ DemoFlow requests:
 - **Screen Recording** — for screen capture
 - **Camera** — for PiP preview and camera recording
 - **Microphone** — for recording and PiP audio
+
+## Download
+
+Pre-built binaries from the latest CI run:
+
+- [**AppStore** build](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml) — without yt-dlp (Mac App Store compatible)
+- [**Release** build](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml) — with yt-dlp (full features)
+
+Click the links above, open the latest successful run, and download the artifact from the **Artifacts** section at the bottom.
 
 ## Build
 

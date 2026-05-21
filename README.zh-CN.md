@@ -4,6 +4,8 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">中文</a>
 </p>
 
+[![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
+
 DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄像头、屏幕画笔、视频裁剪和音频提取。
 
 ## 模块
@@ -58,6 +60,15 @@ DemoFlow 会请求以下权限：
 - **屏幕录制** — 用于屏幕捕获
 - **摄像头** — 用于画中画预览和摄像头录制
 - **麦克风** — 用于录制和画中画音频
+
+## 下载
+
+最新 CI 构建产物：
+
+- [**AppStore** 版本](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml) — 不含 yt-dlp（兼容 Mac App Store）
+- [**Release** 版本](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml) — 含 yt-dlp（完整功能）
+
+点击链接，打开最新成功的运行记录，从底部 **Artifacts** 区域下载。
 
 ## 构建
 
