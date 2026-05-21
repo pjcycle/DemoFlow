@@ -1,6 +1,8 @@
 # DemoFlow
 
-> [English](README.md)
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">中文</a>
+</p>
 
 DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄像头、屏幕画笔、视频裁剪和音频提取。
 
