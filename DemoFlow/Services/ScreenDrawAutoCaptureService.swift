@@ -2,7 +2,7 @@
 //  ScreenDrawAutoCaptureService.swift
 //  DemoFlow
 //
-//  Created by Codex on 2026/5/15.
+//  Created by PJ Lee on 2026/5/15.
 //
 
 import AppKit
