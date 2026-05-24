@@ -27,6 +27,13 @@ final class AppCoordinator: ObservableObject {
     private static let drawDismissalAnimationModeDefaultsKey = "demoflow.draw.dismissal.animation.mode"
     private static let drawDismissalAnimationFixedStyleDefaultsKey = "demoflow.draw.dismissal.animation.fixedStyle"
     private static let drawAutoCaptureOnCloseEnabledDefaultsKey = "demoflow.draw.autoCaptureOnClose.enabled"
+    private static let recordingQualityPresetDefaultsKey = "demoflow.recording.quality.preset"
+    private static let recordingQualityCustomResolutionDefaultsKey = "demoflow.recording.quality.custom.resolution"
+    private static let recordingQualityCustomFPSDefaultsKey = "demoflow.recording.quality.custom.fps"
+    private static let recordingQualityCustomCodecDefaultsKey = "demoflow.recording.quality.custom.codec"
+    private static let recordingQualityCustomBitrateDefaultsKey = "demoflow.recording.quality.custom.videoBitrateMbps"
+    private static let pipRecordingQualityPresetDefaultsKey = "demoflow.pip.recording.quality.preset"
+    private static let pipRecordingQualityCustomBitrateDefaultsKey = "demoflow.pip.recording.quality.custom.videoBitrateMbps"
     private static let pipHotkeyRegisteredStatusKey = "pip.hotkey.registered.status"
     private static let pipHotkeyFallbackStatusKey = "pip.hotkey.fallback.status"
     private static let pipFilmTitleRecordingSuffix = " - 录像中"
@@ -63,6 +70,28 @@ final class AppCoordinator: ObservableObject {
         }
     }
     @Published var pipProcessingConfig: PiPProcessingConfig = .default
+    @Published var recordingQualityConfig: RecordingQualityConfig = .defaultConfig {
+        didSet {
+            let normalized = recordingQualityConfig.normalized()
+            if normalized != recordingQualityConfig {
+                recordingQualityConfig = normalized
+                return
+            }
+            guard recordingQualityConfig != oldValue else { return }
+            persistRecordingQualityConfig()
+        }
+    }
+    @Published var pipRecordingQualityConfig: PiPRecordingQualityConfig = .defaultConfig {
+        didSet {
+            let normalized = pipRecordingQualityConfig.normalized()
+            if normalized != pipRecordingQualityConfig {
+                pipRecordingQualityConfig = normalized
+                return
+            }
+            guard pipRecordingQualityConfig != oldValue else { return }
+            persistPiPRecordingQualityConfig()
+        }
+    }
     @Published var selectedSettingsSection: SettingsSection = .recording
     @Published var languageOption: AppLanguageOption = .auto {
         didSet {
@@ -197,6 +226,9 @@ final class AppCoordinator: ObservableObject {
                 ? L10n.tr(Self.pipHotkeyRegisteredStatusKey)
                 : L10n.tr(Self.pipHotkeyFallbackStatusKey)
         }
+        self.pipPreviewRuntime.onRecordingFailure = { [weak self] error in
+            self?.handlePiPRecordingRuntimeFailure(error)
+        }
 
         self.pipController.onVisibilityChanged = { [weak self] isVisible in
             guard let self else { return }
@@ -270,6 +302,8 @@ final class AppCoordinator: ObservableObject {
 
         loadPersistedDrawDismissalAnimationPreferences()
         loadPersistedDrawAutoCaptureOnCloseEnabled()
+        loadPersistedRecordingQualityConfig()
+        loadPersistedPiPRecordingQualityConfig()
         loadPersistedLanguageOption()
         resolveLanguage()
         bindState()
@@ -334,6 +368,44 @@ final class AppCoordinator: ObservableObject {
 
     var appLocale: Locale {
         resolvedLanguage.locale
+    }
+
+    var recordingQualityWarningMessage: String? {
+        switch recordingQualityConfig.customWarningLevel(for: currentRecordingNativeSize) {
+        case .low:
+            return L10n.tr("recording.quality.warning.low")
+        case .high:
+            return L10n.f(
+                "recording.quality.warning.high",
+                formattedRecordingQualityEstimatedSize
+            )
+        case nil:
+            return nil
+        }
+    }
+
+    var pipRecordingQualityWarningMessage: String? {
+        switch pipRecordingQualityConfig.customWarningLevel() {
+        case .low:
+            return L10n.tr("pip.quality.warning.low")
+        case .high:
+            return L10n.tr("pip.quality.warning.high")
+        case nil:
+            return nil
+        }
+    }
+
+    var pipRecordingQualityEstimatedTenMinuteSizeMB: Int {
+        pipRecordingQualityConfig.estimatedTenMinuteSizeMB
+    }
+
+    var formattedRecordingQualityEstimatedSize: String {
+        let sizeMB = recordingQualityConfig.estimatedTenMinuteSizeMB
+        if sizeMB >= 1024 {
+            let value = Double(sizeMB) / 1024.0
+            return L10n.f("recording.quality.file_size.gb", value)
+        }
+        return L10n.f("recording.quality.file_size.mb", sizeMB)
     }
 
     var resolvedPrivacyPolicyURL: URL? {
@@ -488,7 +560,11 @@ final class AppCoordinator: ObservableObject {
                 }
                 let outputDirectory = try DemoFlowOutputDirectoryPolicy.preparePiPRecordingsDirectory()
                 pipStatusMessage = L10n.tr("pip.film.status.preparing")
-                try await pipFilmRecorder.startRecording(with: pipPreviewRuntime, outputDirectory: outputDirectory)
+                try await pipFilmRecorder.startRecording(
+                    with: pipPreviewRuntime,
+                    outputDirectory: outputDirectory,
+                    qualityConfig: pipRecordingQualityConfig
+                )
                 pipFilmState = pipFilmRecorder.state
                 pipController.applyRuntimeWindowTitleSuffix(Self.pipFilmTitleRecordingSuffix)
                 if let pendingStopTrigger = consumePendingPiPFilmStopTrigger() {
@@ -780,6 +856,13 @@ final class AppCoordinator: ObservableObject {
         return L10n.tr("pip.film.error.unknown")
     }
 
+    private func handlePiPRecordingRuntimeFailure(_ error: Error) {
+        pipFilmRecorder.handleRuntimeFailure(error)
+        pendingPiPFilmStopTrigger = nil
+        pipController.applyRuntimeWindowTitleSuffix(nil)
+        pipStatusMessage = L10n.f("pip.film.status.failed", readablePiPFilmMessage(error))
+    }
+
     private func consumePendingPiPFilmStopTrigger() -> PiPFilmStopTrigger? {
         let trigger = pendingPiPFilmStopTrigger
         pendingPiPFilmStopTrigger = nil
@@ -851,10 +934,15 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    private func syncPiPWindowCaptureState() async {
-        guard recorderState.isRecording else { return }
+    @discardableResult
+    private func syncPiPWindowCaptureState() async -> Bool {
+        guard recorderState.isRecording else { return true }
         let pipWindowID = isPiPPreviewVisible ? pipController.currentWindowID : nil
-        await recorder.updatePiPWindowCapture(windowID: pipWindowID, extraWindowIDs: screenDrawWhitelistWindowIDs())
+        let resolution = await recorder.updatePiPWindowCapture(
+            windowID: pipWindowID,
+            extraWindowIDs: screenDrawWhitelistWindowIDs()
+        )
+        return resolution.didIncludeAllRequestedWindows
     }
 
     private func beginRecordingFromOverlay() {
@@ -889,6 +977,7 @@ final class AppCoordinator: ObservableObject {
                 microphoneDeviceID: shouldCaptureMicrophone ? self.audioEngine.selectedSourceID : nil,
                 cameraDeviceID: nil,
                 cameraAudioDeviceID: nil,
+                recordingQuality: self.recordingQualityConfig,
                 pipWindowID: self.isPiPPreviewVisible ? self.pipController.currentWindowID : nil,
                 screenDrawWindowIDs: self.screenDrawWhitelistWindowIDs(),
                 pipLayout: self.pipLayout,
@@ -923,6 +1012,16 @@ final class AppCoordinator: ObservableObject {
         return NSScreen.screens.first(where: { $0.frame.contains(pointer) })
     }
 
+    private var currentRecordingNativeSize: CGSize? {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+            return nil
+        }
+        return CGSize(
+            width: screen.frame.width * screen.backingScaleFactor,
+            height: screen.frame.height * screen.backingScaleFactor
+        )
+    }
+
     private func screenDrawWhitelistWindowIDs() -> [CGWindowID] {
         var ids: [CGWindowID] = []
         if screenDrawCanvasController.isVisible, let canvasID = screenDrawCanvasController.currentWindowID {
@@ -945,12 +1044,13 @@ final class AppCoordinator: ObservableObject {
 
     private func refreshRecordingWindowCapture(retriesRemaining: Int) async {
         guard !Task.isCancelled else { return }
-        await syncPiPWindowCaptureState()
+        let didIncludeAllRequestedWindows = await syncPiPWindowCaptureState()
 
         guard retriesRemaining > 0 else { return }
         let drawStillWaiting = isDrawOverlayVisible && screenDrawWhitelistWindowIDs().isEmpty
         let pipStillWaiting = isPiPPreviewVisible && pipController.currentWindowID == nil
-        guard drawStillWaiting || pipStillWaiting else { return }
+        let whitelistStillResolving = !didIncludeAllRequestedWindows
+        guard drawStillWaiting || pipStillWaiting || whitelistStillResolving else { return }
 
         try? await Task.sleep(nanoseconds: 180_000_000)
         guard !Task.isCancelled else { return }
@@ -1096,15 +1196,29 @@ final class AppCoordinator: ObservableObject {
     }
 
     @discardableResult
+    @MainActor
     private func requestScreenRecordingAccessIfNeeded() async -> Bool {
         if #available(macOS 11.0, *) {
             if CGPreflightScreenCaptureAccess() {
                 return true
             }
+
+            NSApp.activate(ignoringOtherApps: true)
+
             if CGRequestScreenCaptureAccess() || CGPreflightScreenCaptureAccess() {
                 return true
             }
-            return await probeScreenCaptureKitAccess()
+
+            if #available(macOS 12.3, *) {
+                if await probeScreenCaptureKitAccess() {
+                    return true
+                }
+            }
+
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                NSWorkspace.shared.open(url)
+            }
+            return false
         }
         return true
     }
@@ -1116,11 +1230,36 @@ final class AppCoordinator: ObservableObject {
                     false,
                     onScreenWindowsOnly: true
                 )
-                if !content.displays.isEmpty {
-                    return true
+                let preferredDisplayID = CGMainDisplayID()
+                guard let display = content.displays.first(where: { $0.displayID == preferredDisplayID }) ?? content.displays.first else {
+                    return false
                 }
+
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let configuration = SCStreamConfiguration()
+                configuration.width = max(display.width, 2)
+                configuration.height = max(display.height, 2)
+                configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+                configuration.queueDepth = 1
+
+                let probe = ScreenCapturePermissionProbe()
+                let stream = SCStream(filter: filter, configuration: configuration, delegate: probe)
+                try stream.addStreamOutput(
+                    probe,
+                    type: .screen,
+                    sampleHandlerQueue: probe.sampleQueue
+                )
+
+                try await stream.startCapture()
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                try? await stream.stopCapture()
+                return true
             } catch {
-                print("[Recording] ScreenCaptureKit permission probe failed: \(error.localizedDescription)")
+                let nsError = error as NSError
+                print(
+                    "[Recording] ScreenCaptureKit permission probe failed: " +
+                    "\(nsError.domain)(\(nsError.code)) \(nsError.localizedDescription)"
+                )
             }
         }
         if #available(macOS 11.0, *) {
@@ -1164,6 +1303,47 @@ final class AppCoordinator: ObservableObject {
         )
     }
 
+    private func loadPersistedRecordingQualityConfig() {
+        let defaults = UserDefaults.standard
+        let preset = RecordingQualityPreset(
+            rawValue: defaults.string(forKey: Self.recordingQualityPresetDefaultsKey) ?? ""
+        ) ?? RecordingQualityConfig.defaultConfig.preset
+        let customResolution = RecordingResolutionPreset(
+            rawValue: defaults.string(forKey: Self.recordingQualityCustomResolutionDefaultsKey) ?? ""
+        ) ?? RecordingQualityConfig.defaultConfig.customResolution
+        let customCodec = RecordingVideoCodec(
+            rawValue: defaults.string(forKey: Self.recordingQualityCustomCodecDefaultsKey) ?? ""
+        ) ?? RecordingQualityConfig.defaultConfig.customCodec
+        let fpsValue = defaults.object(forKey: Self.recordingQualityCustomFPSDefaultsKey) as? Int
+            ?? RecordingQualityConfig.defaultConfig.customFPS
+        let bitrateValue = defaults.object(forKey: Self.recordingQualityCustomBitrateDefaultsKey) as? Int
+            ?? RecordingQualityConfig.defaultConfig.customVideoBitrateMbps
+
+        recordingQualityConfig = RecordingQualityConfig(
+            preset: preset,
+            customResolution: customResolution,
+            customFPS: fpsValue,
+            customCodec: customCodec,
+            customVideoBitrateMbps: bitrateValue
+        ).normalized()
+        persistRecordingQualityConfig()
+    }
+
+    private func loadPersistedPiPRecordingQualityConfig() {
+        let defaults = UserDefaults.standard
+        let preset = PiPRecordingQualityPreset(
+            rawValue: defaults.string(forKey: Self.pipRecordingQualityPresetDefaultsKey) ?? ""
+        ) ?? PiPRecordingQualityConfig.defaultConfig.preset
+        let bitrateValue = defaults.object(forKey: Self.pipRecordingQualityCustomBitrateDefaultsKey) as? Int
+            ?? PiPRecordingQualityConfig.defaultConfig.customVideoBitrateMbps
+
+        pipRecordingQualityConfig = PiPRecordingQualityConfig(
+            preset: preset,
+            customVideoBitrateMbps: bitrateValue
+        ).normalized()
+        persistPiPRecordingQualityConfig()
+    }
+
     private func persistDrawDismissalAnimationMode() {
         UserDefaults.standard.set(
             drawDismissalAnimationMode.rawValue,
@@ -1182,6 +1362,30 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.set(
             isDrawAutoCaptureOnCloseEnabled,
             forKey: Self.drawAutoCaptureOnCloseEnabledDefaultsKey
+        )
+    }
+
+    private func persistRecordingQualityConfig() {
+        let config = recordingQualityConfig.normalized()
+        UserDefaults.standard.set(config.preset.rawValue, forKey: Self.recordingQualityPresetDefaultsKey)
+        UserDefaults.standard.set(
+            config.customResolution.rawValue,
+            forKey: Self.recordingQualityCustomResolutionDefaultsKey
+        )
+        UserDefaults.standard.set(config.customFPS, forKey: Self.recordingQualityCustomFPSDefaultsKey)
+        UserDefaults.standard.set(config.customCodec.rawValue, forKey: Self.recordingQualityCustomCodecDefaultsKey)
+        UserDefaults.standard.set(
+            config.customVideoBitrateMbps,
+            forKey: Self.recordingQualityCustomBitrateDefaultsKey
+        )
+    }
+
+    private func persistPiPRecordingQualityConfig() {
+        let config = pipRecordingQualityConfig.normalized()
+        UserDefaults.standard.set(config.preset.rawValue, forKey: Self.pipRecordingQualityPresetDefaultsKey)
+        UserDefaults.standard.set(
+            config.customVideoBitrateMbps,
+            forKey: Self.pipRecordingQualityCustomBitrateDefaultsKey
         )
     }
 
@@ -1231,5 +1435,19 @@ final class AppCoordinator: ObservableObject {
         case .en:
             return "en.html"
         }
+    }
+}
+
+private final class ScreenCapturePermissionProbe: NSObject, SCStreamOutput, SCStreamDelegate {
+    let sampleQueue = DispatchQueue(label: "DemoFlow.screen-capture.permission-probe")
+
+    nonisolated func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of outputType: SCStreamOutputType
+    ) {
+        _ = stream
+        _ = sampleBuffer
+        _ = outputType
     }
 }

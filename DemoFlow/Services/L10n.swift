@@ -38,7 +38,13 @@ enum L10n {
 
     static func f(_ key: String, _ args: [CVarArg]) -> String {
         let format = tr(key)
-        return String(format: format, locale: activeLanguage.locale, arguments: args)
+        return withVaList(args) { pointer in
+            NSString(
+                format: format,
+                locale: activeLanguage.locale as NSLocale,
+                arguments: pointer
+            ) as String
+        }
     }
 
     static func text(_ key: String) -> Text {
@@ -50,4 +56,3 @@ enum L10n {
         return Bundle(path: path)
     }
 }
-

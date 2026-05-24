@@ -36,9 +36,8 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
     @Published private(set) var lastVideoIncludedSystemDefault = false
 
     private let session = AVCaptureSession()
-    private let videoDataOutput = AVCaptureVideoDataOutput()
-    private let audioDataOutput = AVCaptureAudioDataOutput()
-    private let movieOutput = AVCaptureMovieFileOutput()
+    nonisolated(unsafe) private let videoDataOutput = AVCaptureVideoDataOutput()
+    nonisolated(unsafe) private let audioDataOutput = AVCaptureAudioDataOutput()
     private var previewAudioOutput: AVCaptureAudioPreviewOutput?
     private let isPreviewAudioPlaybackEnabled = ProcessInfo.processInfo.environment["PJTOOL_ENABLE_PIP_AUDIO_PREVIEW"] == "1"
 
@@ -47,8 +46,11 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
     private let audioSampleQueue = DispatchQueue(label: "demoflow.pip.preview.audio.sample")
     private var observers: [NSObjectProtocol] = []
     private var startContinuation: CheckedContinuation<Void, Error>?
-    private var stopContinuation: CheckedContinuation<URL, Error>?
     private var recordingSnapshot: SessionSnapshot?
+    private let recordingWriterLock = NSLock()
+    nonisolated(unsafe) private var recordingWriter: PiPRecordingFileWriter?
+    private var recordingOutputURL: URL?
+    private var recordingFailure: Error?
 
     private let floorLevel: Double = 0.02
     private let decayFactor: Double = 0.84
@@ -59,6 +61,7 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
 
     var previewSession: AVCaptureSession { session }
     var onProcessingSample: ((CameraProcessingSample) -> Void)?
+    var onRecordingFailure: ((Error) -> Void)?
 
     init(
         permissionService: CameraPermissionService = .shared,
@@ -75,6 +78,7 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
     }
 
     deinit {
+        takeRecordingWriter()?.cancelWriting()
         observers.forEach(NotificationCenter.default.removeObserver)
         sessionQueue.sync {
             if self.session.isRunning {
@@ -234,7 +238,8 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
 
     func startRecording(
         to url: URL,
-        snapshot: SessionSnapshot
+        snapshot: SessionSnapshot,
+        qualityConfig: PiPRecordingQualityConfig
     ) async throws {
         guard authorizationStatus == .authorized else {
             throw RecordingError.notAuthorized
@@ -256,56 +261,73 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
             }
         }
 
+        let writer = try makeRecordingWriter(
+            outputURL: url,
+            snapshot: snapshot,
+            qualityConfig: qualityConfig.normalized()
+        )
         recordingSnapshot = snapshot
+        recordingFailure = nil
+        recordingOutputURL = url
+        storeRecordingWriter(writer)
         isRecording = true
         isPreviewing = true
-        selectSource(withID: snapshot.videoDeviceID)
-        if let audioDeviceID = snapshot.audioDeviceID {
-            selectAudioSource(withID: audioDeviceID)
-        }
         rebuildPreviewSession(forceRestartRunningSession: false)
 
         let session = self.session
-        let movieOutput = self.movieOutput
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            startContinuation = continuation
-            sessionQueue.async {
-                if !session.isRunning {
-                    session.startRunning()
-                }
-
-                let hasVideoConnection = movieOutput.connection(with: .video)?.isEnabled == true
-                guard hasVideoConnection else {
-                    DispatchQueue.main.async {
-                        self.isRecording = false
-                        self.recordingSnapshot = nil
-                        self.infoMessage = L10n.tr("legacy.key_146")
-                        self.startContinuation?.resume(throwing: RecordingError.noActiveConnection)
-                        self.startContinuation = nil
-                    }
-                    return
-                }
-
-                movieOutput.startRecording(to: url, recordingDelegate: self)
+        let videoDataOutput = self.videoDataOutput
+        sessionQueue.async {
+            if !session.isRunning {
+                session.startRunning()
             }
+
+            let hasVideoConnection = videoDataOutput.connection(with: .video)?.isEnabled == true
+            guard hasVideoConnection else {
+                DispatchQueue.main.async {
+                    self.cancelPendingStartContinuation(with: RecordingError.noActiveConnection)
+                }
+                return
+            }
+        }
+
+        do {
+            try await waitForRecordingStart()
+        } catch {
+            cleanupFailedRecordingStart(with: error)
+            throw error
         }
     }
 
     func stopRecording() async throws -> URL {
+        if let recordingFailure {
+            self.recordingFailure = nil
+            throw recordingFailure
+        }
         guard isRecording else {
             throw RecordingError.notRecording
         }
-        guard movieOutput.isRecording else {
+
+        let outputURL = recordingOutputURL
+        let writer = takeRecordingWriter()
+        isRecording = false
+        recordingSnapshot = nil
+        recordingOutputURL = nil
+        if isPreviewing {
+            rebuildPreviewSession(forceRestartRunningSession: false)
+        }
+
+        guard let writer, let outputURL else {
             throw RecordingError.notRecording
         }
 
-        let movieOutput = self.movieOutput
-        sessionQueue.async {
-            movieOutput.stopRecording()
-        }
-
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
-            stopContinuation = continuation
+        do {
+            try await writer.finishWriting()
+            return outputURL
+        } catch {
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+            throw error
         }
     }
 
@@ -405,7 +427,6 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
         let session = self.session
         let videoDataOutput = self.videoDataOutput
         let audioDataOutput = self.audioDataOutput
-        let movieOutput = self.movieOutput
         let videoSampleQueue = self.videoSampleQueue
         let audioSampleQueue = self.audioSampleQueue
         let previewAudioConfig = self.previewAudioConfig
@@ -462,10 +483,6 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
                     }
                 }
 
-                if self.isRecording, session.canAddOutput(movieOutput) {
-                    session.addOutput(movieOutput)
-                }
-
                 session.commitConfiguration()
 
                 if (self.isPreviewing || self.isRecording), !session.isRunning {
@@ -479,6 +496,162 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func waitForRecordingStart(timeoutNanoseconds: UInt64 = 4_000_000_000) async throws {
+        if currentRecordingWriter()?.hasStarted == true {
+            return
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor [weak self] in
+                guard let self else { return }
+                if self.currentRecordingWriter()?.hasStarted == true {
+                    return
+                }
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    self.startContinuation = continuation
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw RecordingError.startTimedOut
+            }
+
+            let result: Void? = try await group.next()
+            group.cancelAll()
+            if let result {
+                return result
+            }
+        }
+    }
+
+    private func resumeRecordingStartContinuation(with result: Result<Void, Error>) {
+        guard let continuation = startContinuation else { return }
+        startContinuation = nil
+        continuation.resume(with: result)
+    }
+
+    private func cancelPendingStartContinuation(with error: Error) {
+        resumeRecordingStartContinuation(with: .failure(error))
+    }
+
+    private func cleanupFailedRecordingStart(with error: Error) {
+        takeRecordingWriter()?.cancelWriting()
+        if let recordingOutputURL,
+           FileManager.default.fileExists(atPath: recordingOutputURL.path) {
+            try? FileManager.default.removeItem(at: recordingOutputURL)
+        }
+        recordingFailure = error
+        recordingOutputURL = nil
+        recordingSnapshot = nil
+        isRecording = false
+        if isPreviewing {
+            rebuildPreviewSession(forceRestartRunningSession: false)
+        }
+    }
+
+    private func handleRecordingWriterEvent(_ event: PiPRecordingFileWriter.Event) {
+        switch event {
+        case .started:
+            resumeRecordingStartContinuation(with: .success(()))
+        case let .failed(error):
+            let isStarting = startContinuation != nil
+            cancelPendingStartContinuation(with: error)
+            handleRecordingFailure(error, notifyRuntime: !isStarting)
+        }
+    }
+
+    private func handleRecordingFailure(_ error: Error, notifyRuntime: Bool) {
+        takeRecordingWriter()?.cancelWriting()
+        if let recordingOutputURL,
+           FileManager.default.fileExists(atPath: recordingOutputURL.path) {
+            try? FileManager.default.removeItem(at: recordingOutputURL)
+        }
+        recordingFailure = error
+        recordingOutputURL = nil
+        recordingSnapshot = nil
+        isRecording = false
+        if isPreviewing {
+            rebuildPreviewSession(forceRestartRunningSession: false)
+        }
+        infoMessage = error.localizedDescription
+        if notifyRuntime {
+            onRecordingFailure?(error)
+        }
+    }
+
+    private func makeRecordingWriter(
+        outputURL: URL,
+        snapshot: SessionSnapshot,
+        qualityConfig: PiPRecordingQualityConfig
+    ) throws -> PiPRecordingFileWriter {
+        try PiPRecordingFileWriter(
+            outputURL: outputURL,
+            captureSize: try resolvedRecordingCaptureSize(for: snapshot.videoDeviceID),
+            videoBitrateMbps: qualityConfig.resolvedProfile.videoBitrateMbps,
+            audioSettings: makeRecordingAudioSettings(for: snapshot.audioDeviceID)
+        )
+    }
+
+    private func resolvedRecordingCaptureSize(for videoDeviceID: String) throws -> CGSize {
+        let snapshot = deviceCatalog.fetchVideoSnapshot(includeOffline: true)
+        guard let device = snapshot.devices
+            .first(where: { $0.id == videoDeviceID })
+            .flatMap(Self.makeDevice(from:)) else {
+            throw RecordingError.noCamera
+        }
+        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        return normalizedRecordingSize(
+            CGSize(width: Int(dimensions.width), height: Int(dimensions.height))
+        )
+    }
+
+    private func normalizedRecordingSize(_ size: CGSize) -> CGSize {
+        let width = max(2, Int(size.width.rounded(.down)))
+        let height = max(2, Int(size.height.rounded(.down)))
+        let evenWidth = width.isMultiple(of: 2) ? width : width - 1
+        let evenHeight = height.isMultiple(of: 2) ? height : height - 1
+        return CGSize(width: max(2, evenWidth), height: max(2, evenHeight))
+    }
+
+    private func makeRecordingAudioSettings(for audioDeviceID: String?) -> [String: Any]? {
+        guard let audioDeviceID, !audioDeviceID.isEmpty else {
+            return nil
+        }
+
+        let fallbackSampleRate = 48_000.0
+        let fallbackChannels = 1
+        let device = CameraDeviceLookup.audioDevice(uniqueID: audioDeviceID)
+        let formatDescription = device?.activeFormat.formatDescription
+        let asbd = formatDescription.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
+
+        return [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: asbd?.mSampleRate ?? fallbackSampleRate,
+            AVNumberOfChannelsKey: max(Int(asbd?.mChannelsPerFrame ?? UInt32(fallbackChannels)), 1),
+            AVEncoderBitRateKey: 128_000
+        ]
+    }
+
+    nonisolated private func currentRecordingWriter() -> PiPRecordingFileWriter? {
+        recordingWriterLock.lock()
+        defer { recordingWriterLock.unlock() }
+        return recordingWriter
+    }
+
+    nonisolated private func storeRecordingWriter(_ writer: PiPRecordingFileWriter) {
+        recordingWriterLock.lock()
+        recordingWriter = writer
+        recordingWriterLock.unlock()
+    }
+
+    nonisolated private func takeRecordingWriter() -> PiPRecordingFileWriter? {
+        recordingWriterLock.lock()
+        defer { recordingWriterLock.unlock() }
+        let writer = recordingWriter
+        recordingWriter = nil
+        return writer
     }
 
     private func effectiveVideoSourceID() -> String? {
@@ -570,64 +743,43 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
         return sources.first
     }
 
-    private static func makeDevice(from source: CameraSource) -> AVCaptureDevice? {
+    nonisolated private static func makeDevice(from source: CameraSource) -> AVCaptureDevice? {
         CameraDeviceLookup.videoDevice(uniqueID: source.id)
     }
 
-    private static func makeAudioDevice(from source: AudioInputSource) -> AVCaptureDevice? {
+    nonisolated private static func makeAudioDevice(from source: AudioInputSource) -> AVCaptureDevice? {
         CameraDeviceLookup.audioDevice(uniqueID: source.id)
     }
 }
 
-extension PiPPreviewRuntime: AVCaptureFileOutputRecordingDelegate {
-    nonisolated func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didStartRecordingTo fileURL: URL,
-        from connections: [AVCaptureConnection]
-    ) {
-        Task { @MainActor [weak self] in
-            self?.startContinuation?.resume(returning: ())
-            self?.startContinuation = nil
-        }
-    }
-
-    nonisolated func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didFinishRecordingTo outputFileURL: URL,
-        from connections: [AVCaptureConnection],
-        error: Error?
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.isRecording = false
-            self.recordingSnapshot = nil
-            self.startContinuation = nil
-            if self.isPreviewing {
-                self.rebuildPreviewSession(forceRestartRunningSession: false)
-            }
-
-            if let error {
-                self.stopContinuation?.resume(throwing: error)
-            } else {
-                self.stopContinuation?.resume(returning: outputFileURL)
-            }
-            self.stopContinuation = nil
-        }
-    }
+private struct PiPSendableSampleBuffer: @unchecked Sendable {
+    nonisolated(unsafe) let value: CMSampleBuffer
 }
 
 extension PiPPreviewRuntime: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
-    private struct SendableSampleBuffer: @unchecked Sendable {
-        let value: CMSampleBuffer
-    }
-
     nonisolated func captureOutput(
         _ output: AVCaptureOutput,
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else {
+            return
+        }
         let incomingLevel = CameraAudioLevelExtractor.extract(from: sampleBuffer)
-        let sendableSample = SendableSampleBuffer(value: sampleBuffer)
+        let sendableSample = PiPSendableSampleBuffer(value: sampleBuffer)
+        if output === videoDataOutput {
+            currentRecordingWriter()?.appendVideoSample(sendableSample.value) { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.handleRecordingWriterEvent(event)
+                }
+            }
+        } else if output === audioDataOutput {
+            currentRecordingWriter()?.appendAudioSample(sendableSample.value) { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.handleRecordingWriterEvent(event)
+                }
+            }
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if output === self.videoDataOutput {
@@ -654,8 +806,215 @@ extension PiPPreviewRuntime: AVCaptureVideoDataOutputSampleBufferDelegate, AVCap
     }
 }
 
+private final class PiPRecordingFileWriter {
+    enum Event {
+        case started
+        case failed(Error)
+    }
+
+    enum WriterError: LocalizedError {
+        case outputCreationFailed(String)
+        case addVideoInputFailed
+        case addAudioInputFailed
+        case startWritingFailed
+        case videoAppendFailed
+        case audioAppendFailed
+        case noVideoFrames
+        case finishWritingFailed
+        case cancelled
+
+        var errorDescription: String? {
+            switch self {
+            case let .outputCreationFailed(message):
+                return message
+            case .addVideoInputFailed:
+                return L10n.tr("recording.quality.error.video_input")
+            case .addAudioInputFailed:
+                return L10n.tr("recording.quality.error.audio_input")
+            case .startWritingFailed:
+                return L10n.tr("recording.quality.error.start_writer")
+            case .videoAppendFailed:
+                return L10n.tr("recording.quality.error.video_append")
+            case .audioAppendFailed:
+                return L10n.tr("recording.quality.error.audio_append")
+            case .noVideoFrames:
+                return L10n.tr("recording.quality.error.no_video_frames")
+            case .finishWritingFailed:
+                return L10n.tr("recording.quality.error.finish_writer")
+            case .cancelled:
+                return L10n.tr("recording.quality.error.writer_cancelled")
+            }
+        }
+    }
+
+    private let queue = DispatchQueue(label: "DemoFlow.pip-recording.file-writer")
+    nonisolated(unsafe) private let assetWriter: AVAssetWriter
+    nonisolated(unsafe) private let videoInput: AVAssetWriterInput
+    nonisolated(unsafe) private let audioInput: AVAssetWriterInput?
+    nonisolated(unsafe) private var sessionStartTime: CMTime?
+    nonisolated(unsafe) private var didEmitStartedEvent = false
+    nonisolated(unsafe) private var didEmitFailureEvent = false
+    nonisolated(unsafe) private var isFinishing = false
+
+    var hasStarted: Bool {
+        queue.sync {
+            sessionStartTime != nil
+        }
+    }
+
+    init(
+        outputURL: URL,
+        captureSize: CGSize,
+        videoBitrateMbps: Int,
+        audioSettings: [String: Any]?
+    ) throws {
+        do {
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                try FileManager.default.removeItem(at: outputURL)
+            }
+            assetWriter = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        } catch {
+            throw WriterError.outputCreationFailed(error.localizedDescription)
+        }
+
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(captureSize.width),
+            AVVideoHeightKey: Int(captureSize.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: videoBitrateMbps * 1_000_000
+            ]
+        ]
+        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = true
+        guard assetWriter.canAdd(videoInput) else {
+            throw WriterError.addVideoInputFailed
+        }
+        assetWriter.add(videoInput)
+
+        if let audioSettings {
+            let nextAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            nextAudioInput.expectsMediaDataInRealTime = true
+            guard assetWriter.canAdd(nextAudioInput) else {
+                throw WriterError.addAudioInputFailed
+            }
+            assetWriter.add(nextAudioInput)
+            audioInput = nextAudioInput
+        } else {
+            audioInput = nil
+        }
+    }
+
+    nonisolated func appendVideoSample(
+        _ sampleBuffer: CMSampleBuffer,
+        eventHandler: @escaping (Event) -> Void
+    ) {
+        let boxedSample = PiPSendableSampleBuffer(value: sampleBuffer)
+        queue.async {
+            guard !self.isFinishing else { return }
+            if self.assetWriter.status == .failed {
+                self.emitFailure(self.assetWriter.error ?? WriterError.finishWritingFailed, eventHandler: eventHandler)
+                return
+            }
+            guard CMSampleBufferGetImageBuffer(boxedSample.value) != nil else { return }
+            let presentationTime = CMSampleBufferGetPresentationTimeStamp(boxedSample.value)
+            if self.sessionStartTime == nil {
+                guard self.assetWriter.startWriting() else {
+                    self.emitFailure(self.assetWriter.error ?? WriterError.startWritingFailed, eventHandler: eventHandler)
+                    return
+                }
+                self.assetWriter.startSession(atSourceTime: presentationTime)
+                self.sessionStartTime = presentationTime
+            }
+            guard self.videoInput.isReadyForMoreMediaData else { return }
+            guard self.videoInput.append(boxedSample.value) else {
+                self.emitFailure(self.assetWriter.error ?? WriterError.videoAppendFailed, eventHandler: eventHandler)
+                return
+            }
+            if !self.didEmitStartedEvent {
+                self.didEmitStartedEvent = true
+                eventHandler(.started)
+            }
+        }
+    }
+
+    nonisolated func appendAudioSample(
+        _ sampleBuffer: CMSampleBuffer,
+        eventHandler: @escaping (Event) -> Void
+    ) {
+        let boxedSample = PiPSendableSampleBuffer(value: sampleBuffer)
+        queue.async {
+            guard !self.isFinishing else { return }
+            guard let audioInput = self.audioInput, let sessionStartTime = self.sessionStartTime else { return }
+            if self.assetWriter.status == .failed {
+                self.emitFailure(self.assetWriter.error ?? WriterError.finishWritingFailed, eventHandler: eventHandler)
+                return
+            }
+            let presentationTime = CMSampleBufferGetPresentationTimeStamp(boxedSample.value)
+            guard CMTimeCompare(presentationTime, sessionStartTime) >= 0 else { return }
+            guard audioInput.isReadyForMoreMediaData else { return }
+            guard audioInput.append(boxedSample.value) else {
+                self.emitFailure(self.assetWriter.error ?? WriterError.audioAppendFailed, eventHandler: eventHandler)
+                return
+            }
+        }
+    }
+
+    nonisolated func finishWriting() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                self.isFinishing = true
+                self.videoInput.markAsFinished()
+                self.audioInput?.markAsFinished()
+
+                switch self.assetWriter.status {
+                case .unknown:
+                    self.assetWriter.cancelWriting()
+                    continuation.resume(throwing: WriterError.noVideoFrames)
+                case .writing:
+                    self.assetWriter.finishWriting {
+                        switch self.assetWriter.status {
+                        case .completed:
+                            continuation.resume(returning: ())
+                        case .cancelled:
+                            continuation.resume(throwing: WriterError.cancelled)
+                        case .failed:
+                            continuation.resume(throwing: self.assetWriter.error ?? WriterError.finishWritingFailed)
+                        default:
+                            continuation.resume(throwing: WriterError.finishWritingFailed)
+                        }
+                    }
+                case .completed:
+                    continuation.resume(returning: ())
+                case .cancelled:
+                    continuation.resume(throwing: WriterError.cancelled)
+                case .failed:
+                    continuation.resume(throwing: self.assetWriter.error ?? WriterError.finishWritingFailed)
+                @unknown default:
+                    continuation.resume(throwing: WriterError.finishWritingFailed)
+                }
+            }
+        }
+    }
+
+    nonisolated func cancelWriting() {
+        queue.async {
+            self.isFinishing = true
+            self.videoInput.markAsFinished()
+            self.audioInput?.markAsFinished()
+            self.assetWriter.cancelWriting()
+        }
+    }
+
+    nonisolated private func emitFailure(_ error: Error, eventHandler: @escaping (Event) -> Void) {
+        guard !didEmitFailureEvent else { return }
+        didEmitFailureEvent = true
+        eventHandler(.failed(error))
+    }
+}
+
 private enum CameraDeviceLookup {
-    static func videoDevice(uniqueID: String) -> AVCaptureDevice? {
+    nonisolated static func videoDevice(uniqueID: String) -> AVCaptureDevice? {
         var all = AVCaptureDevice.DiscoverySession(
             deviceTypes: [
                 .builtInWideAngleCamera,
@@ -673,7 +1032,7 @@ private enum CameraDeviceLookup {
         return deduped(all).first(where: { $0.uniqueID == uniqueID })
     }
 
-    static func audioDevice(uniqueID: String) -> AVCaptureDevice? {
+    nonisolated static func audioDevice(uniqueID: String) -> AVCaptureDevice? {
         var all = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.microphone, .external],
             mediaType: .audio,
@@ -686,7 +1045,7 @@ private enum CameraDeviceLookup {
         return deduped(all).first(where: { $0.uniqueID == uniqueID })
     }
 
-    private static func deduped(_ devices: [AVCaptureDevice]) -> [AVCaptureDevice] {
+    nonisolated private static func deduped(_ devices: [AVCaptureDevice]) -> [AVCaptureDevice] {
         Array(
             Dictionary(
                 devices.map { ($0.uniqueID, $0) },
@@ -718,6 +1077,7 @@ extension PiPPreviewRuntime {
         case alreadyRecording
         case noCamera
         case noActiveConnection
+        case startTimedOut
         case notRecording
 
         var errorDescription: String? {
@@ -730,6 +1090,8 @@ extension PiPPreviewRuntime {
                 return L10n.tr("legacy.key_162")
             case .noActiveConnection:
                 return L10n.tr("legacy.key_145")
+            case .startTimedOut:
+                return L10n.tr("pip.film.error.start_timeout")
             case .notRecording:
                 return L10n.tr("legacy.key_135")
             }

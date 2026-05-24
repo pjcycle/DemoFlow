@@ -9,10 +9,6 @@ import AVFoundation
 import Combine
 import Foundation
 
-private struct PiPFilmExporterBox: @unchecked Sendable {
-    let exporter: AVAssetExportSession
-}
-
 enum PiPFilmRecorderServiceError: LocalizedError {
     case invalidState
     case cameraPermissionDenied
@@ -20,9 +16,6 @@ enum PiPFilmRecorderServiceError: LocalizedError {
     case missingCameraSelection
     case missingMicrophoneSelection
     case notRecording
-    case exportSessionInitFailed
-    case exportFailed
-    case exportCancelled
     case outputMissing
     case outputEmpty
     case fileNameExhausted
@@ -43,12 +36,6 @@ enum PiPFilmRecorderServiceError: LocalizedError {
             return L10n.tr("pip.film.error.missing_microphone")
         case .notRecording:
             return L10n.tr("pip.film.error.not_recording")
-        case .exportSessionInitFailed:
-            return L10n.tr("pip.film.error.export_session")
-        case .exportFailed:
-            return L10n.tr("pip.film.error.export_failed")
-        case .exportCancelled:
-            return L10n.tr("pip.film.error.export_cancelled")
         case .outputMissing:
             return L10n.tr("pip.film.error.output_missing")
         case .outputEmpty:
@@ -69,12 +56,12 @@ final class PiPFilmRecorderService: ObservableObject {
     @Published private(set) var lastOutputURL: URL?
 
     private let fileManager = FileManager.default
-    private var pendingRawRecordingURL: URL?
     private var pendingFinalOutputURL: URL?
 
     func startRecording(
         with runtime: PiPPreviewRuntime,
-        outputDirectory: URL
+        outputDirectory: URL,
+        qualityConfig: PiPRecordingQualityConfig
     ) async throws {
         guard !state.isBusy, !state.isRecording else {
             throw PiPFilmRecorderServiceError.invalidState
@@ -93,9 +80,7 @@ final class PiPFilmRecorderService: ObservableObject {
         }
 
         state = .preparing
-        let rawRecordingURL = try makeRawRecordingURL()
         let finalOutputURL = try makeFinalOutputURL(in: outputDirectory)
-        pendingRawRecordingURL = rawRecordingURL
         pendingFinalOutputURL = finalOutputURL
 
         runtime.selectSource(withID: snapshot.videoDeviceID)
@@ -106,12 +91,13 @@ final class PiPFilmRecorderService: ObservableObject {
 
         do {
             try await runtime.startRecording(
-                to: rawRecordingURL,
-                snapshot: snapshot
+                to: finalOutputURL,
+                snapshot: snapshot,
+                qualityConfig: qualityConfig
             )
             state = .recording
         } catch {
-            cleanupPendingFiles(removeFinalOutputIfExists: true)
+            cleanupPendingFiles(removeOutputIfExists: true)
             state = .failed(readableMessage(for: error))
             throw PiPFilmRecorderServiceError.runtimeStartFailed(readableMessage(for: error))
         }
@@ -125,23 +111,15 @@ final class PiPFilmRecorderService: ObservableObject {
         state = .stopping
 
         do {
-            let rawURL = try await runtime.stopRecording()
-            let finalURL: URL
-            if let pendingFinalOutputURL {
-                finalURL = pendingFinalOutputURL
-            } else {
-                finalURL = try makeFinalOutputURL(
-                    in: DemoFlowOutputDirectoryPolicy.preparePiPRecordingsDirectory()
-                )
-            }
-            try await exportToMP4(from: rawURL, to: finalURL)
+            let outputURL = try await runtime.stopRecording()
+            let finalURL = pendingFinalOutputURL ?? outputURL
             try validateOutput(finalURL)
             lastOutputURL = finalURL
-            cleanupPendingFiles(removeFinalOutputIfExists: false)
+            cleanupPendingFiles(removeOutputIfExists: false)
             state = .idle
             return finalURL
         } catch {
-            cleanupPendingFiles(removeFinalOutputIfExists: true)
+            cleanupPendingFiles(removeOutputIfExists: true)
             let message = readableMessage(for: error)
             state = .failed(message)
             throw PiPFilmRecorderServiceError.runtimeStopFailed(message)
@@ -154,17 +132,10 @@ final class PiPFilmRecorderService: ObservableObject {
         }
     }
 
-    private func makeRawRecordingURL() throws -> URL {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("DemoFlow", isDirectory: true)
-            .appendingPathComponent("pip-film", isDirectory: true)
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
-        let stamp = formatter.string(from: Date())
-        return root.appendingPathComponent("pip_raw_\(stamp).mov")
+    func handleRuntimeFailure(_ error: Error) {
+        guard state.isRecording || state.isBusy else { return }
+        cleanupPendingFiles(removeOutputIfExists: true)
+        state = .failed(readableMessage(for: error))
     }
 
     private func makeFinalOutputURL(in outputDirectory: URL) throws -> URL {
@@ -191,47 +162,6 @@ final class PiPFilmRecorderService: ObservableObject {
         throw PiPFilmRecorderServiceError.fileNameExhausted
     }
 
-    private func exportToMP4(from inputURL: URL, to outputURL: URL) async throws {
-        if fileManager.fileExists(atPath: outputURL.path) {
-            try fileManager.removeItem(at: outputURL)
-        }
-
-        let asset = AVURLAsset(url: inputURL)
-        guard let exporter = AVAssetExportSession(
-            asset: asset,
-            presetName: AVAssetExportPresetHighestQuality
-        ) else {
-            throw PiPFilmRecorderServiceError.exportSessionInitFailed
-        }
-
-        if #available(macOS 15.0, *) {
-            try await exporter.export(to: outputURL, as: .mp4)
-        } else {
-            let exporterBox = PiPFilmExporterBox(exporter: exporter)
-            exporter.outputURL = outputURL
-            exporter.outputFileType = .mp4
-            exporter.shouldOptimizeForNetworkUse = true
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                exporterBox.exporter.exportAsynchronously {
-                    switch exporterBox.exporter.status {
-                    case .completed:
-                        continuation.resume(returning: ())
-                    case .failed:
-                        continuation.resume(throwing: exporterBox.exporter.error ?? PiPFilmRecorderServiceError.exportFailed)
-                    case .cancelled:
-                        continuation.resume(throwing: PiPFilmRecorderServiceError.exportCancelled)
-                    default:
-                        continuation.resume(throwing: PiPFilmRecorderServiceError.exportFailed)
-                    }
-                }
-            }
-        }
-
-        if fileManager.fileExists(atPath: inputURL.path) {
-            try? fileManager.removeItem(at: inputURL)
-        }
-    }
-
     private func validateOutput(_ outputURL: URL) throws {
         guard fileManager.fileExists(atPath: outputURL.path) else {
             throw PiPFilmRecorderServiceError.outputMissing
@@ -243,19 +173,13 @@ final class PiPFilmRecorderService: ObservableObject {
         }
     }
 
-    private func cleanupPendingFiles(removeFinalOutputIfExists: Bool) {
-        if let pendingRawRecordingURL,
-           fileManager.fileExists(atPath: pendingRawRecordingURL.path) {
-            try? fileManager.removeItem(at: pendingRawRecordingURL)
-        }
-
-        if removeFinalOutputIfExists,
+    private func cleanupPendingFiles(removeOutputIfExists: Bool) {
+        if removeOutputIfExists,
            let pendingFinalOutputURL,
            fileManager.fileExists(atPath: pendingFinalOutputURL.path) {
             try? fileManager.removeItem(at: pendingFinalOutputURL)
         }
 
-        pendingRawRecordingURL = nil
         pendingFinalOutputURL = nil
     }
 

@@ -12,6 +12,7 @@ struct RecordingRequest {
     let microphoneDeviceID: String?
     let cameraDeviceID: String?
     let cameraAudioDeviceID: String?
+    let recordingQuality: RecordingQualityConfig
     let pipWindowID: CGWindowID?
     let screenDrawWindowIDs: [CGWindowID]
     let pipLayout: PiPLayoutState

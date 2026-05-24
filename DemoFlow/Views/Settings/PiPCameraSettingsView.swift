@@ -13,6 +13,8 @@ struct PiPCameraSettingsView: View {
     @ObservedObject var appCoordinator: AppCoordinator
     @ObservedObject private var pipRuntime: PiPPreviewRuntime
     @State private var showingDiagnostics = false
+    @State private var customPiPBitrateText = "\(PiPRecordingQualityConfig.defaultConfig.customVideoBitrateMbps)"
+    @State private var customPiPBitrateRangeMessage: String?
 
     init(appCoordinator: AppCoordinator) {
         self._appCoordinator = ObservedObject(wrappedValue: appCoordinator)
@@ -23,6 +25,7 @@ struct PiPCameraSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             heroBanner
             previewCard
+            pipQualityCard
             deviceCard
             windowCard
             audioMonitorCard
@@ -36,6 +39,12 @@ struct PiPCameraSettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            syncCustomPiPBitrateText()
+        }
+        .onChange(of: appCoordinator.pipRecordingQualityConfig.customVideoBitrateMbps) { _, _ in
+            syncCustomPiPBitrateText()
+        }
     }
 
     private var heroBanner: some View {
@@ -227,6 +236,40 @@ struct PiPCameraSettingsView: View {
         }
     }
 
+    private var pipQualityCard: some View {
+        card(
+            title: L10n.tr("pip.quality.card.title"),
+            subtitle: L10n.tr("pip.quality.card.subtitle"),
+            icon: "dial.medium"
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(spacing: 8) {
+                    ForEach(displayedPiPQualityPresets) { preset in
+                        pipQualityPresetButton(for: preset)
+                    }
+                }
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Label(pipResolvedQualitySummary, systemImage: "film")
+                    Label(
+                        L10n.f("pip.quality.estimate.ten_minutes", formattedSelectedPiPQualityEstimatedSize),
+                        systemImage: "externaldrive"
+                    )
+                    Spacer(minLength: 0)
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if appCoordinator.pipRecordingQualityConfig.preset == .custom {
+                    pipCustomBitrateControls
+                }
+            }
+        }
+    }
+
     private var windowCard: some View {
         card(title: L10n.tr("legacy.key_187"), icon: "rectangle.on.rectangle") {
             Toggle(L10n.tr("legacy.key_212"), isOn: Binding(
@@ -356,6 +399,45 @@ struct PiPCameraSettingsView: View {
         }
     }
 
+    private var pipCustomBitrateControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+
+            compactControlRow(
+                L10n.tr("pip.quality.custom.bitrate"),
+                contentWidth: customExpandedControlWidth
+            ) {
+                HStack(spacing: 12) {
+                    HStack(spacing: 8) {
+                        TextField("", text: $customPiPBitrateText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 72)
+                            .disabled(isPiPQualityEditingDisabled)
+                            .onChange(of: customPiPBitrateText) { _, _ in
+                                commitCustomPiPBitrateText()
+                            }
+
+                        Text(L10n.tr("pip.quality.unit.mbps"))
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.secondary)
+
+                        Stepper(
+                            value: customPiPBitrateValueBinding,
+                            in: PiPRecordingQualityConfig.minimumBitrateMbps...PiPRecordingQualityConfig.maximumBitrateMbps
+                        ) {
+                            EmptyView()
+                        }
+                        .labelsHidden()
+                        .disabled(isPiPQualityEditingDisabled)
+                    }
+
+                    secondarySupportingText(customPiPInfoLine, lineLimit: 1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
     private var cameraSelectionBinding: Binding<String> {
         Binding(
             get: { pipRuntime.selectedSourceID ?? pipRuntime.sources.first?.id ?? "" },
@@ -477,6 +559,48 @@ struct PiPCameraSettingsView: View {
         pipRuntime.microphoneAuthorizationStatus == .authorized
     }
 
+    private var isPiPQualityEditingDisabled: Bool {
+        appCoordinator.pipFilmState.isBusy || appCoordinator.pipFilmState.isRecording
+    }
+
+    private var displayedPiPQualityPresets: [PiPRecordingQualityPreset] {
+        [.balanced, .small, .highQuality, .proEditing, .custom]
+    }
+
+    private var pipResolvedQualitySummary: String {
+        let profile = appCoordinator.pipRecordingQualityConfig.resolvedProfile
+        return L10n.f("pip.quality.summary", profile.videoBitrateMbps, profile.audioBitrateKbps)
+    }
+
+    private var formattedSelectedPiPQualityEstimatedSize: String {
+        formattedPiPQualityEstimatedSize(appCoordinator.pipRecordingQualityEstimatedTenMinuteSizeMB)
+    }
+
+    private var customPiPInfoLine: String {
+        var segments = [
+            L10n.f("pip.quality.estimate.ten_minutes", formattedSelectedPiPQualityEstimatedSize),
+            L10n.tr("pip.quality.custom.bitrate.range_hint")
+        ]
+
+        if let customPiPBitrateRangeMessage, !customPiPBitrateRangeMessage.isEmpty {
+            segments.append(customPiPBitrateRangeMessage)
+        }
+
+        if let warningMessage = appCoordinator.pipRecordingQualityWarningMessage, !warningMessage.isEmpty {
+            segments.append(warningMessage)
+        }
+
+        return segments.joined(separator: "  ")
+    }
+
+    private var customControlLabelWidth: CGFloat { 84 }
+
+    private var customControlRowSpacing: CGFloat { 8 }
+
+    private var customPrimaryControlWidth: CGFloat { 220 }
+
+    private var customExpandedControlWidth: CGFloat { 540 }
+
     private var cameraEmptyStateText: String {
         switch pipRuntime.authorizationStatus {
         case .notDetermined:
@@ -495,16 +619,23 @@ struct PiPCameraSettingsView: View {
     @ViewBuilder
     private func card<Content: View>(
         title: String,
+        subtitle: String? = nil,
         icon: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: icon)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color(red: 0.89, green: 0.40, blue: 0.19))
                 Text(title)
                     .font(.headline)
+
+                if let subtitle, !subtitle.isEmpty {
+                    secondarySubtitleText(subtitle)
+                }
+
+                Spacer(minLength: 0)
             }
 
             content()
@@ -526,6 +657,55 @@ struct PiPCameraSettingsView: View {
                 .stroke(Color.black.opacity(0.08), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.05), radius: 6, y: 3)
+    }
+
+    @ViewBuilder
+    private func secondarySubtitleText(_ text: String, lineLimit: Int = 1) -> some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .lineLimit(lineLimit)
+            .truncationMode(.tail)
+    }
+
+    @ViewBuilder
+    private func secondarySupportingText(_ text: String, lineLimit: Int = 1) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .lineLimit(lineLimit)
+            .truncationMode(.tail)
+    }
+
+    @ViewBuilder
+    private func compactControlRow<Content: View>(
+        _ title: String,
+        contentWidth: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .center, spacing: customControlRowSpacing) {
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: customControlLabelWidth, alignment: .leading)
+
+            content()
+                .frame(width: contentWidth, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func compactSupportRow<Content: View>(
+        contentWidth: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .top, spacing: customControlRowSpacing) {
+            Color.clear
+                .frame(width: customControlLabelWidth, height: 1)
+
+            content()
+                .frame(width: contentWidth, alignment: .leading)
+        }
     }
 
     @ViewBuilder
@@ -554,6 +734,108 @@ struct PiPCameraSettingsView: View {
             return
         }
         NSWorkspace.shared.open(url)
+    }
+
+    private func pipQualityConfig(for preset: PiPRecordingQualityPreset) -> PiPRecordingQualityConfig {
+        appCoordinator.pipRecordingQualityConfig.config(for: preset)
+    }
+
+    private func formattedPiPQualityEstimatedSize(_ sizeMB: Int) -> String {
+        L10n.f("pip.quality.file_size.mb", sizeMB)
+    }
+
+    private func pipQualityPresetButton(for preset: PiPRecordingQualityPreset) -> some View {
+        let config = pipQualityConfig(for: preset)
+        let isSelected = appCoordinator.pipRecordingQualityConfig.preset == preset
+        return Button {
+            customPiPBitrateRangeMessage = nil
+            updatePiPRecordingQualityConfig { $0.preset = preset }
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(L10n.tr(preset.titleKey))
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Color.primary)
+
+                    secondarySubtitleText(L10n.tr(preset.descriptionKey))
+                }
+
+                Spacer(minLength: 10)
+
+                secondarySupportingText(
+                    L10n.f(
+                        "pip.quality.estimate.ten_minutes",
+                        formattedPiPQualityEstimatedSize(config.estimatedTenMinuteSizeMB)
+                    )
+                )
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.08) : Color.black.opacity(0.02))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(
+                        isSelected ? Color.accentColor.opacity(0.35) : Color.black.opacity(0.06),
+                        lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isPiPQualityEditingDisabled)
+    }
+
+    private var customPiPBitrateValueBinding: Binding<Int> {
+        Binding(
+            get: { appCoordinator.pipRecordingQualityConfig.customVideoBitrateMbps },
+            set: { newValue in
+                customPiPBitrateRangeMessage = nil
+                updatePiPRecordingQualityConfig { $0.customVideoBitrateMbps = newValue }
+            }
+        )
+    }
+
+    private func updatePiPRecordingQualityConfig(_ mutate: (inout PiPRecordingQualityConfig) -> Void) {
+        var next = appCoordinator.pipRecordingQualityConfig
+        mutate(&next)
+        appCoordinator.pipRecordingQualityConfig = next.normalized()
+    }
+
+    private func syncCustomPiPBitrateText() {
+        let nextValue = "\(appCoordinator.pipRecordingQualityConfig.customVideoBitrateMbps)"
+        if customPiPBitrateText != nextValue {
+            customPiPBitrateText = nextValue
+        }
+    }
+
+    private func commitCustomPiPBitrateText() {
+        let digitsOnly = customPiPBitrateText.filter(\.isNumber)
+        if digitsOnly != customPiPBitrateText {
+            customPiPBitrateText = digitsOnly
+        }
+        guard let rawValue = Int(digitsOnly), !digitsOnly.isEmpty else {
+            customPiPBitrateRangeMessage = nil
+            return
+        }
+
+        if rawValue < PiPRecordingQualityConfig.minimumBitrateMbps {
+            customPiPBitrateRangeMessage = L10n.tr("pip.quality.warning.min")
+        } else if rawValue > PiPRecordingQualityConfig.maximumBitrateMbps {
+            customPiPBitrateRangeMessage = L10n.tr("pip.quality.warning.max")
+        } else {
+            customPiPBitrateRangeMessage = nil
+        }
+
+        updatePiPRecordingQualityConfig { $0.customVideoBitrateMbps = rawValue }
     }
 
     private func runInAppDiagnostics() {

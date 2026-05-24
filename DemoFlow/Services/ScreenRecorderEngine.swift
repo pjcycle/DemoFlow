@@ -6,8 +6,10 @@
 //
 
 import AppKit
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
+import CoreGraphics
+@preconcurrency import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
@@ -21,9 +23,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     private let cameraEngine: CameraEngine
     private let compositionEngine = CompositionExportEngine()
     private let pipProcessingEngine = PiPFrameProcessingEngine()
+    private let recordingSampleQueue = DispatchQueue(label: "DemoFlow.screen-recorder.sample-writer")
 
     private var stream: SCStream?
-    private var recordingOutput: SCRecordingOutput?
     private var currentRequest: RecordingRequest?
     private var activeCaptureDisplayID: CGDirectDisplayID?
     private var includesPiPWindowInScreenCapture = false
@@ -33,12 +35,10 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     private var cameraFramingSidecarURL: URL?
     private var currentFaceKeyframes: [FaceFramingKeyframe] = []
 
-    private var screenStopContinuation: CheckedContinuation<Void, Error>?
     private var recordingStartContinuation: CheckedContinuation<Void, Error>?
-    private var hasRecordingOutputStarted = false
+    private var hasWrittenFirstScreenFrame = false
     private var stopScreenCaptureTimedOut = false
-    private let screenSampleQueue = DispatchQueue(label: "DemoFlow.screen-recorder.screen-sample")
-    private let microphoneSampleQueue = DispatchQueue(label: "DemoFlow.screen-recorder.microphone-sample")
+    nonisolated(unsafe) private var screenFileWriter: ScreenCaptureFileWriter?
 
     init(
         cameraEngine: CameraEngine
@@ -51,6 +51,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         request: RecordingRequest,
         preferredScreen: NSScreen?
     ) async {
+        _ = preferredScreen
         guard !state.isBusy else { return }
         guard !state.isRecording else { return }
         if cameraEngine.isRecording {
@@ -108,15 +109,13 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
 
             let streamBundle = try await buildScreenStream(
                 screenRawURL: outputContext.screenRawURL,
-                microphoneDeviceID: request.microphoneDeviceID,
-                pipWindowID: request.pipWindowID,
-                extraIncludedWindowIDs: request.screenDrawWindowIDs
+                request: request
             )
             stream = streamBundle.stream
-            recordingOutput = streamBundle.recordingOutput
+            screenFileWriter = streamBundle.fileWriter
             activeCaptureDisplayID = streamBundle.displayID
             includesPiPWindowInScreenCapture = streamBundle.includesPiPWindowInScreenCapture
-            hasRecordingOutputStarted = false
+            hasWrittenFirstScreenFrame = false
 
             statusMessage = L10n.tr("legacy.key_190")
             try await streamBundle.stream.startCapture()
@@ -134,6 +133,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             if cameraEngine.isRecording {
                 _ = try? await cameraEngine.stopRecording()
             }
+            screenFileWriter?.cancelWriting()
             cameraEngine.stopPreview()
             cleanupTemporaryState()
             state = .failed(presentableErrorMessage(error))
@@ -149,13 +149,17 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
 
         let layout = currentRequest?.pipLayout ?? .default
         cameraEngine.onProcessingSample = nil
+        let activeWriter = screenFileWriter
 
         do {
             if let stream {
                 try await stopScreenCapture(stream: stream)
             }
             self.stream = nil
-            self.recordingOutput = nil
+
+            if let activeWriter {
+                try await activeWriter.finishWriting()
+            }
 
             var capturedCameraURL: URL?
             if cameraEngine.isRecording {
@@ -184,6 +188,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             }
 
             let screenURL = try ensureURL(screenRawURL, name: L10n.tr("legacy.key_79"))
+            try validateRecordedScreenOutput(at: screenURL)
             let mergedURL = try makeMergedURL()
             let finalURL = try await compositionEngine.mergeScreenAndCamera(
                 screenURL: screenURL,
@@ -210,6 +215,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             if cameraEngine.isRecording {
                 _ = try? await cameraEngine.stopRecording()
             }
+            screenFileWriter?.cancelWriting()
             cameraEngine.stopPreview()
             state = .failed(presentableErrorMessage(error))
             statusMessage = L10n.f("fmt.recording.stop_failed", presentableErrorMessage(error))
@@ -217,14 +223,32 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         }
     }
 
-    func updatePiPWindowCapture(windowID: CGWindowID?, extraWindowIDs: [CGWindowID] = []) async {
-        guard state.isRecording else { return }
-        guard let stream else { return }
+    @discardableResult
+    func updatePiPWindowCapture(windowID: CGWindowID?, extraWindowIDs: [CGWindowID] = []) async -> WindowCaptureResolution {
+        let requestedWindowIDs = Set(([windowID].compactMap { $0 }) + extraWindowIDs)
+        guard state.isRecording else {
+            return WindowCaptureResolution(
+                requestedPiPWindowID: windowID,
+                requestedWindowIDs: requestedWindowIDs,
+                matchedWindowIDs: []
+            )
+        }
+        guard let stream else {
+            return WindowCaptureResolution(
+                requestedPiPWindowID: windowID,
+                requestedWindowIDs: requestedWindowIDs,
+                matchedWindowIDs: []
+            )
+        }
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard let display = resolvedDisplay(from: content, preferredID: activeCaptureDisplayID) else {
-                return
+                return WindowCaptureResolution(
+                    requestedPiPWindowID: windowID,
+                    requestedWindowIDs: requestedWindowIDs,
+                    matchedWindowIDs: []
+                )
             }
             let filterContext = makeDisplayFilterContext(
                 from: content,
@@ -234,8 +258,14 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             )
             try await stream.updateContentFilter(filterContext.filter)
             includesPiPWindowInScreenCapture = filterContext.includesPiPWindowInScreenCapture
+            return filterContext.windowCaptureResolution
         } catch {
             statusMessage = L10n.f("fmt.recording.update_pip_capture_failed", presentableErrorMessage(error))
+            return WindowCaptureResolution(
+                requestedPiPWindowID: windowID,
+                requestedWindowIDs: requestedWindowIDs,
+                matchedWindowIDs: []
+            )
         }
     }
 
@@ -243,18 +273,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         stopScreenCaptureTimedOut = false
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { @MainActor [weak self] in
-                    guard let self else { return }
-                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                        self.screenStopContinuation = continuation
-                        Task { @MainActor [weak self] in
-                            do {
-                                try await stream.stopCapture()
-                            } catch {
-                                self?.resumeScreenStopContinuation(with: .failure(error))
-                            }
-                        }
-                    }
+                group.addTask {
+                    try await stream.stopCapture()
                 }
                 group.addTask {
                     try await Task.sleep(nanoseconds: 6_000_000_000)
@@ -266,22 +286,15 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             }
         } catch RecorderError.stopTimedOut {
             stopScreenCaptureTimedOut = true
-            resumeScreenStopContinuation(with: .success(()))
-            if let recordingOutput {
-                try? stream.removeRecordingOutput(recordingOutput)
-            }
-            try? await stream.stopCapture()
         }
     }
 
     private func buildScreenStream(
         screenRawURL: URL,
-        microphoneDeviceID: String?,
-        pipWindowID: CGWindowID?,
-        extraIncludedWindowIDs: [CGWindowID]
+        request: RecordingRequest
     ) async throws -> (
         stream: SCStream,
-        recordingOutput: SCRecordingOutput,
+        fileWriter: ScreenCaptureFileWriter,
         warnsAppWindowExclusion: Bool,
         displayID: CGDirectDisplayID,
         includesPiPWindowInScreenCapture: Bool
@@ -294,39 +307,49 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         let filterContext = makeDisplayFilterContext(
             from: content,
             display: display,
-            pipWindowID: pipWindowID,
-            extraIncludedWindowIDs: extraIncludedWindowIDs
+            pipWindowID: request.pipWindowID,
+            extraIncludedWindowIDs: request.screenDrawWindowIDs
         )
 
         let configuration = SCStreamConfiguration()
         let scale = max(CGFloat(filterContext.filter.pointPixelScale), 1)
-        let captureRect = CGRect(x: 0, y: 0, width: CGFloat(display.width), height: CGFloat(display.height))
-        configuration.width = max(2, Int((captureRect.width * scale).rounded(.toNearestOrAwayFromZero)))
-        configuration.height = max(2, Int((captureRect.height * scale).rounded(.toNearestOrAwayFromZero)))
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        let nativeCaptureSize = CGSize(
+            width: CGFloat(display.width) * scale,
+            height: CGFloat(display.height) * scale
+        )
+        let profile = request.recordingQuality.resolvedProfile
+        let captureSize = resolvedCaptureSize(nativeCaptureSize: nativeCaptureSize, profile: profile)
+        configuration.width = max(2, Int(captureSize.width))
+        configuration.height = max(2, Int(captureSize.height))
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(profile.fps))
         configuration.queueDepth = 5
         configuration.capturesAudio = false
-        configuration.captureMicrophone = microphoneDeviceID?.isEmpty == false
+        configuration.captureMicrophone = request.microphoneDeviceID?.isEmpty == false
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
-        if let micID = microphoneDeviceID, !micID.isEmpty {
+        if let micID = request.microphoneDeviceID, !micID.isEmpty {
             configuration.microphoneCaptureDeviceID = micID
         }
 
-        let outputConfiguration = SCRecordingOutputConfiguration()
-        outputConfiguration.outputURL = screenRawURL
-        outputConfiguration.videoCodecType = .h264
-        outputConfiguration.outputFileType = .mp4
+        let fileWriter = try ScreenCaptureFileWriter(
+            outputURL: screenRawURL,
+            captureSize: captureSize,
+            codec: profile.codec,
+            fps: profile.fps,
+            videoBitrateMbps: profile.videoBitrateMbps,
+            audioSettings: configuration.captureMicrophone
+                ? makeMicrophoneAudioSettings(for: request.microphoneDeviceID)
+                : nil
+        )
 
         let stream = SCStream(filter: filterContext.filter, configuration: configuration, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenSampleQueue)
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: recordingSampleQueue)
         if configuration.captureMicrophone {
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: microphoneSampleQueue)
+            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: recordingSampleQueue)
         }
-        let recordingOutput = SCRecordingOutput(configuration: outputConfiguration, delegate: self)
-        try stream.addRecordingOutput(recordingOutput)
+
         return (
             stream: stream,
-            recordingOutput: recordingOutput,
+            fileWriter: fileWriter,
             warnsAppWindowExclusion: filterContext.warnsAppWindowExclusion,
             displayID: display.displayID,
             includesPiPWindowInScreenCapture: filterContext.includesPiPWindowInScreenCapture
@@ -337,10 +360,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         from content: SCShareableContent,
         preferredID: CGDirectDisplayID?
     ) -> SCDisplay? {
-        if let preferredID {
-            if let matched = content.displays.first(where: { $0.displayID == preferredID }) {
-                return matched
-            }
+        if let preferredID,
+           let matched = content.displays.first(where: { $0.displayID == preferredID }) {
+            return matched
         }
         return content.displays.first
     }
@@ -359,6 +381,11 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         let includedWindows = content.windows.filter { window in
             allowedWindowIDs.contains(window.windowID)
         }
+        let matchedWindowIDs = Set(includedWindows.map(\.windowID))
+        if !allowedWindowIDs.isEmpty, allowedWindowIDs != matchedWindowIDs {
+            let missingWindowIDs = allowedWindowIDs.subtracting(matchedWindowIDs).sorted()
+            print("[RecordingWhitelist] unresolved windowIDs=\(missingWindowIDs)")
+        }
         let filter = SCContentFilter(
             display: display,
             excludingApplications: excludedApplications,
@@ -368,18 +395,22 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         return DisplayFilterContext(
             filter: filter,
             warnsAppWindowExclusion: warnsAppWindowExclusion,
-            includesPiPWindowInScreenCapture: !includedWindows.isEmpty
+            windowCaptureResolution: WindowCaptureResolution(
+                requestedPiPWindowID: pipWindowID,
+                requestedWindowIDs: allowedWindowIDs,
+                matchedWindowIDs: matchedWindowIDs
+            )
         )
     }
 
     private func waitForRecordingStart(timeoutNanoseconds: UInt64 = 5_000_000_000) async throws {
-        if hasRecordingOutputStarted {
+        if hasWrittenFirstScreenFrame {
             return
         }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { @MainActor [weak self] in
                 guard let self else { return }
-                if self.hasRecordingOutputStarted {
+                if self.hasWrittenFirstScreenFrame {
                     return
                 }
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -432,13 +463,21 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         return url
     }
 
+    private func validateRecordedScreenOutput(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw RecorderError.missingIntermediate(L10n.tr("legacy.key_79"))
+        }
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        if (values.fileSize ?? 0) <= 0 {
+            throw RecorderError.emptyIntermediate(L10n.tr("legacy.key_79"))
+        }
+    }
+
     private func cleanupTemporaryState() {
-        hasRecordingOutputStarted = false
+        hasWrittenFirstScreenFrame = false
         stopScreenCaptureTimedOut = false
         recordingStartContinuation = nil
-        screenStopContinuation = nil
         stream = nil
-        recordingOutput = nil
         activeCaptureDisplayID = nil
         includesPiPWindowInScreenCapture = false
         screenRawURL = nil
@@ -447,6 +486,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         currentFaceKeyframes = []
         cameraEngine.onProcessingSample = nil
         currentRequest = nil
+        screenFileWriter = nil
     }
 
     private func writeSidecar(keyframes: [FaceFramingKeyframe], to url: URL) throws {
@@ -475,27 +515,105 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         }
     }
 
-    private func resumeScreenStopContinuation(with result: Result<Void, Error>) {
-        guard let continuation = screenStopContinuation else { return }
-        screenStopContinuation = nil
-        switch result {
-        case .success:
-            continuation.resume(returning: ())
-        case let .failure(error):
-            continuation.resume(throwing: error)
-        }
-    }
-
     private func cancelPendingContinuations(with error: Error) {
         resumeRecordingStartContinuation(with: .failure(error))
-        resumeScreenStopContinuation(with: .failure(error))
     }
 
     private func presentableErrorMessage(_ error: Error) -> String {
         if let recorderError = error as? RecorderError {
             return recorderError.displayMessage
         }
+        if let writerError = error as? ScreenCaptureFileWriter.WriterError {
+            return writerError.localizedDescription
+        }
         return error.localizedDescription
+    }
+
+    private func resolvedCaptureSize(
+        nativeCaptureSize: CGSize,
+        profile: RecordingQualityProfile
+    ) -> CGSize {
+        guard let boundingSize = profile.resolution.boundingSize(for: nativeCaptureSize) else {
+            return evenCaptureSize(nativeCaptureSize)
+        }
+
+        let scale = min(
+            1,
+            min(boundingSize.width / nativeCaptureSize.width, boundingSize.height / nativeCaptureSize.height)
+        )
+        let scaledSize = CGSize(
+            width: nativeCaptureSize.width * scale,
+            height: nativeCaptureSize.height * scale
+        )
+        return evenCaptureSize(scaledSize)
+    }
+
+    private func evenCaptureSize(_ size: CGSize) -> CGSize {
+        let width = max(2, Int(size.width.rounded(.down)))
+        let height = max(2, Int(size.height.rounded(.down)))
+        let evenWidth = width.isMultiple(of: 2) ? width : width - 1
+        let evenHeight = height.isMultiple(of: 2) ? height : height - 1
+        return CGSize(width: max(2, evenWidth), height: max(2, evenHeight))
+    }
+
+    private func makeMicrophoneAudioSettings(for microphoneDeviceID: String?) -> [String: Any] {
+        let fallbackSampleRate = 48_000.0
+        let fallbackChannels = 1
+
+        guard let microphoneDeviceID, !microphoneDeviceID.isEmpty else {
+            return [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: fallbackSampleRate,
+                AVNumberOfChannelsKey: fallbackChannels,
+                AVEncoderBitRateKey: 128_000
+            ]
+        }
+
+        let discoverySession = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        let device = discoverySession.devices.first(where: { $0.uniqueID == microphoneDeviceID })
+        let formatDescription = device?.activeFormat.formatDescription
+        let asbd = formatDescription.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
+
+        return [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: asbd?.mSampleRate ?? fallbackSampleRate,
+            AVNumberOfChannelsKey: max(Int(asbd?.mChannelsPerFrame ?? UInt32(fallbackChannels)), 1),
+            AVEncoderBitRateKey: 128_000
+        ]
+    }
+
+    private func handleWriterEvent(_ event: ScreenCaptureFileWriter.Event) {
+        switch event {
+        case .started:
+            guard !hasWrittenFirstScreenFrame else { return }
+            hasWrittenFirstScreenFrame = true
+            resumeRecordingStartContinuation(with: .success(()))
+        case let .failed(error):
+            if state == .preparing {
+                cancelPendingContinuations(with: error)
+                return
+            }
+            guard state.isRecording || state.isBusy else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.cancelPendingContinuations(with: error)
+                if let stream = self.stream {
+                    try? await stream.stopCapture()
+                }
+                if self.cameraEngine.isRecording {
+                    _ = try? await self.cameraEngine.stopRecording()
+                }
+                self.screenFileWriter?.cancelWriting()
+                self.cameraEngine.stopPreview()
+                self.cleanupTemporaryState()
+                self.state = .failed(self.presentableErrorMessage(error))
+                self.statusMessage = L10n.f("fmt.recording.unexpected_stop", self.presentableErrorMessage(error))
+            }
+        }
     }
 }
 
@@ -504,8 +622,8 @@ extension ScreenRecorderEngine: SCStreamDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.cancelPendingContinuations(with: error)
-            self.state = .failed(error.localizedDescription)
-            self.statusMessage = L10n.f("fmt.recording.unexpected_stop", error.localizedDescription)
+            self.state = .failed(self.presentableErrorMessage(error))
+            self.statusMessage = L10n.f("fmt.recording.unexpected_stop", self.presentableErrorMessage(error))
         }
     }
 }
@@ -516,30 +634,18 @@ extension ScreenRecorderEngine: SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
-        _ = sampleBuffer
-        _ = outputType
-    }
-}
-
-extension ScreenRecorderEngine: SCRecordingOutputDelegate {
-    nonisolated func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
-        Task { @MainActor [weak self] in
-            self?.hasRecordingOutputStarted = true
-            self?.resumeRecordingStartContinuation(with: .success(()))
+        guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else {
+            return
         }
-    }
-
-    nonisolated func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.resumeScreenStopContinuation(with: .success(()))
+        guard outputType == .screen || outputType == .microphone else {
+            return
         }
-    }
+        guard let screenFileWriter else { return }
 
-    nonisolated func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: any Error) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.cancelPendingContinuations(with: error)
+        screenFileWriter.append(sampleBuffer: sampleBuffer, outputType: outputType) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleWriterEvent(event)
+            }
         }
     }
 }
@@ -554,12 +660,32 @@ extension ScreenRecorderEngine {
     private struct DisplayFilterContext {
         let filter: SCContentFilter
         let warnsAppWindowExclusion: Bool
-        let includesPiPWindowInScreenCapture: Bool
+        let windowCaptureResolution: WindowCaptureResolution
+
+        var includesPiPWindowInScreenCapture: Bool {
+            windowCaptureResolution.includesRequestedPiPWindow
+        }
+    }
+
+    struct WindowCaptureResolution {
+        let requestedPiPWindowID: CGWindowID?
+        let requestedWindowIDs: Set<CGWindowID>
+        let matchedWindowIDs: Set<CGWindowID>
+
+        var didIncludeAllRequestedWindows: Bool {
+            requestedWindowIDs == matchedWindowIDs
+        }
+
+        var includesRequestedPiPWindow: Bool {
+            guard let pipWindowID = requestedPiPWindowID else { return false }
+            return matchedWindowIDs.contains(pipWindowID)
+        }
     }
 
     enum RecorderError: Error {
         case noDisplay
         case missingIntermediate(String)
+        case emptyIntermediate(String)
         case startTimedOut
         case stopTimedOut
 
@@ -570,11 +696,227 @@ extension ScreenRecorderEngine {
                 return L10n.tr("legacy.key_173")
             case let .missingIntermediate(name):
                 return L10n.f("fmt.recording.missing_intermediate", name)
+            case let .emptyIntermediate(name):
+                return L10n.f("fmt.recording.missing_intermediate", name)
             case .startTimedOut:
                 return L10n.tr("legacy.key_192")
             case .stopTimedOut:
                 return L10n.tr("legacy.key_16")
             }
         }
+    }
+}
+
+private final class ScreenCaptureFileWriter: @unchecked Sendable {
+    enum Event {
+        case started
+        case failed(Error)
+    }
+
+    enum WriterError: LocalizedError {
+        case outputCreationFailed(String)
+        case addVideoInputFailed
+        case addAudioInputFailed
+        case startWritingFailed
+        case videoAppendFailed
+        case audioAppendFailed
+        case noVideoFrames
+        case finishWritingFailed
+        case cancelled
+
+        var errorDescription: String? {
+            switch self {
+            case let .outputCreationFailed(message):
+                return message
+            case .addVideoInputFailed:
+                return L10n.tr("recording.quality.error.video_input")
+            case .addAudioInputFailed:
+                return L10n.tr("recording.quality.error.audio_input")
+            case .startWritingFailed:
+                return L10n.tr("recording.quality.error.start_writer")
+            case .videoAppendFailed:
+                return L10n.tr("recording.quality.error.video_append")
+            case .audioAppendFailed:
+                return L10n.tr("recording.quality.error.audio_append")
+            case .noVideoFrames:
+                return L10n.tr("recording.quality.error.no_video_frames")
+            case .finishWritingFailed:
+                return L10n.tr("recording.quality.error.finish_writer")
+            case .cancelled:
+                return L10n.tr("recording.quality.error.writer_cancelled")
+            }
+        }
+    }
+
+    private let queue = DispatchQueue(label: "DemoFlow.screen-recorder.file-writer")
+    nonisolated(unsafe) private let assetWriter: AVAssetWriter
+    nonisolated(unsafe) private let videoInput: AVAssetWriterInput
+    nonisolated(unsafe) private let audioInput: AVAssetWriterInput?
+    nonisolated(unsafe) private var sessionStartTime: CMTime?
+    nonisolated(unsafe) private var didEmitStartedEvent = false
+    nonisolated(unsafe) private var didEmitFailureEvent = false
+    nonisolated(unsafe) private var isFinishing = false
+
+    init(
+        outputURL: URL,
+        captureSize: CGSize,
+        codec: RecordingVideoCodec,
+        fps: Int,
+        videoBitrateMbps: Int,
+        audioSettings: [String: Any]?
+    ) throws {
+        let videoCodecType: AVVideoCodecType = codec == .hevc ? .hevc : .h264
+        do {
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                try FileManager.default.removeItem(at: outputURL)
+            }
+            assetWriter = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        } catch {
+            throw WriterError.outputCreationFailed(error.localizedDescription)
+        }
+
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: videoCodecType,
+            AVVideoWidthKey: Int(captureSize.width),
+            AVVideoHeightKey: Int(captureSize.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: videoBitrateMbps * 1_000_000,
+                AVVideoExpectedSourceFrameRateKey: fps
+            ]
+        ]
+        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = true
+        guard assetWriter.canAdd(videoInput) else {
+            throw WriterError.addVideoInputFailed
+        }
+        assetWriter.add(videoInput)
+
+        if let audioSettings {
+            let nextAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            nextAudioInput.expectsMediaDataInRealTime = true
+            guard assetWriter.canAdd(nextAudioInput) else {
+                throw WriterError.addAudioInputFailed
+            }
+            assetWriter.add(nextAudioInput)
+            audioInput = nextAudioInput
+        } else {
+            audioInput = nil
+        }
+    }
+
+    nonisolated func append(
+        sampleBuffer: CMSampleBuffer,
+        outputType: SCStreamOutputType,
+        eventHandler: @escaping (Event) -> Void
+    ) {
+        queue.async {
+            guard !self.isFinishing else { return }
+            if self.assetWriter.status == .failed {
+                self.emitFailure(self.assetWriter.error ?? WriterError.finishWritingFailed, eventHandler: eventHandler)
+                return
+            }
+            switch outputType {
+            case .screen:
+                self.appendVideoSample(sampleBuffer, eventHandler: eventHandler)
+            case .microphone:
+                self.appendAudioSample(sampleBuffer, eventHandler: eventHandler)
+            default:
+                break
+            }
+        }
+    }
+
+    nonisolated func finishWriting() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                self.isFinishing = true
+                self.videoInput.markAsFinished()
+                self.audioInput?.markAsFinished()
+
+                switch self.assetWriter.status {
+                case .unknown:
+                    self.assetWriter.cancelWriting()
+                    continuation.resume(throwing: WriterError.noVideoFrames)
+                case .writing:
+                    self.assetWriter.finishWriting {
+                        switch self.assetWriter.status {
+                        case .completed:
+                            continuation.resume(returning: ())
+                        case .cancelled:
+                            continuation.resume(throwing: WriterError.cancelled)
+                        case .failed:
+                            continuation.resume(throwing: self.assetWriter.error ?? WriterError.finishWritingFailed)
+                        default:
+                            continuation.resume(throwing: WriterError.finishWritingFailed)
+                        }
+                    }
+                case .completed:
+                    continuation.resume(returning: ())
+                case .cancelled:
+                    continuation.resume(throwing: WriterError.cancelled)
+                case .failed:
+                    continuation.resume(throwing: self.assetWriter.error ?? WriterError.finishWritingFailed)
+                @unknown default:
+                    continuation.resume(throwing: WriterError.finishWritingFailed)
+                }
+            }
+        }
+    }
+
+    nonisolated func cancelWriting() {
+        queue.async {
+            self.isFinishing = true
+            self.videoInput.markAsFinished()
+            self.audioInput?.markAsFinished()
+            self.assetWriter.cancelWriting()
+        }
+    }
+
+    nonisolated private func appendVideoSample(
+        _ sampleBuffer: CMSampleBuffer,
+        eventHandler: @escaping (Event) -> Void
+    ) {
+        guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else { return }
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        if sessionStartTime == nil {
+            guard assetWriter.startWriting() else {
+                emitFailure(assetWriter.error ?? WriterError.startWritingFailed, eventHandler: eventHandler)
+                return
+            }
+            assetWriter.startSession(atSourceTime: presentationTime)
+            sessionStartTime = presentationTime
+        }
+
+        guard videoInput.isReadyForMoreMediaData else { return }
+        guard videoInput.append(sampleBuffer) else {
+            emitFailure(assetWriter.error ?? WriterError.videoAppendFailed, eventHandler: eventHandler)
+            return
+        }
+
+        if !didEmitStartedEvent {
+            didEmitStartedEvent = true
+            eventHandler(.started)
+        }
+    }
+
+    nonisolated private func appendAudioSample(
+        _ sampleBuffer: CMSampleBuffer,
+        eventHandler: @escaping (Event) -> Void
+    ) {
+        guard let audioInput, let sessionStartTime else { return }
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard CMTimeCompare(presentationTime, sessionStartTime) >= 0 else { return }
+        guard audioInput.isReadyForMoreMediaData else { return }
+        guard audioInput.append(sampleBuffer) else {
+            emitFailure(assetWriter.error ?? WriterError.audioAppendFailed, eventHandler: eventHandler)
+            return
+        }
+    }
+
+    nonisolated private func emitFailure(_ error: Error, eventHandler: @escaping (Event) -> Void) {
+        guard !didEmitFailureEvent else { return }
+        didEmitFailureEvent = true
+        eventHandler(.failed(error))
     }
 }
