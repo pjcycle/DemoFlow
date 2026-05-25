@@ -298,6 +298,7 @@
 "language.option.auto" = "Auto Detect";
 "language.option.zhHans" = "Chinese";
 "language.option.en" = "English";
+"menu.open_settings" = "Open Settings";
 "language.settings.header.title" = "General";
 "language.settings.header.subtitle" = "Language Configuration";
 "language.settings.card.title" = "Language";
@@ -600,3 +601,8 @@
 "recording.quality.error.no_video_frames" = "No video frames were captured.";
 "recording.quality.error.finish_writer" = "Failed to finish the recording file.";
 "recording.quality.error.writer_cancelled" = "Recording writer was cancelled.";
+"menu.recording_toggle" = "Recording";
+"menu.pip_preview_toggle" = "PiP Preview";
+"menu.pip_recording_toggle" = "PiP Recording";
+"menu.screen_draw_toggle" = "Screen Annotation";
+"menu.recording_settings" = "Recording Settings";

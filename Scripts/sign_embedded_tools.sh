@@ -86,6 +86,7 @@ product_identifier="${PRODUCT_BUNDLE_IDENTIFIER:-pjln.top.demoflow}"
 codesign_common_flags=(
 	--force
 	--sign "$signing_identity"
+	--options runtime
 	--generate-entitlement-der
 )
 

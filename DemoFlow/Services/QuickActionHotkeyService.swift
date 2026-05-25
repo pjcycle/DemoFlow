@@ -1,27 +1,28 @@
 //
-//  PiPHotkeyService.swift
+//  QuickActionHotkeyService.swift
 //  DemoFlow
 //
-//  Created by PJ Lee + Ai on 2026/5/8.
+//  Created by OpenAI Codex on 2026/5/25.
 //
 
 import AppKit
 import Carbon
 import Foundation
 
-enum PiPHotkeyAction {
-    case togglePreview
+enum QuickActionHotkeyAction {
+    case toggleRecording
+    case togglePiPRecording
 }
 
 @MainActor
-final class PiPHotkeyService {
-    var onAction: ((PiPHotkeyAction) -> Void)?
-    var shouldHandleAction: ((PiPHotkeyAction) -> Bool)?
+final class QuickActionHotkeyService {
+    var onAction: ((QuickActionHotkeyAction) -> Void)?
+    var shouldHandleAction: ((QuickActionHotkeyAction) -> Bool)?
     var onRegistrationStatusChanged: ((Bool, String) -> Void)?
 
     private let globalService = GlobalHotkeyService(
-        signature: PiPHotkeyConstants.signature,
-        descriptors: PiPHotkeyConstants.descriptors.map { descriptor in
+        signature: QuickActionHotkeyConstants.signature,
+        descriptors: QuickActionHotkeyConstants.descriptors.map { descriptor in
             GlobalHotkeyDescriptor(
                 id: descriptor.id,
                 keyCode: descriptor.keyCode,
@@ -34,7 +35,7 @@ final class PiPHotkeyService {
         globalService.onHotkeyID = { [weak self] id in
             guard
                 let self,
-                let descriptor = PiPHotkeyConstants.descriptors.first(where: { $0.id == id })
+                let descriptor = QuickActionHotkeyConstants.descriptors.first(where: { $0.id == id })
             else { return }
             self.onAction?(descriptor.action)
         }
@@ -42,7 +43,7 @@ final class PiPHotkeyService {
         globalService.shouldHandleID = { [weak self] id in
             guard
                 let self,
-                let descriptor = PiPHotkeyConstants.descriptors.first(where: { $0.id == id })
+                let descriptor = QuickActionHotkeyConstants.descriptors.first(where: { $0.id == id })
             else { return false }
             return self.shouldHandleAction?(descriptor.action) ?? true
         }
@@ -63,20 +64,20 @@ final class PiPHotkeyService {
     }
 }
 
-private enum PiPHotkeyConstants {
-    static let signature: OSType = 0x5049504B // 'PIPK'
+private enum QuickActionHotkeyConstants {
+    static let signature: OSType = 0x5243484B // 'RCHK'
     static let descriptors: [HotkeyDescriptor] = [
         HotkeyDescriptor(
             id: 1,
-            keyCode: Int16(kVK_ANSI_P),
-            modifiers: UInt32(cmdKey | optionKey),
-            action: .togglePreview
+            keyCode: Int16(kVK_ANSI_R),
+            modifiers: UInt32(cmdKey | optionKey | controlKey),
+            action: .toggleRecording
         ),
         HotkeyDescriptor(
             id: 2,
             keyCode: Int16(kVK_ANSI_P),
-            modifiers: UInt32(cmdKey | controlKey),
-            action: .togglePreview
+            modifiers: UInt32(cmdKey | optionKey | controlKey),
+            action: .togglePiPRecording
         )
     ]
 }
@@ -85,5 +86,5 @@ private struct HotkeyDescriptor {
     let id: Int
     let keyCode: Int16
     let modifiers: UInt32
-    let action: PiPHotkeyAction
+    let action: QuickActionHotkeyAction
 }

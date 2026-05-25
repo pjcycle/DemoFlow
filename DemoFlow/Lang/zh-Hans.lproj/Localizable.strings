@@ -298,6 +298,7 @@
 "language.option.auto" = "自动检测";
 "language.option.zhHans" = "中文";
 "language.option.en" = "English";
+"menu.open_settings" = "打开设置";
 "language.settings.header.title" = "常规";
 "language.settings.header.subtitle" = "仅保留语言配置";
 "language.settings.card.title" = "语言";
@@ -600,3 +601,8 @@
 "recording.quality.error.no_video_frames" = "未采集到有效视频帧。";
 "recording.quality.error.finish_writer" = "录屏文件收尾失败。";
 "recording.quality.error.writer_cancelled" = "录屏写入器已取消。";
+"menu.recording_toggle" = "录屏开关";
+"menu.pip_preview_toggle" = "PiP预览显隐";
+"menu.pip_recording_toggle" = "PiP录像开关";
+"menu.screen_draw_toggle" = "屏幕标注显隐";
+"menu.recording_settings" = "录屏配置";

@@ -149,6 +149,7 @@ final class AppCoordinator: ObservableObject {
 
     private let screenDrawHotkeyService: ScreenDrawHotkeyService
     private let pipHotkeyService: PiPHotkeyService
+    private let quickActionHotkeyService: QuickActionHotkeyService
     private let pipFilmRecorder = PiPFilmRecorderService()
     private let screenDrawAutoCaptureService = ScreenDrawAutoCaptureService()
     private var cancellables: Set<AnyCancellable> = []
@@ -171,7 +172,8 @@ final class AppCoordinator: ObservableObject {
             screenDrawCanvasController: ScreenDrawCanvasWindowController(sessionStore: drawSessionStore),
             recordingControlController: RecordingControlWindowController(),
             screenDrawHotkeyService: ScreenDrawHotkeyService(),
-            pipHotkeyService: PiPHotkeyService()
+            pipHotkeyService: PiPHotkeyService(),
+            quickActionHotkeyService: QuickActionHotkeyService()
         )
     }
 
@@ -184,7 +186,8 @@ final class AppCoordinator: ObservableObject {
         screenDrawCanvasController: ScreenDrawCanvasWindowController,
         recordingControlController: RecordingControlWindowController,
         screenDrawHotkeyService: ScreenDrawHotkeyService,
-        pipHotkeyService: PiPHotkeyService
+        pipHotkeyService: PiPHotkeyService,
+        quickActionHotkeyService: QuickActionHotkeyService
     ) {
         self.audioEngine = audioEngine
         self.pipPreviewRuntime = pipPreviewRuntime
@@ -194,6 +197,7 @@ final class AppCoordinator: ObservableObject {
         self.recordingControlController = recordingControlController
         self.screenDrawHotkeyService = screenDrawHotkeyService
         self.pipHotkeyService = pipHotkeyService
+        self.quickActionHotkeyService = quickActionHotkeyService
         self.recorder = ScreenRecorderEngine(cameraEngine: recordingCameraEngine)
 
         if self.screenDrawToolbarController.drawSessionStore !== self.screenDrawCanvasController.drawSessionStore {
@@ -227,6 +231,10 @@ final class AppCoordinator: ObservableObject {
                 ? L10n.tr(Self.pipHotkeyRegisteredStatusKey)
                 : L10n.tr(Self.pipHotkeyFallbackStatusKey)
         }
+        self.quickActionHotkeyService.onAction = { [weak self] action in
+            self?.handleQuickActionHotkeyAction(action)
+        }
+        self.quickActionHotkeyService.shouldHandleAction = { _ in true }
         self.pipPreviewRuntime.onRecordingFailure = { [weak self] error in
             self?.handlePiPRecordingRuntimeFailure(error)
         }
@@ -308,6 +316,13 @@ final class AppCoordinator: ObservableObject {
         loadPersistedLanguageOption()
         resolveLanguage()
         bindState()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NotificationCenter.default.post(
+                name: .demoFlowMenuBarCoordinatorReady,
+                object: self
+            )
+        }
     }
 
     deinit {
@@ -315,9 +330,10 @@ final class AppCoordinator: ObservableObject {
             NSEvent.removeMonitor(drawSystemDefinedMonitor)
             self.drawSystemDefinedMonitor = nil
         }
-        Task { @MainActor [screenDrawHotkeyService, pipHotkeyService] in
+        Task { @MainActor [screenDrawHotkeyService, pipHotkeyService, quickActionHotkeyService] in
             screenDrawHotkeyService.stop()
             pipHotkeyService.stop()
+            quickActionHotkeyService.stop()
         }
     }
 
@@ -423,6 +439,7 @@ final class AppCoordinator: ObservableObject {
     func bootstrap() {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
+        NotificationCenter.default.post(name: .demoFlowMenuBarCoordinatorReady, object: self)
         audioEngine.refreshSources()
         pipPreviewRuntime.refreshSources()
         pipPreviewRuntime.refreshAudioSources()
@@ -433,6 +450,7 @@ final class AppCoordinator: ObservableObject {
         pipPreviewRuntime.applyPreviewAudioConfig(pipAudioPreviewConfig)
         configureDrawHotkeysIfNeeded()
         configurePiPHotkeysIfNeeded()
+        configureQuickActionHotkeysIfNeeded()
         refreshLanguageIfNeeded()
     }
 
@@ -753,6 +771,17 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    func startRecordingImmediatelyFromMenuBar(preferredScreen: NSScreen? = nil) {
+        guard canStartRecording else {
+            statusMessage = unavailableReason()
+            return
+        }
+        runRecordingPermissionRequest {
+            self.presentRecordingStartControl(preferredScreen: preferredScreen)
+            await self.beginRecordingFromPreparedOverlay()
+        }
+    }
+
     private func presentRecordingStartControl(preferredScreen: NSScreen? = nil) {
         guard canStartRecording else {
             statusMessage = unavailableReason()
@@ -926,6 +955,48 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    func openAppSettingsFromMenuBar() {
+        selectedSettingsSection = .recording
+        showMainWindow()
+    }
+
+    func toggleRecordingFromMenuBar() {
+        if canStopRecording {
+            stopRecordingAndRestoreMonitoring()
+        } else if canStartRecording {
+            startRecordingImmediatelyFromMenuBar()
+        }
+    }
+
+    func togglePiPPreviewFromMenuBar() {
+        if isPiPPreviewVisible {
+            hidePiPPreview()
+            pipStatusMessage = L10n.tr("pip.hotkey.hidden")
+        } else {
+            activatePiPPreview()
+            pipStatusMessage = L10n.tr("pip.hotkey.showing")
+        }
+        refreshRecordingWindowCaptureIfNeeded()
+    }
+
+    func togglePiPRecordingFromMenuBar() {
+        if canStopPiPFilmRecording || isPiPFilmPreparing {
+            stopPiPFilmRecording()
+        } else if canStartPiPFilmRecording {
+            startPiPFilmRecording()
+        }
+    }
+
+    func toggleScreenDrawOverlayFromMenuBar() {
+        if isDrawOverlayVisible {
+            hideScreenDrawOverlay()
+            drawStatusMessage = L10n.tr("legacy.key_74")
+        } else {
+            showScreenDrawOverlay()
+            drawStatusMessage = L10n.tr("legacy.key_73")
+        }
+    }
+
     private func syncRecordingUI(for state: RecordingState) {
         switch state {
         case .recording:
@@ -976,9 +1047,20 @@ final class AppCoordinator: ObservableObject {
                 self.recordingControlController.hide()
             },
             onGranted: {
-                await self.beginRecordingAfterPermission()
+                await self.beginRecordingFromPreparedOverlay()
             }
         )
+    }
+
+    private func beginRecordingFromPreparedOverlay() async {
+        guard isRecordingArmed else { return }
+        guard !recorderState.isBusy && !recorderState.isRecording else {
+            isRecordingArmed = false
+            recordingControlController.hide()
+            statusMessage = unavailableReason()
+            return
+        }
+        await beginRecordingAfterPermission()
     }
 
     private func beginRecordingAfterPermission() async {
@@ -1089,6 +1171,10 @@ final class AppCoordinator: ObservableObject {
         isPiPGlobalHotkeysEnabled = pipHotkeyService.start()
     }
 
+    private func configureQuickActionHotkeysIfNeeded() {
+        _ = quickActionHotkeyService.start()
+    }
+
     private func handleDrawHotkeyAction(_ action: ScreenDrawHotkeyAction) {
         switch action {
         case let .selectColor(preset):
@@ -1133,6 +1219,15 @@ final class AppCoordinator: ObservableObject {
                 pipStatusMessage = L10n.tr("pip.hotkey.showing")
             }
             refreshRecordingWindowCaptureIfNeeded()
+        }
+    }
+
+    private func handleQuickActionHotkeyAction(_ action: QuickActionHotkeyAction) {
+        switch action {
+        case .toggleRecording:
+            toggleRecordingFromMenuBar()
+        case .togglePiPRecording:
+            togglePiPRecordingFromMenuBar()
         }
     }
 
@@ -1450,6 +1545,174 @@ final class AppCoordinator: ObservableObject {
             return "zh-hans.html"
         case .en:
             return "en.html"
+        }
+    }
+}
+
+extension Notification.Name {
+    static let demoFlowMenuBarCoordinatorReady = Notification.Name("DemoFlowMenuBarCoordinatorReady")
+}
+
+@MainActor
+final class MenuBarRecordingController: NSObject, NSMenuDelegate {
+    private static let autosaveName = "pjln.top.demoflow.menuBarRecording"
+    private var statusItem: NSStatusItem?
+    private let menu = NSMenu()
+    private let recordingToggleItem = NSMenuItem()
+    private let pipPreviewToggleItem = NSMenuItem()
+    private let pipRecordingToggleItem = NSMenuItem()
+    private let screenDrawToggleItem = NSMenuItem()
+    private let recordingSettingsItem = NSMenuItem()
+    private weak var appCoordinator: AppCoordinator?
+    private var isInstalled = false
+    private var coordinatorObserver: NSObjectProtocol?
+
+    override init() {
+        super.init()
+        coordinatorObserver = NotificationCenter.default.addObserver(
+            forName: .demoFlowMenuBarCoordinatorReady,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let coordinator = notification.object as? AppCoordinator else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.configure(appCoordinator: coordinator)
+            }
+        }
+    }
+
+    func configure(appCoordinator: AppCoordinator) {
+        self.appCoordinator = appCoordinator
+        install()
+        refreshMenuItems()
+    }
+
+    func install() {
+        guard !isInstalled else {
+            statusItem?.isVisible = true
+            refreshMenuItems()
+            return
+        }
+        isInstalled = true
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem?.autosaveName = Self.autosaveName
+        statusItem?.isVisible = true
+        configureStatusButton()
+        configureMenu()
+        refreshMenuItems()
+    }
+
+    private func configureStatusButton() {
+        guard let button = statusItem?.button else { return }
+        if let image = NSImage(named: "MenuIcon") {
+            let menuIcon = (image.copy() as? NSImage) ?? image
+            menuIcon.isTemplate = false
+            menuIcon.size = NSSize(width: 18, height: 18)
+            button.image = menuIcon
+            button.imageScaling = .scaleProportionallyUpOrDown
+            button.imagePosition = .imageOnly
+        } else {
+            button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "DemoFlow")
+            button.imagePosition = .imageOnly
+        }
+        button.title = ""
+        button.toolTip = "DemoFlow"
+        button.setButtonType(.momentaryPushIn)
+        button.appearsDisabled = false
+    }
+
+    private func configureMenu() {
+        menu.delegate = self
+        menu.autoenablesItems = false
+
+        recordingToggleItem.target = self
+        recordingToggleItem.action = #selector(toggleRecordingFromMenu)
+        recordingToggleItem.keyEquivalent = "r"
+        recordingToggleItem.keyEquivalentModifierMask = [.command, .option, .control]
+        menu.addItem(recordingToggleItem)
+
+        pipPreviewToggleItem.target = self
+        pipPreviewToggleItem.action = #selector(togglePiPPreviewFromMenu)
+        pipPreviewToggleItem.keyEquivalent = "p"
+        pipPreviewToggleItem.keyEquivalentModifierMask = [.command, .control]
+        menu.addItem(pipPreviewToggleItem)
+
+        pipRecordingToggleItem.target = self
+        pipRecordingToggleItem.action = #selector(togglePiPRecordingFromMenu)
+        pipRecordingToggleItem.keyEquivalent = "p"
+        pipRecordingToggleItem.keyEquivalentModifierMask = [.command, .option, .control]
+        menu.addItem(pipRecordingToggleItem)
+
+        screenDrawToggleItem.target = self
+        screenDrawToggleItem.action = #selector(toggleScreenDrawFromMenu)
+        screenDrawToggleItem.keyEquivalent = "s"
+        screenDrawToggleItem.keyEquivalentModifierMask = [.command, .control]
+        menu.addItem(screenDrawToggleItem)
+
+        recordingSettingsItem.target = self
+        recordingSettingsItem.action = #selector(openRecordingSettingsFromMenu)
+        menu.addItem(recordingSettingsItem)
+
+        statusItem?.menu = menu
+        statusItem?.autosaveName = Self.autosaveName
+        statusItem?.isVisible = true
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshMenuItems()
+    }
+
+    private func refreshMenuItems() {
+        recordingToggleItem.title = L10n.tr("menu.recording_toggle")
+        recordingToggleItem.isEnabled = (appCoordinator?.canStartRecording ?? false) || (appCoordinator?.canStopRecording ?? false)
+
+        pipPreviewToggleItem.title = L10n.tr("menu.pip_preview_toggle")
+        pipPreviewToggleItem.isEnabled = true
+
+        pipRecordingToggleItem.title = L10n.tr("menu.pip_recording_toggle")
+        pipRecordingToggleItem.isEnabled = (appCoordinator?.canStartPiPFilmRecording ?? false)
+            || (appCoordinator?.canStopPiPFilmRecording ?? false)
+            || (appCoordinator?.isPiPFilmPreparing ?? false)
+
+        screenDrawToggleItem.title = L10n.tr("menu.screen_draw_toggle")
+        screenDrawToggleItem.isEnabled = true
+
+        recordingSettingsItem.title = L10n.tr("menu.recording_settings")
+        recordingSettingsItem.isEnabled = true
+    }
+
+    @objc private func toggleRecordingFromMenu() {
+        appCoordinator?.toggleRecordingFromMenuBar()
+        refreshMenuItems()
+    }
+
+    @objc private func togglePiPPreviewFromMenu() {
+        appCoordinator?.togglePiPPreviewFromMenuBar()
+        refreshMenuItems()
+    }
+
+    @objc private func togglePiPRecordingFromMenu() {
+        appCoordinator?.togglePiPRecordingFromMenuBar()
+        refreshMenuItems()
+    }
+
+    @objc private func toggleScreenDrawFromMenu() {
+        appCoordinator?.toggleScreenDrawOverlayFromMenuBar()
+        refreshMenuItems()
+    }
+
+    @objc private func openRecordingSettingsFromMenu() {
+        appCoordinator?.openAppSettingsFromMenuBar()
+        refreshMenuItems()
+    }
+
+    deinit {
+        if let coordinatorObserver {
+            NotificationCenter.default.removeObserver(coordinatorObserver)
+        }
+        if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
         }
     }
 }

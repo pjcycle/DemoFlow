@@ -5,11 +5,13 @@
 //  Created by Jamie on 2026/4/29.
 //
 
+import AppKit
 import SwiftUI
 
 @main
 struct DemoFlowApp: App {
     private static let videoCuttingWindowID = "video-cutting-window"
+    @NSApplicationDelegateAdaptor(DemoFlowAppDelegate.self) private var appDelegate
     @StateObject private var appCoordinator = AppCoordinator()
     @StateObject private var videoCuttingViewModel = VideoCuttingViewModel()
     @StateObject private var audioExtractViewModel = AudioExtractViewModel()
@@ -24,8 +26,12 @@ struct DemoFlowApp: App {
                 videoCuttingWindowID: Self.videoCuttingWindowID
             )
             .environment(\.locale, appCoordinator.appLocale)
+            .onAppear {
+                appDelegate.configure(appCoordinator: appCoordinator)
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 guard newPhase == .active else { return }
+                appDelegate.configure(appCoordinator: appCoordinator)
                 appCoordinator.refreshLanguageIfNeeded()
             }
         }
@@ -42,5 +48,18 @@ struct DemoFlowApp: App {
         .defaultSize(width: 1320, height: 860)
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
+    }
+}
+
+@MainActor
+final class DemoFlowAppDelegate: NSObject, NSApplicationDelegate {
+    private let menuBarController = MenuBarRecordingController()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        menuBarController.install()
+    }
+
+    func configure(appCoordinator: AppCoordinator) {
+        menuBarController.configure(appCoordinator: appCoordinator)
     }
 }
