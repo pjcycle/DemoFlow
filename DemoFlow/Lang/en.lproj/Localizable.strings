@@ -344,8 +344,6 @@
 "fmt.draw.shape_added" = "Added %@ (color %@)";
 "fmt.draw.tool_changed" = "Tool switched: %@";
 "fmt.input.level" = "Input level: %d";
-"fmt.menu.pip_status" = "PiP: %@";
-"fmt.menu.recording_status" = "Recording: %@";
 "fmt.pip.current_camera" = "Current PiP camera: %@";
 "fmt.pip.current_device_summary" = "Camera: %@ · PiP mic: %@";
 "fmt.pip.current_frame" = "Current frame: %@";

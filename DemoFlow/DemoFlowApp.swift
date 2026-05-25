@@ -24,6 +24,10 @@ struct DemoFlowApp: App {
                 videoCuttingWindowID: Self.videoCuttingWindowID
             )
             .environment(\.locale, appCoordinator.appLocale)
+            .onChange(of: scenePhase) { _, newPhase in
+                guard newPhase == .active else { return }
+                appCoordinator.refreshLanguageIfNeeded()
+            }
         }
 
         Window(L10n.tr("legacy.key_157"), id: Self.videoCuttingWindowID) {
@@ -38,55 +42,5 @@ struct DemoFlowApp: App {
         .defaultSize(width: 1320, height: 860)
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
-
-        MenuBarExtra {
-            VStack(alignment: .leading, spacing: 8) {
-                Button(appCoordinator.recorderState.isRecording ? L10n.tr("legacy.key_15") : L10n.tr("legacy.key_98")) {
-                    if appCoordinator.recorderState.isRecording {
-                        appCoordinator.stopRecordingAndRestoreMonitoring()
-                    } else {
-                        appCoordinator.startRecordingFromCurrentConfig()
-                    }
-                }
-                .disabled(appCoordinator.recorderState.isBusy)
-
-                Divider()
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(L10n.f("fmt.menu.recording_status", appCoordinator.statusMessage))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    Text(L10n.f("fmt.menu.pip_status", appCoordinator.pipStatusMessage))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-
-                Divider()
-                Button(L10n.tr("legacy.key_154")) {
-                    NSApp.activate(ignoringOtherApps: true)
-                    for window in NSApp.windows {
-                        if window.isMiniaturized {
-                            window.deminiaturize(nil)
-                        }
-                        window.makeKeyAndOrderFront(nil)
-                    }
-                }
-                Button(L10n.tr("legacy.key_209")) {
-                    NSApp.terminate(nil)
-                }
-            }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 2)
-        } label: {
-            Label(
-                "DemoFlow",
-                systemImage: appCoordinator.recorderState.isRecording ? "record.circle.fill" : "record.circle"
-            )
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            guard newPhase == .active else { return }
-            appCoordinator.refreshLanguageIfNeeded()
-        }
     }
 }

@@ -713,6 +713,10 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
         case failed(Error)
     }
 
+    private struct SendableSampleBuffer: @unchecked Sendable {
+        let value: CMSampleBuffer
+    }
+
     enum WriterError: LocalizedError {
         case outputCreationFailed(String)
         case addVideoInputFailed
@@ -809,6 +813,7 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
         outputType: SCStreamOutputType,
         eventHandler: @escaping (Event) -> Void
     ) {
+        let boxedSampleBuffer = SendableSampleBuffer(value: sampleBuffer)
         queue.async {
             guard !self.isFinishing else { return }
             if self.assetWriter.status == .failed {
@@ -817,9 +822,9 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
             }
             switch outputType {
             case .screen:
-                self.appendVideoSample(sampleBuffer, eventHandler: eventHandler)
+                self.appendVideoSample(boxedSampleBuffer.value, eventHandler: eventHandler)
             case .microphone:
-                self.appendAudioSample(sampleBuffer, eventHandler: eventHandler)
+                self.appendAudioSample(boxedSampleBuffer.value, eventHandler: eventHandler)
             default:
                 break
             }

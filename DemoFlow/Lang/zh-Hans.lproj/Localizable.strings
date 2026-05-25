@@ -344,8 +344,6 @@
 "fmt.draw.shape_added" = "已添加%@（颜色 %@）";
 "fmt.draw.tool_changed" = "工具已切换：%@";
 "fmt.input.level" = "输入电平：%d";
-"fmt.menu.pip_status" = "PiP：%@";
-"fmt.menu.recording_status" = "录屏：%@";
 "fmt.pip.current_camera" = "当前 PiP 摄像头：%@";
 "fmt.pip.current_device_summary" = "当前摄像头：%@ · 当前 PiP 麦克风：%@";
 "fmt.pip.current_frame" = "当前边框：%@";

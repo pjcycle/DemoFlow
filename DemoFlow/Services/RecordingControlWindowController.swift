@@ -149,7 +149,7 @@ final class RecordingControlWindowController: NSObject {
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = false
         panel.isMovableByWindowBackground = true
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.titleVisibility = .hidden
@@ -227,9 +227,9 @@ private final class RecordingControlView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 16
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.32).cgColor
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.01).cgColor
+        layer?.borderWidth = 0
+        layer?.borderColor = NSColor.clear.cgColor
         configureSubviews()
     }
 

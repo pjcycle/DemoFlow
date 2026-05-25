@@ -87,7 +87,6 @@
 3. 屏幕画图状态文案仅写 `drawStatusMessage`。
 4. 音频提取状态文案仅写 `AudioExtractViewModel.statusMessage`。
 5. PiP/画图/音频提取操作禁止覆写录屏主状态文案。
-6. 菜单栏可同时展示 `录屏` 与 `PiP` 状态。
 
 ## 6. 窗口与设备约束
 1. PiP 窗口需支持 `canJoinAllSpaces + fullScreenAuxiliary + moveToActiveSpace`。
@@ -107,7 +106,6 @@
 7. 正常停止、启动失败、异常停止都必须自动恢复主窗口。
 8. `SCContentFilter` 需优先排除 `DemoFlow` 自身应用窗口；若排除失败，需给出可读提示。
 9. 屏幕画图窗口（工具条/画布）可作为白名单窗口加入录屏（类似 PiP 窗口）。
-
 ### 7.1 录屏质量 / 码率约束
 1. `录屏` 页允许新增独立 `视频质量` 模块，位置固定在当前 `录制麦克风` 模块上方，不改变录屏状态机语义。
 2. 录屏质量预设固定：`Small / Balanced / High Quality / Pro Editing / Custom`。

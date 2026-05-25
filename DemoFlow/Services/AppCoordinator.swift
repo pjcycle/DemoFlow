@@ -158,6 +158,7 @@ final class AppCoordinator: ObservableObject {
     private var isSuppressingPiPHideCallback = false
     private var pendingPiPFilmStopTrigger: PiPFilmStopTrigger?
     private var hasEvaluatedPrivacyNoticeThisLaunch = false
+    private var hasBootstrapped = false
 
     convenience init() {
         let drawSessionStore = ScreenDrawSessionStore()
@@ -420,6 +421,8 @@ final class AppCoordinator: ObservableObject {
     }
 
     func bootstrap() {
+        guard !hasBootstrapped else { return }
+        hasBootstrapped = true
         audioEngine.refreshSources()
         pipPreviewRuntime.refreshSources()
         pipPreviewRuntime.refreshAudioSources()
@@ -745,16 +748,7 @@ final class AppCoordinator: ObservableObject {
             statusMessage = unavailableReason()
             return
         }
-        isRecordingPermissionRequestInFlight = true
-        statusMessage = L10n.tr("legacy.key_21")
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard await self.requestScreenRecordingAccessIfNeeded() else {
-                self.isRecordingPermissionRequestInFlight = false
-                self.statusMessage = L10n.tr("legacy.demoflow_7")
-                return
-            }
-            self.isRecordingPermissionRequestInFlight = false
+        runRecordingPermissionRequest {
             self.presentRecordingStartControl(preferredScreen: preferredScreen)
         }
     }
@@ -785,6 +779,25 @@ final class AppCoordinator: ObservableObject {
                 audioEngine.startMonitoringIfNeeded()
             }
             restoreMainWindowAfterRecording()
+        }
+    }
+
+    private func runRecordingPermissionRequest(
+        onDenied: (@MainActor () -> Void)? = nil,
+        onGranted: @escaping @MainActor () async -> Void
+    ) {
+        isRecordingPermissionRequestInFlight = true
+        statusMessage = L10n.tr("legacy.key_21")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await self.requestScreenRecordingAccessIfNeeded() else {
+                self.isRecordingPermissionRequestInFlight = false
+                self.statusMessage = L10n.tr("legacy.demoflow_7")
+                onDenied?()
+                return
+            }
+            self.isRecordingPermissionRequestInFlight = false
+            await onGranted()
         }
     }
 
@@ -900,6 +913,10 @@ final class AppCoordinator: ObservableObject {
         guard shouldRestoreMainWindowAfterRecording else { return }
         shouldRestoreMainWindowAfterRecording = false
         recordingControlController.hide()
+        showMainWindow()
+    }
+
+    func showMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         for window in NSApp.windows where !(window is NSPanel) {
             if window.isMiniaturized {
@@ -953,56 +970,55 @@ final class AppCoordinator: ObservableObject {
             statusMessage = unavailableReason()
             return
         }
-
-        statusMessage = L10n.tr("legacy.key_21")
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard await self.requestScreenRecordingAccessIfNeeded() else {
+        runRecordingPermissionRequest(
+            onDenied: {
                 self.isRecordingArmed = false
                 self.recordingControlController.hide()
-                self.statusMessage = L10n.tr("legacy.demoflow_7")
-                return
+            },
+            onGranted: {
+                await self.beginRecordingAfterPermission()
             }
+        )
+    }
 
-            self.audioEngine.stopMonitoring()
-            self.pipLayout.aspectRatio = self.pipAspectRatio
-            self.shouldRestoreMainWindowAfterRecording = true
-            self.recordingControlController.setMode(.recording)
+    private func beginRecordingAfterPermission() async {
+        audioEngine.stopMonitoring()
+        pipLayout.aspectRatio = pipAspectRatio
+        shouldRestoreMainWindowAfterRecording = true
+        recordingControlController.setMode(.recording)
 
-            // 录屏主成片以“屏幕真实内容”为准，不再叠加独立摄像头二轨。
-            let shouldCaptureMicrophone = self.isAudioAuthorized
-                && self.audioEngine.selectedSourceID != nil
+        let shouldCaptureMicrophone = isAudioAuthorized
+            && audioEngine.selectedSourceID != nil
 
-            let request = RecordingRequest(
-                microphoneDeviceID: shouldCaptureMicrophone ? self.audioEngine.selectedSourceID : nil,
-                cameraDeviceID: nil,
-                cameraAudioDeviceID: nil,
-                recordingQuality: self.recordingQualityConfig,
-                pipWindowID: self.isPiPPreviewVisible ? self.pipController.currentWindowID : nil,
-                screenDrawWindowIDs: self.screenDrawWhitelistWindowIDs(),
-                pipLayout: self.pipLayout,
-                pipAspectRatio: self.pipAspectRatio,
-                pipProcessingConfig: self.pipProcessingConfig,
-                pipAudioPreviewConfig: self.pipAudioPreviewConfig
-            )
+        let request = RecordingRequest(
+            microphoneDeviceID: shouldCaptureMicrophone ? audioEngine.selectedSourceID : nil,
+            cameraDeviceID: nil,
+            cameraAudioDeviceID: nil,
+            recordingQuality: recordingQualityConfig,
+            pipWindowID: isPiPPreviewVisible ? pipController.currentWindowID : nil,
+            screenDrawWindowIDs: screenDrawWhitelistWindowIDs(),
+            pipLayout: pipLayout,
+            pipAspectRatio: pipAspectRatio,
+            pipProcessingConfig: pipProcessingConfig,
+            pipAudioPreviewConfig: pipAudioPreviewConfig
+        )
 
-            let screen = NSScreen.main ?? NSScreen.screens.first
-            await recorder.startRecording(request: request, preferredScreen: screen)
-            if self.recorder.state.isRecording {
-                self.recordingControlController.setMode(.recording)
-                self.recordingControlController.show(on: screen)
-            } else {
-                self.isRecordingArmed = false
-                self.recordingControlController.hide()
-                if case .failed = self.recorder.state,
-                   !self.statusMessage.contains(L10n.tr("legacy.key_65")),
-                   !self.statusMessage.contains(L10n.tr("legacy.key_37")) {
-                    self.statusMessage = L10n.tr("legacy.demoflow_2")
-                }
-                self.restoreMainWindowAfterRecording()
-                if self.isAudioAuthorized {
-                    self.audioEngine.startMonitoringIfNeeded()
-                }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        await recorder.startRecording(request: request, preferredScreen: screen)
+        if recorder.state.isRecording {
+            recordingControlController.setMode(.recording)
+            recordingControlController.show(on: screen)
+        } else {
+            isRecordingArmed = false
+            recordingControlController.hide()
+            if case .failed = recorder.state,
+               !statusMessage.contains(L10n.tr("legacy.key_65")),
+               !statusMessage.contains(L10n.tr("legacy.key_37")) {
+                statusMessage = L10n.tr("legacy.demoflow_2")
+            }
+            restoreMainWindowAfterRecording()
+            if isAudioAuthorized {
+                audioEngine.startMonitoringIfNeeded()
             }
         }
     }
