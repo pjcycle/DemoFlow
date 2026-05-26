@@ -11,6 +11,7 @@ import Foundation
 struct RecordingRequest {
     let captureMode: RecordingCaptureMode
     let regionSelection: RecordingRegionSelection?
+    let includeAppWindowsInCapture: Bool
     let microphoneDeviceID: String?
     let cameraDeviceID: String?
     let cameraAudioDeviceID: String?

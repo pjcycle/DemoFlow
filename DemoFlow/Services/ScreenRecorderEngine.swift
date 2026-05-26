@@ -286,7 +286,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
                 from: content,
                 display: display,
                 pipWindowID: windowID,
-                extraIncludedWindowIDs: extraWindowIDs
+                extraIncludedWindowIDs: extraWindowIDs,
+                includeAppWindowsInCapture: currentRequest?.includeAppWindowsInCapture ?? false
             )
             try await stream.updateContentFilter(filterContext.filter)
             includesPiPWindowInScreenCapture = filterContext.includesPiPWindowInScreenCapture
@@ -350,7 +351,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             from: content,
             display: display,
             pipWindowID: request.pipWindowID,
-            extraIncludedWindowIDs: request.screenDrawWindowIDs
+            extraIncludedWindowIDs: request.screenDrawWindowIDs,
+            includeAppWindowsInCapture: request.includeAppWindowsInCapture
         )
 
         let configuration = SCStreamConfiguration()
@@ -455,19 +457,40 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         from content: SCShareableContent,
         display: SCDisplay,
         pipWindowID: CGWindowID?,
-        extraIncludedWindowIDs: [CGWindowID]
+        extraIncludedWindowIDs: [CGWindowID],
+        includeAppWindowsInCapture: Bool
     ) -> DisplayFilterContext {
-        let excludedApplicationBundleIDs = Set(["com.apple.dock", Bundle.main.bundleIdentifier].compactMap { $0 })
+        let mainBundleID = Bundle.main.bundleIdentifier
+        let excludedApplicationBundleIDs = Set(
+            (
+                includeAppWindowsInCapture
+                    ? ["com.apple.dock", mainBundleID]
+                    : ["com.apple.dock", mainBundleID]
+            ).compactMap { $0 }
+        )
         let excludedApplications = content.applications.filter { application in
             excludedApplicationBundleIDs.contains(application.bundleIdentifier)
         }
-        let allowedWindowIDs = Set(([pipWindowID].compactMap { $0 }) + extraIncludedWindowIDs)
-        let includedWindows = content.windows.filter { window in
-            allowedWindowIDs.contains(window.windowID)
+        let requestedWindowIDs = Set(([pipWindowID].compactMap { $0 }) + extraIncludedWindowIDs)
+        var filterAllowedWindowIDs = requestedWindowIDs
+        if includeAppWindowsInCapture, let mainBundleID {
+            let appOwnedWindowIDs = content.windows.compactMap { window -> CGWindowID? in
+                guard window.owningApplication?.bundleIdentifier == mainBundleID else {
+                    return nil
+                }
+                return window.windowID
+            }
+            filterAllowedWindowIDs.formUnion(appOwnedWindowIDs)
         }
-        let matchedWindowIDs = Set(includedWindows.map(\.windowID))
-        if !allowedWindowIDs.isEmpty, allowedWindowIDs != matchedWindowIDs {
-            let missingWindowIDs = allowedWindowIDs.subtracting(matchedWindowIDs).sorted()
+
+        let includedWindows = content.windows.filter { window in
+            filterAllowedWindowIDs.contains(window.windowID)
+        }
+        let includedWindowIDs = Set(includedWindows.map(\.windowID))
+        let matchedRequestedWindowIDs = requestedWindowIDs.intersection(includedWindowIDs)
+        if !requestedWindowIDs.isEmpty,
+           requestedWindowIDs != matchedRequestedWindowIDs {
+            let missingWindowIDs = requestedWindowIDs.subtracting(matchedRequestedWindowIDs).sorted()
             print("[RecordingWhitelist] unresolved windowIDs=\(missingWindowIDs)")
         }
         let filter = SCContentFilter(
@@ -481,8 +504,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             warnsAppWindowExclusion: warnsAppWindowExclusion,
             windowCaptureResolution: WindowCaptureResolution(
                 requestedPiPWindowID: pipWindowID,
-                requestedWindowIDs: allowedWindowIDs,
-                matchedWindowIDs: matchedWindowIDs
+                requestedWindowIDs: requestedWindowIDs,
+                matchedWindowIDs: matchedRequestedWindowIDs
             )
         )
     }

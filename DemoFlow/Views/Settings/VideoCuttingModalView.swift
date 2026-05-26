@@ -136,6 +136,11 @@ struct VideoCuttingModalView: View {
                 .foregroundStyle(Color.white.opacity(0.2))
         )
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .contextMenu {
+            Button(L10n.tr("legacy.key_54")) {
+                viewModel.importByPanel()
+            }
+        }
     }
 
     private var videoPreview: some View {
@@ -157,6 +162,19 @@ struct VideoCuttingModalView: View {
             .coordinateSpace(name: cropInteractionCoordinateSpace)
             .contentShape(Rectangle())
             .frame(width: bounds.width, height: bounds.height)
+            .contextMenu {
+                Button(L10n.tr("video.cut.source.remove")) {
+                    viewModel.clearImportedVideo()
+                }
+                if let sourceURL = viewModel.sourceURL {
+                    Button(L10n.tr("video.cut.source.reveal")) {
+                        NSWorkspace.shared.activateFileViewerSelecting([sourceURL])
+                    }
+                }
+                Button(L10n.tr("legacy.key_54")) {
+                    viewModel.importByPanel()
+                }
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 10)

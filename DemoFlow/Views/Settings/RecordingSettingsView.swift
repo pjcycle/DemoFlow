@@ -133,8 +133,25 @@ struct RecordingSettingsView: View {
 
                     Spacer(minLength: 0)
                 }
+
+                allRecordingToggleRow
             }
         }
+    }
+
+    private var allRecordingToggleRow: some View {
+        Toggle(isOn: $appCoordinator.isAllRecordingEnabled) {
+            Text("All Recording")
+                .font(.caption2)
+                .foregroundStyle(
+                    appCoordinator.isAllRecordingEnabled
+                        ? Color.primary.opacity(0.9)
+                        : Color.secondary.opacity(0.5)
+                )
+        }
+        .toggleStyle(.checkbox)
+        .disabled(appCoordinator.recorderState.isBusy || appCoordinator.recorderState.isRecording || appCoordinator.isRecordingArmed)
+        .controlSize(.small)
     }
 
     private var recordingQualityCard: some View {

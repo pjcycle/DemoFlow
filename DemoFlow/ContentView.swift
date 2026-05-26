@@ -76,6 +76,13 @@ struct ContentView: View {
         .onChange(of: appCoordinator.sidebarWidth) { _, newValue in
             sidebarWidthStorage = newValue
         }
+        .onReceive(NotificationCenter.default.publisher(for: .demoFlowRecordingDidFinalizeOutput)) { notification in
+            guard let outputURL = notification.object as? URL else { return }
+            hasUserOpenedVideoCutting = true
+            appCoordinator.selectedSettingsSection = .videoCutting
+            openVideoCuttingWindow()
+            videoCuttingViewModel.importFromRecordingOutput(outputURL)
+        }
     }
 
     private var sidebar: some View {

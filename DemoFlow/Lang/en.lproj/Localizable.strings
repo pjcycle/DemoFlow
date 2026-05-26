@@ -620,6 +620,9 @@
 "recording.control.close" = "Close";
 "recording.control.status.paused" = "Recording paused. Resume or stop to export.";
 "recording.control.error.no_segments" = "No recorded segments are available to merge.";
+"video.cut.source.remove" = "Remove Current Video";
+"video.cut.source.reveal" = "Reveal in Finder";
+"video.cut.source.removed" = "Current video removed.";
 "menu.recording_toggle" = "Recording";
 "menu.pip_preview_toggle" = "PiP Preview";
 "menu.pip_recording_toggle" = "PiP Recording";

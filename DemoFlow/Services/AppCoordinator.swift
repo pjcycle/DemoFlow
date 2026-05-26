@@ -38,6 +38,7 @@ final class AppCoordinator: ObservableObject {
     private static let recordingQualityCustomFPSDefaultsKey = "demoflow.recording.quality.custom.fps"
     private static let recordingQualityCustomCodecDefaultsKey = "demoflow.recording.quality.custom.codec"
     private static let recordingQualityCustomBitrateDefaultsKey = "demoflow.recording.quality.custom.videoBitrateMbps"
+    private static let recordingAllCaptureEnabledDefaultsKey = "demoflow.recording.allCapture.enabled"
     private static let pipRecordingQualityPresetDefaultsKey = "demoflow.pip.recording.quality.preset"
     private static let pipRecordingQualityCustomBitrateDefaultsKey = "demoflow.pip.recording.quality.custom.videoBitrateMbps"
     private static let pipHotkeyRegisteredStatusKey = "pip.hotkey.registered.status"
@@ -86,6 +87,12 @@ final class AppCoordinator: ObservableObject {
             }
             guard recordingQualityConfig != oldValue else { return }
             persistRecordingQualityConfig()
+        }
+    }
+    @Published var isAllRecordingEnabled = false {
+        didSet {
+            guard isAllRecordingEnabled != oldValue else { return }
+            persistAllRecordingEnabled()
         }
     }
     @Published var pipRecordingQualityConfig: PiPRecordingQualityConfig = .defaultConfig {
@@ -354,6 +361,7 @@ final class AppCoordinator: ObservableObject {
         loadPersistedDrawDismissalAnimationPreferences()
         loadPersistedDrawAutoCaptureOnCloseEnabled()
         loadPersistedRecordingQualityConfig()
+        loadPersistedAllRecordingEnabled()
         loadPersistedPiPRecordingQualityConfig()
         loadPersistedLanguageOption()
         resolveLanguage()
@@ -1414,8 +1422,10 @@ final class AppCoordinator: ObservableObject {
 
         audioEngine.stopMonitoring()
         pipLayout.aspectRatio = pipAspectRatio
-        shouldRestoreMainWindowAfterRecording = true
-        hideMainWindowForRecording()
+        shouldRestoreMainWindowAfterRecording = !isAllRecordingEnabled
+        if !isAllRecordingEnabled {
+            hideMainWindowForRecording()
+        }
         recordingControlMode = .recording
         updateRecordingControlDisplayModel()
         updateRecordingControlSurface()
@@ -1510,6 +1520,7 @@ final class AppCoordinator: ObservableObject {
         updateRecordingControlDisplayModel()
         updateRecordingControlSurface()
         statusMessage = L10n.tr("legacy.key_169")
+        var finalizedOutputURL: URL?
 
         if recorderState.isRecording {
             await recorder.stopRecording(reason: .finalize)
@@ -1521,6 +1532,7 @@ final class AppCoordinator: ObservableObject {
         do {
             let finalURL = try await finalizeRecordingOutputIfNeeded()
             recorder.applyPostProcessedOutputURL(finalURL)
+            finalizedOutputURL = finalURL
             statusMessage = L10n.tr("legacy.key_109")
         } catch {
             statusMessage = L10n.f("fmt.recording.stop_failed", error.localizedDescription)
@@ -1539,6 +1551,12 @@ final class AppCoordinator: ObservableObject {
             audioEngine.startMonitoringIfNeeded()
         }
         restoreMainWindowAfterRecording()
+        if let finalizedOutputURL {
+            NotificationCenter.default.post(
+                name: .demoFlowRecordingDidFinalizeOutput,
+                object: finalizedOutputURL
+            )
+        }
     }
 
     private func finalizeRecordingOutputIfNeeded() async throws -> URL {
@@ -1585,6 +1603,7 @@ final class AppCoordinator: ObservableObject {
         return RecordingRequest(
             captureMode: captureMode,
             regionSelection: regionSelection,
+            includeAppWindowsInCapture: isAllRecordingEnabled,
             microphoneDeviceID: shouldCaptureMicrophone ? audioEngine.selectedSourceID : nil,
             cameraDeviceID: nil,
             cameraAudioDeviceID: nil,
@@ -2074,6 +2093,12 @@ final class AppCoordinator: ObservableObject {
         persistRecordingQualityConfig()
     }
 
+    private func loadPersistedAllRecordingEnabled() {
+        isAllRecordingEnabled = UserDefaults.standard.bool(
+            forKey: Self.recordingAllCaptureEnabledDefaultsKey
+        )
+    }
+
     private func loadPersistedPiPRecordingQualityConfig() {
         let defaults = UserDefaults.standard
         let preset = PiPRecordingQualityPreset(
@@ -2122,6 +2147,13 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.set(
             config.customVideoBitrateMbps,
             forKey: Self.recordingQualityCustomBitrateDefaultsKey
+        )
+    }
+
+    private func persistAllRecordingEnabled() {
+        UserDefaults.standard.set(
+            isAllRecordingEnabled,
+            forKey: Self.recordingAllCaptureEnabledDefaultsKey
         )
     }
 
@@ -2185,6 +2217,7 @@ final class AppCoordinator: ObservableObject {
 
 extension Notification.Name {
     static let demoFlowMenuBarCoordinatorReady = Notification.Name("DemoFlowMenuBarCoordinatorReady")
+    static let demoFlowRecordingDidFinalizeOutput = Notification.Name("DemoFlowRecordingDidFinalizeOutput")
 }
 
 @MainActor

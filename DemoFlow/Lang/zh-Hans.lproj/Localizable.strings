@@ -6,7 +6,7 @@
 "legacy.k_3_2" = "3. 回到应用后点“刷新设备”或“运行设备诊断”确认设备可见。";
 "legacy.k_4" = "4 蓝";
 "legacy.k_5" = "5 黑";
-"legacy.pj_lee" = "PJ Lee 摄像";
+"legacy.pj_lee" = "PJ Lee Camera";
 "legacy.pip_pip" = "PiP 已关闭，请先启用摄像头 PiP。";
 "legacy.pip" = "PiP 已就绪，再次点击右上角可重新弹出悬浮预览。";
 "legacy.pip_2" = "PiP 待机";
@@ -620,6 +620,9 @@
 "recording.control.close" = "关闭";
 "recording.control.status.paused" = "录制已暂停，可继续或停止输出成片。";
 "recording.control.error.no_segments" = "未采集到可合并的录制片段。";
+"video.cut.source.remove" = "移除当前视频";
+"video.cut.source.reveal" = "在访达中显示";
+"video.cut.source.removed" = "已移除当前视频。";
 "menu.recording_toggle" = "录屏开关";
 "menu.pip_preview_toggle" = "PiP预览显隐";
 "menu.pip_recording_toggle" = "PiP录像开关";

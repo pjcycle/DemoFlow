@@ -157,6 +157,50 @@ final class VideoCuttingViewModel: ObservableObject {
         }
     }
 
+    func importFromRecordingOutput(_ outputURL: URL) {
+        do {
+            let persisted = try importService.persistImportedVideo(from: outputURL)
+            loadVideo(url: persisted)
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func clearImportedVideo() {
+        guard let currentSourceURL = sourceURL else { return }
+        let normalizedSource = currentSourceURL.standardizedFileURL
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DemoFlow", isDirectory: true)
+            .standardizedFileURL
+        if normalizedSource.path.hasPrefix(tempRoot.path) {
+            try? FileManager.default.removeItem(at: normalizedSource)
+        }
+
+        sourceURL = nil
+        sourceDuration = 0
+        keepStartText = "0"
+        keepEndText = "10"
+        deleteRanges = []
+        selectedDeleteRangeID = nil
+        exportURL = nil
+        selectedAspectPreset = .adaptive
+        playbackPosition = 0
+        isPlaying = false
+        hasPlaybackReady = false
+        videoFPS = defaultFPS
+        frameDurationSeconds = 1.0 / defaultFPS
+        sourceVideoSize = .zero
+        sourceVideoAspect = 16.0 / 9.0
+        cropRectNormalized = .full
+        isNoiseReductionEnabled = false
+        noiseReductionPercent = 50
+        selectedAudioEQPreset = .balanced
+        hasAudioTrack = false
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        statusMessage = L10n.tr("video.cut.source.removed")
+    }
+
     func requestFFmpegPermissionFromMenu() {
         guard !isPreparingFFmpeg else { return }
         Task {
