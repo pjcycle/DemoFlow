@@ -314,6 +314,9 @@ final class AppCoordinator: ObservableObject {
         self.recordingControlController.onRegionToggleRequested = { [weak self] in
             self?.handleRecordingControlRegionToggle()
         }
+        self.recordingControlController.onPiPToggleRequested = { [weak self] in
+            self?.togglePiPPreviewFromRecordingControl()
+        }
         self.recordingControlController.onAnnotateToggleRequested = { [weak self] in
             self?.toggleScreenDrawOverlayFromRecordingControl()
         }
@@ -1321,9 +1324,14 @@ final class AppCoordinator: ObservableObject {
     private func handleRecordingControlRegionToggle() {
         guard recordingControlMode == .ready else { return }
         guard !recorderState.isRecording, !recorderState.isBusy else { return }
-        setRecordingCaptureMode(.region)
-        _ = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
+        let nextMode: RecordingCaptureMode = (recordingCaptureMode == .region) ? .fullScreen : .region
+        setRecordingCaptureMode(nextMode)
+        if nextMode == .region {
+            _ = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
+        }
         refreshRecordingControlSizeDisplayForCurrentMode()
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
     }
 
     private func handleRecordingControlCloseRequested() {
@@ -1351,6 +1359,19 @@ final class AppCoordinator: ObservableObject {
 
     private func toggleScreenDrawOverlayFromRecordingControl() {
         toggleScreenDrawOverlayFromMenuBar()
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+        if recorderState.isRecording {
+            refreshRecordingWindowCaptureIfNeeded()
+        }
+    }
+
+    private func togglePiPPreviewFromRecordingControl() {
+        if isPiPPreviewVisible {
+            hidePiPPreview()
+        } else {
+            activatePiPPreview()
+        }
         updateRecordingControlDisplayModel()
         updateRecordingControlSurface()
         if recorderState.isRecording {
@@ -1444,7 +1465,7 @@ final class AppCoordinator: ObservableObject {
         updateRecordingControlSurface()
         statusMessage = L10n.tr("legacy.key_169")
 
-        await recorder.stopRecording()
+        await recorder.stopRecording(reason: .pause)
         guard case .idle = recorder.state, let artifact = recorder.lastArtifact else {
             recordingSessionStopIntent = .none
             recordingControlMode = previousMode
@@ -1491,7 +1512,7 @@ final class AppCoordinator: ObservableObject {
         statusMessage = L10n.tr("legacy.key_169")
 
         if recorderState.isRecording {
-            await recorder.stopRecording()
+            await recorder.stopRecording(reason: .finalize)
             if case .idle = recorder.state, let artifact = recorder.lastArtifact {
                 recordingSessionSegmentURLs.append(artifact.mergedURL)
             }
@@ -1550,7 +1571,9 @@ final class AppCoordinator: ObservableObject {
         }
         let project = CompositionProject(baseAssetURL: baseURL, layers: layers)
         let outputURL = try makeSegmentMergedURL()
-        return try await compositionEngine.stitch(project: project, outputURL: outputURL)
+        let finalURL = try await compositionEngine.stitch(project: project, outputURL: outputURL)
+        cleanupRecordingSessionSegments(except: finalURL)
+        return finalURL
     }
 
     private func buildRecordingRequest(
@@ -1614,6 +1637,8 @@ final class AppCoordinator: ObservableObject {
         let elapsed = formatElapsedDisplay(currentRecordingElapsedSeconds())
         recordingControlDisplayModel.elapsedDisplay = elapsed
         recordingControlDisplayModel.isAnnotateActive = isDrawOverlayVisible
+        recordingControlDisplayModel.isPiPActive = isPiPPreviewVisible
+        recordingControlDisplayModel.captureMode = recordingCaptureMode
         recordingControlDisplayModel.captureSizeDisplay = recordingSessionLockedCaptureSizeDisplay
             ?? (recordingControlDisplayModel.captureSizeDisplay.isEmpty ? "-- x --" : recordingControlDisplayModel.captureSizeDisplay)
         recordingControlDisplayModel.canRecordToggle = recordingControlMode != .stopping
@@ -1705,6 +1730,13 @@ final class AppCoordinator: ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return directory.appendingPathComponent("DemoFlow-segment-merged-\(formatter.string(from: Date())).mp4")
+    }
+
+    private func cleanupRecordingSessionSegments(except keepURL: URL) {
+        let fileManager = FileManager.default
+        for url in recordingSessionSegmentURLs where url.path != keepURL.path {
+            try? fileManager.removeItem(at: url)
+        }
     }
 
     private func activeScreenByPointer() -> NSScreen? {

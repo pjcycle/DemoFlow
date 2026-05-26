@@ -18,6 +18,8 @@ enum RecordingControlMode {
 struct RecordingControlDisplayModel: Equatable {
     var elapsedDisplay: String
     var captureSizeDisplay: String
+    var captureMode: RecordingCaptureMode
+    var isPiPActive: Bool
     var isAnnotateActive: Bool
     var canRecordToggle: Bool
     var canPauseToggle: Bool
@@ -26,6 +28,8 @@ struct RecordingControlDisplayModel: Equatable {
     static let `default` = RecordingControlDisplayModel(
         elapsedDisplay: "00:00:00",
         captureSizeDisplay: "-- x --",
+        captureMode: .fullScreen,
+        isPiPActive: false,
         isAnnotateActive: false,
         canRecordToggle: true,
         canPauseToggle: false,
@@ -44,6 +48,7 @@ final class RecordingControlWindowController: NSObject {
     var onRecordToggleRequested: (() -> Void)?
     var onPauseToggleRequested: (() -> Void)?
     var onRegionToggleRequested: (() -> Void)?
+    var onPiPToggleRequested: (() -> Void)?
     var onAnnotateToggleRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
 
@@ -232,6 +237,9 @@ final class RecordingControlWindowController: NSObject {
         contentView.onRegionTapped = { [weak self] in
             self?.onRegionToggleRequested?()
         }
+        contentView.onPiPTapped = { [weak self] in
+            self?.onPiPToggleRequested?()
+        }
         contentView.onCloseTapped = { [weak self] in
             self?.onCloseRequested?()
         }
@@ -271,6 +279,7 @@ private final class RecordingControlPanel: NSPanel {
 
 private final class RecordingControlView: NSView {
     var onRegionTapped: (() -> Void)?
+    var onPiPTapped: (() -> Void)?
     var onAnnotateTapped: (() -> Void)?
     var onRecordTapped: (() -> Void)?
     var onPauseTapped: (() -> Void)?
@@ -280,6 +289,7 @@ private final class RecordingControlView: NSView {
     private let elapsedLabel = NSTextField(labelWithString: "00:00:00")
     private let captureSizeLabel = NSTextField(labelWithString: "-- x --")
     private let regionButton = NSButton(title: "", target: nil, action: nil)
+    private let pipButton = NSButton(title: "", target: nil, action: nil)
     private let annotateButton = NSButton(title: "", target: nil, action: nil)
     private let recordButton = NSButton(title: "", target: nil, action: nil)
     private let pauseButton = NSButton(title: "", target: nil, action: nil)
@@ -300,6 +310,19 @@ private final class RecordingControlView: NSView {
     func render(mode: RecordingControlMode, model: RecordingControlDisplayModel) {
         elapsedLabel.stringValue = model.elapsedDisplay
         captureSizeLabel.stringValue = model.captureSizeDisplay
+        let isRegionMode = (model.captureMode == .region)
+        let regionDescription = isRegionMode
+            ? L10n.tr(RecordingCaptureMode.fullScreen.titleKey)
+            : L10n.tr(RecordingCaptureMode.region.titleKey)
+        regionButton.image = resolveSymbolImage(
+            preferred: isRegionMode ? "rectangle.dashed" : "display",
+            fallback: "rectangle",
+            description: regionDescription
+        )
+        regionButton.contentTintColor = isRegionMode ? .systemBlue : .labelColor
+        regionButton.alphaValue = isRegionMode ? 1.0 : 0.82
+        pipButton.contentTintColor = model.isPiPActive ? .systemBlue : .labelColor
+        pipButton.alphaValue = model.isPiPActive ? 1.0 : 0.82
 
         switch mode {
         case .ready:
@@ -365,6 +388,7 @@ private final class RecordingControlView: NSView {
         recordButton.isEnabled = model.canRecordToggle && mode != .stopping
         pauseButton.isEnabled = model.canPauseToggle && canPauseByMode && mode != .stopping
         closeButton.isEnabled = model.canClose && mode != .stopping
+        pipButton.isEnabled = mode != .stopping
         annotateButton.isEnabled = mode != .stopping
 
         let isStopping = (mode == .stopping)
@@ -408,6 +432,14 @@ private final class RecordingControlView: NSView {
         regionButton.action = #selector(handleRegionTapped)
 
         configureButton(
+            pipButton,
+            symbolName: "web.camera.fill",
+            fallbackName: "web.camera",
+            description: L10n.tr("legacy.pip_3")
+        )
+        pipButton.action = #selector(handlePiPTapped)
+
+        configureButton(
             annotateButton,
             symbolName: "highlighter",
             fallbackName: "pencil",
@@ -449,6 +481,7 @@ private final class RecordingControlView: NSView {
             captureSizeLabel,
             verticalSeparator(),
             regionButton,
+            pipButton,
             annotateButton,
             verticalSeparator(),
             recordButton,
@@ -484,6 +517,7 @@ private final class RecordingControlView: NSView {
             elapsedLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 66),
             captureSizeLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 66),
             regionButton.widthAnchor.constraint(equalToConstant: 28),
+            pipButton.widthAnchor.constraint(equalToConstant: 28),
             annotateButton.widthAnchor.constraint(equalToConstant: 28),
             recordButton.widthAnchor.constraint(equalToConstant: 28),
             pauseButton.widthAnchor.constraint(equalToConstant: 28),
@@ -538,6 +572,11 @@ private final class RecordingControlView: NSView {
     @objc
     private func handleRegionTapped() {
         onRegionTapped?()
+    }
+
+    @objc
+    private func handlePiPTapped() {
+        onPiPTapped?()
     }
 
     @objc

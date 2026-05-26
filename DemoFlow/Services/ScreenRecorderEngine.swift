@@ -40,6 +40,11 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     private var stopScreenCaptureTimedOut = false
     nonisolated(unsafe) private var screenFileWriter: ScreenCaptureFileWriter?
 
+    enum RecordingStopReason {
+        case pause
+        case finalize
+    }
+
     init(
         cameraEngine: CameraEngine
     ) {
@@ -141,7 +146,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         }
     }
 
-    func stopRecording() async {
+    func stopRecording(reason: RecordingStopReason = .finalize) async {
         guard !state.isBusy else { return }
         guard stream != nil else { return }
         state = .stopping
@@ -189,14 +194,27 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
 
             let screenURL = try ensureURL(screenRawURL, name: L10n.tr("legacy.key_79"))
             try validateRecordedScreenOutput(at: screenURL)
-            let mergedURL = try makeMergedURL()
-            let finalURL = try await compositionEngine.mergeScreenAndCamera(
-                screenURL: screenURL,
-                cameraURL: capturedCameraURL,
-                pipLayout: layout,
-                faceFramingKeyframes: currentFaceKeyframes,
-                outputURL: mergedURL
-            )
+            let finalURL: URL
+            if reason == .pause {
+                // Pause path keeps an intermediate segment only; session-level final output is created on finalize.
+                let segmentURL = try makePausedSegmentURL()
+                finalURL = try await compositionEngine.mergeScreenAndCamera(
+                    screenURL: screenURL,
+                    cameraURL: capturedCameraURL,
+                    pipLayout: layout,
+                    faceFramingKeyframes: currentFaceKeyframes,
+                    outputURL: segmentURL
+                )
+            } else {
+                let mergedURL = try makeMergedURL()
+                finalURL = try await compositionEngine.mergeScreenAndCamera(
+                    screenURL: screenURL,
+                    cameraURL: capturedCameraURL,
+                    pipLayout: layout,
+                    faceFramingKeyframes: currentFaceKeyframes,
+                    outputURL: mergedURL
+                )
+            }
 
             let artifact = RecordingArtifact(
                 screenURL: screenURL,
@@ -205,7 +223,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
                 cameraFramingSidecarURL: sidecarURL
             )
             lastArtifact = artifact
-            lastOutputURL = finalURL
+            if reason == .finalize {
+                lastOutputURL = finalURL
+            }
             statusMessage = stopScreenCaptureTimedOut
                 ? L10n.tr("legacy.key_110")
                 : L10n.tr("legacy.key_109")
@@ -518,6 +538,17 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return folder.appendingPathComponent("DemoFlow-\(formatter.string(from: Date())).mp4")
+    }
+
+    private func makePausedSegmentURL() throws -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DemoFlow", isDirectory: true)
+            .appendingPathComponent("tmp", isDirectory: true)
+            .appendingPathComponent("recording-segments", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        return folder.appendingPathComponent("segment-\(formatter.string(from: Date())).mp4")
     }
 
     private func ensureURL(_ url: URL?, name: String) throws -> URL {

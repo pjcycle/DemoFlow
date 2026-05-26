@@ -27,3 +27,7 @@ Build/
 
 # Build output
 *.app/
+
+# AGENTS SPEC
+AGENTS.md
+SPEC.md
