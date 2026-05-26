@@ -94,34 +94,45 @@ struct RecordingSettingsView: View {
 
     private var recordingControlCard: some View {
         card(title: L10n.tr("legacy.key_102"), icon: "record.circle.fill") {
-            HStack(spacing: 12) {
-                Button(actionButtonTitle) {
-                    if appCoordinator.recorderState.isRecording {
-                        appCoordinator.stopRecordingAndRestoreMonitoring()
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Button(actionButtonTitle) {
+                        if appCoordinator.recorderState.isRecording {
+                            appCoordinator.stopRecordingAndRestoreMonitoring()
+                        } else {
+                            appCoordinator.startRecordingFromCurrentConfig()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(actionButtonDisabled)
+
+                    if let outputURL = appCoordinator.recorder.lastOutputURL {
+                        Button(L10n.tr("legacy.key_123")) {
+                            NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                        }
+                        .buttonStyle(.bordered)
+
+                        Label(
+                            appCoordinator.statusMessage,
+                            systemImage: appCoordinator.recorderState.isRecording ? "record.circle.fill" : "record.circle"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(appCoordinator.recorderState.isRecording ? Color.red : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     } else {
-                        appCoordinator.startRecordingFromCurrentConfig()
+                        Label(
+                            appCoordinator.statusMessage,
+                            systemImage: appCoordinator.recorderState.isRecording ? "record.circle.fill" : "record.circle"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(appCoordinator.recorderState.isRecording ? Color.red : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     }
+
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(actionButtonDisabled)
-
-                if let outputURL = appCoordinator.recorder.lastOutputURL {
-                    Button(L10n.tr("legacy.key_123")) {
-                        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                Spacer(minLength: 10)
-
-                Label(
-                    appCoordinator.statusMessage,
-                    systemImage: appCoordinator.recorderState.isRecording ? "record.circle.fill" : "record.circle"
-                )
-                .font(.footnote)
-                .foregroundStyle(appCoordinator.recorderState.isRecording ? Color.red : .secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
             }
         }
     }

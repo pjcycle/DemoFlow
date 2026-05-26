@@ -223,6 +223,18 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         }
     }
 
+    func applyPostProcessedOutputURL(_ outputURL: URL) {
+        lastOutputURL = outputURL
+        if let artifact = lastArtifact {
+            lastArtifact = RecordingArtifact(
+                screenURL: artifact.screenURL,
+                cameraURL: artifact.cameraURL,
+                mergedURL: outputURL,
+                cameraFramingSidecarURL: artifact.cameraFramingSidecarURL
+            )
+        }
+    }
+
     @discardableResult
     func updatePiPWindowCapture(windowID: CGWindowID?, extraWindowIDs: [CGWindowID] = []) async -> WindowCaptureResolution {
         let requestedWindowIDs = Set(([windowID].compactMap { $0 }) + extraWindowIDs)
@@ -300,9 +312,19 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         includesPiPWindowInScreenCapture: Bool
     ) {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        let mainDisplayID = CGMainDisplayID()
-        guard let display = resolvedDisplay(from: content, preferredID: mainDisplayID) else {
+        let preferredDisplayID: CGDirectDisplayID = {
+            if request.captureMode == .region, let selection = request.regionSelection {
+                return selection.displayID
+            }
+            return CGMainDisplayID()
+        }()
+
+        guard let display = resolvedDisplay(from: content, preferredID: preferredDisplayID) else {
             throw RecorderError.noDisplay
+        }
+
+        if request.captureMode == .region, display.displayID != preferredDisplayID {
+            throw RecorderError.regionDisplayUnavailable
         }
         let filterContext = makeDisplayFilterContext(
             from: content,
@@ -313,10 +335,37 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
 
         let configuration = SCStreamConfiguration()
         let scale = max(CGFloat(filterContext.filter.pointPixelScale), 1)
-        let nativeCaptureSize = CGSize(
-            width: CGFloat(display.width) * scale,
-            height: CGFloat(display.height) * scale
-        )
+
+        let captureRectInDisplayPoints: CGRect?
+        if request.captureMode == .region {
+            guard let selection = request.regionSelection else {
+                throw RecorderError.invalidRegion
+            }
+            let clampedRect = clampedRegionRect(
+                selection.rectInDisplayPoints,
+                displaySizeInPoints: CGSize(width: CGFloat(display.width), height: CGFloat(display.height))
+            )
+            guard clampedRect.width >= 2, clampedRect.height >= 2 else {
+                throw RecorderError.invalidRegion
+            }
+            configuration.sourceRect = clampedRect
+            captureRectInDisplayPoints = clampedRect
+        } else {
+            captureRectInDisplayPoints = nil
+        }
+
+        let nativeCaptureSize: CGSize = {
+            if let captureRectInDisplayPoints {
+                return CGSize(
+                    width: captureRectInDisplayPoints.width * scale,
+                    height: captureRectInDisplayPoints.height * scale
+                )
+            }
+            return CGSize(
+                width: CGFloat(display.width) * scale,
+                height: CGFloat(display.height) * scale
+            )
+        }()
         let profile = request.recordingQuality.resolvedProfile
         let captureSize = resolvedCaptureSize(nativeCaptureSize: nativeCaptureSize, profile: profile)
         configuration.width = max(2, Int(captureSize.width))
@@ -354,6 +403,21 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             displayID: display.displayID,
             includesPiPWindowInScreenCapture: filterContext.includesPiPWindowInScreenCapture
         )
+    }
+
+    private func clampedRegionRect(
+        _ rect: CGRect,
+        displaySizeInPoints: CGSize
+    ) -> CGRect {
+        var next = rect.standardized
+        let minWidth: CGFloat = 2
+        let minHeight: CGFloat = 2
+
+        next.origin.x = max(0, min(next.origin.x, max(0, displaySizeInPoints.width - minWidth)))
+        next.origin.y = max(0, min(next.origin.y, max(0, displaySizeInPoints.height - minHeight)))
+        next.size.width = max(minWidth, min(next.width, displaySizeInPoints.width - next.origin.x))
+        next.size.height = max(minHeight, min(next.height, displaySizeInPoints.height - next.origin.y))
+        return next.integral
     }
 
     private func resolvedDisplay(
@@ -684,6 +748,8 @@ extension ScreenRecorderEngine {
 
     enum RecorderError: Error {
         case noDisplay
+        case regionDisplayUnavailable
+        case invalidRegion
         case missingIntermediate(String)
         case emptyIntermediate(String)
         case startTimedOut
@@ -694,6 +760,10 @@ extension ScreenRecorderEngine {
             switch self {
             case .noDisplay:
                 return L10n.tr("legacy.key_173")
+            case .regionDisplayUnavailable:
+                return L10n.tr("recording.region.error.display_unavailable")
+            case .invalidRegion:
+                return L10n.tr("recording.region.error.invalid_region")
             case let .missingIntermediate(name):
                 return L10n.f("fmt.recording.missing_intermediate", name)
             case let .emptyIntermediate(name):

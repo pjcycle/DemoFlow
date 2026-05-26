@@ -9,6 +9,8 @@ import CoreGraphics
 import Foundation
 
 struct RecordingRequest {
+    let captureMode: RecordingCaptureMode
+    let regionSelection: RecordingRegionSelection?
     let microphoneDeviceID: String?
     let cameraDeviceID: String?
     let cameraAudioDeviceID: String?

@@ -18,6 +18,12 @@ enum PiPFilmStopTrigger {
     case close
 }
 
+private enum RecordingSessionStopIntent {
+    case none
+    case pause
+    case finalize
+}
+
 @MainActor
 final class AppCoordinator: ObservableObject {
     private static let languageOptionDefaultsKey = "demoflow.appLanguage.option"
@@ -70,6 +76,7 @@ final class AppCoordinator: ObservableObject {
         }
     }
     @Published var pipProcessingConfig: PiPProcessingConfig = .default
+    @Published var recordingCaptureMode: RecordingCaptureMode = .fullScreen
     @Published var recordingQualityConfig: RecordingQualityConfig = .defaultConfig {
         didSet {
             let normalized = recordingQualityConfig.normalized()
@@ -136,6 +143,8 @@ final class AppCoordinator: ObservableObject {
     }
     @Published private(set) var recorderState: RecordingState = .idle
     @Published private(set) var isRecordingPermissionRequestInFlight = false
+    @Published private(set) var isRecordingRegionSelecting = false
+    @Published private(set) var recordingRegionSelectionSizeText = "400 x 400"
     @Published private(set) var isPrivacyNoticePresented = false
     @Published private(set) var privacyPolicyOpenErrorMessage: String?
 
@@ -145,6 +154,8 @@ final class AppCoordinator: ObservableObject {
     let screenDrawToolbarController: ScreenDrawToolbarWindowController
     let screenDrawCanvasController: ScreenDrawCanvasWindowController
     let recordingControlController: RecordingControlWindowController
+    let recordingRegionSelectionController: RecordingRegionSelectionWindowController
+    let recordingRegionIndicatorController: RecordingRegionIndicatorWindowController
     let recorder: ScreenRecorderEngine
 
     private let screenDrawHotkeyService: ScreenDrawHotkeyService
@@ -152,12 +163,25 @@ final class AppCoordinator: ObservableObject {
     private let quickActionHotkeyService: QuickActionHotkeyService
     private let pipFilmRecorder = PiPFilmRecorderService()
     private let screenDrawAutoCaptureService = ScreenDrawAutoCaptureService()
+    private let compositionEngine = CompositionExportEngine()
     private var cancellables: Set<AnyCancellable> = []
     private var shouldRestoreMainWindowAfterRecording = false
     private var drawSystemDefinedMonitor: Any?
     private var pendingDrawCaptureRefreshTask: Task<Void, Never>?
     private var isSuppressingPiPHideCallback = false
     private var pendingPiPFilmStopTrigger: PiPFilmStopTrigger?
+    private var armedRecordingCaptureMode: RecordingCaptureMode = .fullScreen
+    private var pendingRegionSelection: RecordingRegionSelection?
+    private var activeRecordingRegionSelection: RecordingRegionSelection?
+    private var recordingControlMode: RecordingControlMode = .ready
+    private var recordingControlDisplayModel: RecordingControlDisplayModel = .default
+    private var recordingSessionSegmentURLs: [URL] = []
+    private var recordingSessionElapsedBeforeCurrentSegment: TimeInterval = 0
+    private var recordingSessionCurrentSegmentStart: Date?
+    private var recordingSessionTimer: Timer?
+    private var recordingControlSizeRefreshTimer: Timer?
+    private var recordingSessionLockedCaptureSizeDisplay: String?
+    private var recordingSessionStopIntent: RecordingSessionStopIntent = .none
     private var hasEvaluatedPrivacyNoticeThisLaunch = false
     private var hasBootstrapped = false
 
@@ -171,6 +195,8 @@ final class AppCoordinator: ObservableObject {
             screenDrawToolbarController: ScreenDrawToolbarWindowController(sessionStore: drawSessionStore),
             screenDrawCanvasController: ScreenDrawCanvasWindowController(sessionStore: drawSessionStore),
             recordingControlController: RecordingControlWindowController(),
+            recordingRegionSelectionController: RecordingRegionSelectionWindowController(),
+            recordingRegionIndicatorController: RecordingRegionIndicatorWindowController(),
             screenDrawHotkeyService: ScreenDrawHotkeyService(),
             pipHotkeyService: PiPHotkeyService(),
             quickActionHotkeyService: QuickActionHotkeyService()
@@ -185,6 +211,8 @@ final class AppCoordinator: ObservableObject {
         screenDrawToolbarController: ScreenDrawToolbarWindowController,
         screenDrawCanvasController: ScreenDrawCanvasWindowController,
         recordingControlController: RecordingControlWindowController,
+        recordingRegionSelectionController: RecordingRegionSelectionWindowController,
+        recordingRegionIndicatorController: RecordingRegionIndicatorWindowController,
         screenDrawHotkeyService: ScreenDrawHotkeyService,
         pipHotkeyService: PiPHotkeyService,
         quickActionHotkeyService: QuickActionHotkeyService
@@ -195,6 +223,8 @@ final class AppCoordinator: ObservableObject {
         self.screenDrawToolbarController = screenDrawToolbarController
         self.screenDrawCanvasController = screenDrawCanvasController
         self.recordingControlController = recordingControlController
+        self.recordingRegionSelectionController = recordingRegionSelectionController
+        self.recordingRegionIndicatorController = recordingRegionIndicatorController
         self.screenDrawHotkeyService = screenDrawHotkeyService
         self.pipHotkeyService = pipHotkeyService
         self.quickActionHotkeyService = quickActionHotkeyService
@@ -275,11 +305,20 @@ final class AppCoordinator: ObservableObject {
             }
         }
 
-        self.recordingControlController.onStartRequested = { [weak self] in
-            self?.beginRecordingFromOverlay()
+        self.recordingControlController.onRecordToggleRequested = { [weak self] in
+            self?.handleRecordingControlRecordToggle()
         }
-        self.recordingControlController.onStopRequested = { [weak self] in
-            self?.stopRecordingAndRestoreMonitoring()
+        self.recordingControlController.onPauseToggleRequested = { [weak self] in
+            self?.handleRecordingControlPauseToggle()
+        }
+        self.recordingControlController.onRegionToggleRequested = { [weak self] in
+            self?.handleRecordingControlRegionToggle()
+        }
+        self.recordingControlController.onAnnotateToggleRequested = { [weak self] in
+            self?.toggleScreenDrawOverlayFromRecordingControl()
+        }
+        self.recordingControlController.onCloseRequested = { [weak self] in
+            self?.handleRecordingControlCloseRequested()
         }
 
         self.screenDrawToolbarController.onVisibilityChanged = { [weak self] visible in
@@ -342,10 +381,15 @@ final class AppCoordinator: ObservableObject {
             && !recorderState.isRecording
             && !isRecordingArmed
             && !isRecordingPermissionRequestInFlight
+            && !isRecordingRegionSelecting
     }
 
     var canStopRecording: Bool {
-        (recorderState.isRecording || recorder.state.isRecording) && !recorderState.isBusy
+        (
+            recorderState.isRecording
+                || recorder.state.isRecording
+                || recordingControlMode == .paused
+        ) && recordingControlMode != .stopping
     }
 
     var isPiPFilmRecording: Bool {
@@ -386,6 +430,8 @@ final class AppCoordinator: ObservableObject {
     var appLocale: Locale {
         resolvedLanguage.locale
     }
+
+    var isRegionRecordingEnabled: Bool { true }
 
     var recordingQualityWarningMessage: String? {
         switch recordingQualityConfig.customWarningLevel(for: currentRecordingNativeSize) {
@@ -767,7 +813,10 @@ final class AppCoordinator: ObservableObject {
             return
         }
         runRecordingPermissionRequest {
-            self.presentRecordingStartControl(preferredScreen: preferredScreen)
+            self.presentRecordingStartControl(
+                preferredScreen: preferredScreen,
+                captureMode: self.effectiveRecordingCaptureMode
+            )
         }
     }
 
@@ -777,38 +826,48 @@ final class AppCoordinator: ObservableObject {
             return
         }
         runRecordingPermissionRequest {
-            self.presentRecordingStartControl(preferredScreen: preferredScreen)
-            await self.beginRecordingFromPreparedOverlay()
+            self.presentRecordingStartControl(
+                preferredScreen: preferredScreen,
+                captureMode: .fullScreen
+            )
+            await self.startRecordingSegmentForCurrentSession()
         }
     }
 
-    private func presentRecordingStartControl(preferredScreen: NSScreen? = nil) {
+    private func presentRecordingStartControl(
+        preferredScreen: NSScreen? = nil,
+        captureMode: RecordingCaptureMode
+    ) {
         guard canStartRecording else {
             statusMessage = unavailableReason()
             return
         }
-        isRecordingArmed = true
         let screen = preferredScreen ?? NSScreen.main ?? NSScreen.screens.first
-        recordingControlController.setMode(.readyToStart)
+        resetRecordingSessionForArming(captureMode: captureMode)
+        isRecordingArmed = true
+        armedRecordingCaptureMode = captureMode
+        recordingControlMode = .ready
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
         recordingControlController.show(on: screen)
-        statusMessage = L10n.tr("legacy.key_176")
+        startRecordingControlSizeRefreshTimerIfNeeded()
+        if captureMode == .region {
+            guard beginRegionSelectionIfNeededForReadyControl(preferredScreen: screen) else {
+                isRecordingArmed = false
+                recordingControlController.hide()
+                statusMessage = L10n.tr("recording.region.error.display_unavailable")
+                return
+            }
+            statusMessage = L10n.tr("recording.region.status.selecting")
+        } else {
+            dismissRegionSelectionOverlay()
+            refreshRecordingControlSizeDisplayForCurrentMode()
+            statusMessage = L10n.tr("legacy.key_176")
+        }
     }
 
     func stopRecordingAndRestoreMonitoring() {
-        guard canStopRecording else { return }
-        isRecordingArmed = false
-        recordingControlController.setMode(.stopping)
-        statusMessage = L10n.tr("legacy.key_169")
-        Task { [weak self] in
-            guard let self else { return }
-            await recorder.stopRecording()
-            pipLayout = pipController.currentLayoutState()
-            recordingControlController.hide()
-            if isAudioAuthorized {
-                audioEngine.startMonitoringIfNeeded()
-            }
-            restoreMainWindowAfterRecording()
-        }
+        handleRecordingControlCloseRequested()
     }
 
     private func runRecordingPermissionRequest(
@@ -828,6 +887,140 @@ final class AppCoordinator: ObservableObject {
             self.isRecordingPermissionRequestInFlight = false
             await onGranted()
         }
+    }
+
+    private var effectiveRecordingCaptureMode: RecordingCaptureMode {
+        recordingCaptureMode
+    }
+
+    func setRecordingCaptureMode(_ mode: RecordingCaptureMode) {
+        guard recordingCaptureMode != mode else { return }
+        recordingCaptureMode = mode
+        armedRecordingCaptureMode = mode
+        if mode == .fullScreen {
+            dismissRegionSelectionOverlay()
+            statusMessage = L10n.tr("legacy.key_115")
+            if isRecordingArmed || recordingControlController.isVisible {
+                refreshRecordingControlSizeDisplayForCurrentMode()
+            }
+            return
+        }
+
+        dismissRegionSelectionOverlay()
+        if let pendingRegionSelection {
+            updateRecordingRegionSelectionSizeText(from: pendingRegionSelection)
+            statusMessage = L10n.tr("recording.region.status.confirmed")
+        } else {
+            recordingRegionSelectionSizeText = "400 x 400"
+            statusMessage = L10n.tr("recording.region.status.selecting")
+        }
+        if isRecordingArmed || recordingControlController.isVisible {
+            _ = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
+            refreshRecordingControlSizeDisplayForCurrentMode()
+        }
+    }
+
+    @discardableResult
+    private func beginRegionSelectionIfNeededForReadyControl(preferredScreen: NSScreen?) -> Bool {
+        if isRecordingRegionSelecting {
+            return true
+        }
+        let screen = preferredScreen
+            ?? activeScreenByPointer()
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        guard let screen, screen.displayID != nil else {
+            return false
+        }
+
+        isRecordingRegionSelecting = true
+        recordingRegionSelectionController.onSelectionChanged = { [weak self] selection in
+            guard let self else { return }
+            self.pendingRegionSelection = selection
+            self.updateRecordingRegionSelectionSizeText(from: selection)
+            self.refreshRecordingControlSizeDisplayForCurrentMode()
+        }
+
+        let didPresent = recordingRegionSelectionController.present(
+            on: screen,
+            initialSelection: pendingRegionSelection
+        ) { [weak self] result in
+            guard let self else { return }
+            self.isRecordingRegionSelecting = false
+            self.recordingRegionSelectionController.onSelectionChanged = nil
+
+            switch result {
+            case .cancelled:
+                self.statusMessage = L10n.tr("recording.region.status.cancelled")
+                if self.isRecordingArmed,
+                   self.recordingControlMode == .ready,
+                   !self.recorderState.isRecording {
+                    self.isRecordingArmed = false
+                    self.recordingControlController.hide()
+                    self.recordingRegionIndicatorController.hide()
+                    self.resetRecordingSessionStateForIdle()
+                }
+            case let .confirmed(selection):
+                guard selection.rectInDisplayPoints.width >= 2,
+                      selection.rectInDisplayPoints.height >= 2 else {
+                    self.statusMessage = L10n.tr("recording.region.error.invalid_region")
+                    return
+                }
+                self.pendingRegionSelection = selection
+                self.updateRecordingRegionSelectionSizeText(from: selection)
+                self.refreshRecordingControlSizeDisplayForCurrentMode()
+                self.statusMessage = L10n.tr("recording.region.status.confirmed")
+            }
+        }
+
+        if !didPresent {
+            isRecordingRegionSelecting = false
+            recordingRegionSelectionController.onSelectionChanged = nil
+            return false
+        }
+        if didPresent, let liveSelection = recordingRegionSelectionController.currentSelection {
+            pendingRegionSelection = liveSelection
+            updateRecordingRegionSelectionSizeText(from: liveSelection)
+            refreshRecordingControlSizeDisplayForCurrentMode()
+        }
+        return true
+    }
+
+    private func dismissRegionSelectionOverlay() {
+        if isRecordingRegionSelecting {
+            recordingRegionSelectionController.dismiss()
+            recordingRegionSelectionController.onSelectionChanged = nil
+            isRecordingRegionSelecting = false
+        } else {
+            recordingRegionSelectionController.onSelectionChanged = nil
+        }
+    }
+
+    private func refreshRecordingControlSizeDisplayForCurrentMode() {
+        let modeForPreview = recordingCaptureMode
+        let sizeText: String = {
+            if let locked = recordingSessionLockedCaptureSizeDisplay {
+                return locked
+            }
+            switch modeForPreview {
+            case .fullScreen:
+                return formattedCurrentScreenSizeDisplay() ?? "-- x --"
+            case .region:
+                if let activeRecordingRegionSelection {
+                    return formatSizeDisplay(for: activeRecordingRegionSelection.rectInDisplayPoints.size)
+                }
+                if let pendingRegionSelection {
+                    return formatSizeDisplay(for: pendingRegionSelection.rectInDisplayPoints.size)
+                }
+                return recordingRegionSelectionSizeText
+            }
+        }()
+        recordingControlDisplayModel.captureSizeDisplay = sizeText
+        updateRecordingControlSurface()
+    }
+
+    private func updateRecordingRegionSelectionSizeText(from selection: RecordingRegionSelection) {
+        recordingRegionSelectionSizeText = formatSizeDisplay(for: selection.rectInDisplayPoints.size)
     }
 
     private func bindState() {
@@ -1002,17 +1195,44 @@ final class AppCoordinator: ObservableObject {
         case .recording:
             isRecordingArmed = false
             hideMainWindowForRecording()
-            recordingControlController.setMode(.recording)
+            recordingControlMode = .recording
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
             let screen = NSScreen.main ?? NSScreen.screens.first
             recordingControlController.show(on: screen)
+            if let activeRecordingRegionSelection {
+                _ = recordingRegionIndicatorController.show(selection: activeRecordingRegionSelection)
+            } else {
+                recordingRegionIndicatorController.hide()
+            }
             refreshRecordingWindowCaptureIfNeeded()
         case .idle:
+            if recordingSessionStopIntent != .none || recordingControlMode == .paused {
+                return
+            }
             isRecordingArmed = false
+            stopRecordingSessionTimer()
+            recordingControlMode = .ready
             recordingControlController.hide()
+            stopRecordingControlSizeRefreshTimer()
+            recordingRegionIndicatorController.hide()
+            dismissRegionSelectionOverlay()
+            activeRecordingRegionSelection = nil
+            recordingSessionLockedCaptureSizeDisplay = nil
             restoreMainWindowAfterRecording()
         case .failed:
+            if recordingSessionStopIntent != .none || recordingControlMode == .paused {
+                return
+            }
             isRecordingArmed = false
+            stopRecordingSessionTimer()
+            recordingControlMode = .ready
             recordingControlController.hide()
+            stopRecordingControlSizeRefreshTimer()
+            recordingRegionIndicatorController.hide()
+            dismissRegionSelectionOverlay()
+            activeRecordingRegionSelection = nil
+            recordingSessionLockedCaptureSizeDisplay = nil
             restoreMainWindowAfterRecording()
             if isAudioAuthorized {
                 audioEngine.startMonitoringIfNeeded()
@@ -1025,7 +1245,7 @@ final class AppCoordinator: ObservableObject {
     @discardableResult
     private func syncPiPWindowCaptureState() async -> Bool {
         guard recorderState.isRecording else { return true }
-        let pipWindowID = isPiPPreviewVisible ? pipController.currentWindowID : nil
+        let pipWindowID = pipController.currentWindowID
         let resolution = await recorder.updatePiPWindowCapture(
             windowID: pipWindowID,
             extraWindowIDs: screenDrawWhitelistWindowIDs()
@@ -1033,76 +1253,458 @@ final class AppCoordinator: ObservableObject {
         return resolution.didIncludeAllRequestedWindows
     }
 
-    private func beginRecordingFromOverlay() {
-        guard isRecordingArmed else { return }
-        guard !recorderState.isBusy && !recorderState.isRecording else {
-            isRecordingArmed = false
-            recordingControlController.hide()
-            statusMessage = unavailableReason()
-            return
-        }
-        runRecordingPermissionRequest(
-            onDenied: {
-                self.isRecordingArmed = false
-                self.recordingControlController.hide()
-            },
-            onGranted: {
-                await self.beginRecordingFromPreparedOverlay()
+    private func handleRecordingControlRecordToggle() {
+        switch recordingControlMode {
+        case .ready:
+            guard isRecordingArmed else {
+                statusMessage = unavailableReason()
+                return
             }
-        )
+            guard !recorderState.isBusy, !recorderState.isRecording else {
+                statusMessage = unavailableReason()
+                return
+            }
+            if armedRecordingCaptureMode == .region {
+                if let liveSelection = recordingRegionSelectionController.currentSelection {
+                    pendingRegionSelection = liveSelection
+                    updateRecordingRegionSelectionSizeText(from: liveSelection)
+                }
+                guard let pendingRegionSelection,
+                      NSScreen.screen(with: pendingRegionSelection.displayID) != nil else {
+                    let didPresent = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
+                    if !didPresent {
+                        statusMessage = L10n.tr("recording.region.error.display_unavailable")
+                    } else {
+                        statusMessage = L10n.tr("recording.region.status.selecting")
+                    }
+                    return
+                }
+            }
+            runRecordingPermissionRequest(
+                onDenied: {
+                    self.recordingControlMode = .ready
+                    self.updateRecordingControlDisplayModel()
+                    self.updateRecordingControlSurface()
+                },
+                onGranted: {
+                    await self.startRecordingSegmentForCurrentSession()
+                }
+            )
+        case .recording:
+            Task { @MainActor [weak self] in
+                await self?.stopRecordingSessionAndFinalize(closeControlAfterStop: true)
+            }
+        case .paused:
+            Task { @MainActor [weak self] in
+                await self?.resumeRecordingSessionSegment()
+            }
+        case .stopping:
+            break
+        }
     }
 
-    private func beginRecordingFromPreparedOverlay() async {
-        guard isRecordingArmed else { return }
-        guard !recorderState.isBusy && !recorderState.isRecording else {
+    private func handleRecordingControlPauseToggle() {
+        switch recordingControlMode {
+        case .recording:
+            Task { @MainActor [weak self] in
+                await self?.pauseRecordingSessionSegment()
+            }
+        case .paused:
+            Task { @MainActor [weak self] in
+                await self?.resumeRecordingSessionSegment()
+            }
+        case .ready, .stopping:
+            break
+        }
+    }
+
+    private func handleRecordingControlRegionToggle() {
+        guard recordingControlMode == .ready else { return }
+        guard !recorderState.isRecording, !recorderState.isBusy else { return }
+        setRecordingCaptureMode(.region)
+        _ = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
+        refreshRecordingControlSizeDisplayForCurrentMode()
+    }
+
+    private func handleRecordingControlCloseRequested() {
+        switch recordingControlMode {
+        case .recording, .paused:
+            Task { @MainActor [weak self] in
+                await self?.stopRecordingSessionAndFinalize(closeControlAfterStop: true)
+            }
+        case .ready:
             isRecordingArmed = false
+            dismissRegionSelectionOverlay()
+            recordingRegionIndicatorController.hide()
             recordingControlController.hide()
+            stopRecordingControlSizeRefreshTimer()
+            resetRecordingSessionStateForIdle()
+            statusMessage = L10n.tr("recording.region.status.cancelled")
+            if isAudioAuthorized {
+                audioEngine.startMonitoringIfNeeded()
+            }
+            restoreMainWindowAfterRecording()
+        case .stopping:
+            break
+        }
+    }
+
+    private func toggleScreenDrawOverlayFromRecordingControl() {
+        toggleScreenDrawOverlayFromMenuBar()
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+        if recorderState.isRecording {
+            refreshRecordingWindowCaptureIfNeeded()
+        }
+    }
+
+    private func startRecordingSegmentForCurrentSession() async {
+        guard !recorderState.isBusy, !recorderState.isRecording else {
             statusMessage = unavailableReason()
             return
         }
-        await beginRecordingAfterPermission()
-    }
 
-    private func beginRecordingAfterPermission() async {
+        let captureMode = armedRecordingCaptureMode
+        let regionSelection: RecordingRegionSelection? = {
+            guard captureMode == .region else { return nil }
+            if let liveSelection = recordingRegionSelectionController.currentSelection {
+                pendingRegionSelection = liveSelection
+                updateRecordingRegionSelectionSizeText(from: liveSelection)
+            }
+            return pendingRegionSelection
+        }()
+
+        if captureMode == .region {
+            guard let regionSelection,
+                  NSScreen.screen(with: regionSelection.displayID) != nil else {
+                statusMessage = L10n.tr("recording.region.error.invalid_region")
+                return
+            }
+            activeRecordingRegionSelection = regionSelection
+            recordingSessionLockedCaptureSizeDisplay = formatSizeDisplay(for: regionSelection.rectInDisplayPoints.size)
+            dismissRegionSelectionOverlay()
+            _ = recordingRegionIndicatorController.show(selection: regionSelection)
+        } else {
+            activeRecordingRegionSelection = nil
+            recordingSessionLockedCaptureSizeDisplay = formattedCurrentScreenSizeDisplay()
+            dismissRegionSelectionOverlay()
+            recordingRegionIndicatorController.hide()
+        }
+
         audioEngine.stopMonitoring()
         pipLayout.aspectRatio = pipAspectRatio
         shouldRestoreMainWindowAfterRecording = true
-        recordingControlController.setMode(.recording)
+        hideMainWindowForRecording()
+        recordingControlMode = .recording
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
 
+        let request = buildRecordingRequest(
+            captureMode: captureMode,
+            regionSelection: activeRecordingRegionSelection
+        )
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        await recorder.startRecording(request: request, preferredScreen: screen)
+        if recorder.state.isRecording {
+            recordingControlMode = .recording
+            isRecordingArmed = false
+            recordingControlController.show(on: screen)
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            if recordingSessionCurrentSegmentStart == nil {
+                recordingSessionCurrentSegmentStart = Date()
+                startRecordingSessionTimer()
+            }
+            refreshRecordingWindowCaptureIfNeeded()
+        } else {
+            recordingControlMode = .ready
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            if case .failed = recorder.state,
+               !statusMessage.contains(L10n.tr("legacy.key_65")),
+               !statusMessage.contains(L10n.tr("legacy.key_37")) {
+                statusMessage = L10n.tr("legacy.demoflow_2")
+            }
+            activeRecordingRegionSelection = nil
+            recordingSessionLockedCaptureSizeDisplay = nil
+            if isAudioAuthorized {
+                audioEngine.startMonitoringIfNeeded()
+            }
+            restoreMainWindowAfterRecording()
+        }
+    }
+
+    private func pauseRecordingSessionSegment() async {
+        guard recordingControlMode == .recording else { return }
+        guard recorderState.isRecording else { return }
+        let previousMode = recordingControlMode
+        recordingSessionStopIntent = .pause
+        recordingControlMode = .stopping
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+        statusMessage = L10n.tr("legacy.key_169")
+
+        await recorder.stopRecording()
+        guard case .idle = recorder.state, let artifact = recorder.lastArtifact else {
+            recordingSessionStopIntent = .none
+            recordingControlMode = previousMode
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            if isAudioAuthorized {
+                audioEngine.startMonitoringIfNeeded()
+            }
+            return
+        }
+
+        recordingSessionSegmentURLs.append(artifact.mergedURL)
+        let elapsed = currentRecordingElapsedSeconds()
+        recordingSessionElapsedBeforeCurrentSegment = elapsed
+        recordingSessionCurrentSegmentStart = nil
+        stopRecordingSessionTimer()
+        recordingControlMode = .paused
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        recordingControlController.show(on: screen)
+        statusMessage = L10n.tr("recording.control.status.paused")
+        if isAudioAuthorized {
+            audioEngine.startMonitoringIfNeeded()
+        }
+    }
+
+    private func resumeRecordingSessionSegment() async {
+        guard recordingControlMode == .paused else { return }
+        guard !recorderState.isBusy, !recorderState.isRecording else { return }
+        recordingSessionStopIntent = .none
+        recordingControlMode = .ready
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+        await startRecordingSegmentForCurrentSession()
+    }
+
+    private func stopRecordingSessionAndFinalize(closeControlAfterStop: Bool) async {
+        guard recordingControlMode != .stopping else { return }
+        recordingSessionStopIntent = .finalize
+        recordingControlMode = .stopping
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+        statusMessage = L10n.tr("legacy.key_169")
+
+        if recorderState.isRecording {
+            await recorder.stopRecording()
+            if case .idle = recorder.state, let artifact = recorder.lastArtifact {
+                recordingSessionSegmentURLs.append(artifact.mergedURL)
+            }
+        }
+
+        do {
+            let finalURL = try await finalizeRecordingOutputIfNeeded()
+            recorder.applyPostProcessedOutputURL(finalURL)
+            statusMessage = L10n.tr("legacy.key_109")
+        } catch {
+            statusMessage = L10n.f("fmt.recording.stop_failed", error.localizedDescription)
+        }
+
+        pipLayout = pipController.currentLayoutState()
+        recordingRegionIndicatorController.hide()
+        dismissRegionSelectionOverlay()
+        if closeControlAfterStop {
+            recordingControlController.hide()
+        }
+        stopRecordingControlSizeRefreshTimer()
+        recordingSessionStopIntent = .none
+        resetRecordingSessionStateForIdle()
+        if isAudioAuthorized {
+            audioEngine.startMonitoringIfNeeded()
+        }
+        restoreMainWindowAfterRecording()
+    }
+
+    private func finalizeRecordingOutputIfNeeded() async throws -> URL {
+        if recordingSessionSegmentURLs.isEmpty {
+            if let output = recorder.lastOutputURL {
+                return output
+            }
+            throw NSError(
+                domain: "DemoFlow.Recording",
+                code: -1001,
+                userInfo: [NSLocalizedDescriptionKey: L10n.tr("recording.control.error.no_segments")]
+            )
+        }
+        if recordingSessionSegmentURLs.count == 1 {
+            return recordingSessionSegmentURLs[0]
+        }
+
+        let baseURL = recordingSessionSegmentURLs[0]
+        var accumulatedSeconds = await normalizedDurationSeconds(for: baseURL) ?? 0
+        var layers: [CompositionLayer] = []
+        for url in recordingSessionSegmentURLs.dropFirst() {
+            layers.append(
+                CompositionLayer(
+                    assetURL: url,
+                    insertTime: CMTime(seconds: max(0, accumulatedSeconds), preferredTimescale: 600),
+                    mute: false
+                )
+            )
+            accumulatedSeconds += await normalizedDurationSeconds(for: url) ?? 0
+        }
+        let project = CompositionProject(baseAssetURL: baseURL, layers: layers)
+        let outputURL = try makeSegmentMergedURL()
+        return try await compositionEngine.stitch(project: project, outputURL: outputURL)
+    }
+
+    private func buildRecordingRequest(
+        captureMode: RecordingCaptureMode,
+        regionSelection: RecordingRegionSelection?
+    ) -> RecordingRequest {
         let shouldCaptureMicrophone = isAudioAuthorized
             && audioEngine.selectedSourceID != nil
-
-        let request = RecordingRequest(
+        return RecordingRequest(
+            captureMode: captureMode,
+            regionSelection: regionSelection,
             microphoneDeviceID: shouldCaptureMicrophone ? audioEngine.selectedSourceID : nil,
             cameraDeviceID: nil,
             cameraAudioDeviceID: nil,
             recordingQuality: recordingQualityConfig,
-            pipWindowID: isPiPPreviewVisible ? pipController.currentWindowID : nil,
+            pipWindowID: pipController.currentWindowID,
             screenDrawWindowIDs: screenDrawWhitelistWindowIDs(),
             pipLayout: pipLayout,
             pipAspectRatio: pipAspectRatio,
             pipProcessingConfig: pipProcessingConfig,
             pipAudioPreviewConfig: pipAudioPreviewConfig
         )
+    }
 
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        await recorder.startRecording(request: request, preferredScreen: screen)
-        if recorder.state.isRecording {
-            recordingControlController.setMode(.recording)
-            recordingControlController.show(on: screen)
+    private func resetRecordingSessionForArming(captureMode: RecordingCaptureMode) {
+        recordingSessionSegmentURLs = []
+        recordingSessionElapsedBeforeCurrentSegment = 0
+        recordingSessionCurrentSegmentStart = nil
+        stopRecordingSessionTimer()
+        recordingSessionLockedCaptureSizeDisplay = nil
+        recordingSessionStopIntent = .none
+        recordingControlMode = .ready
+        recordingControlDisplayModel = .default
+        recordingControlDisplayModel.isAnnotateActive = isDrawOverlayVisible
+        armedRecordingCaptureMode = captureMode
+        if captureMode == .region {
+            recordingControlDisplayModel.captureSizeDisplay = pendingRegionSelection.map {
+                formatSizeDisplay(for: $0.rectInDisplayPoints.size)
+            } ?? recordingRegionSelectionSizeText
         } else {
-            isRecordingArmed = false
-            recordingControlController.hide()
-            if case .failed = recorder.state,
-               !statusMessage.contains(L10n.tr("legacy.key_65")),
-               !statusMessage.contains(L10n.tr("legacy.key_37")) {
-                statusMessage = L10n.tr("legacy.demoflow_2")
-            }
-            restoreMainWindowAfterRecording()
-            if isAudioAuthorized {
-                audioEngine.startMonitoringIfNeeded()
+            recordingControlDisplayModel.captureSizeDisplay = formattedCurrentScreenSizeDisplay() ?? "-- x --"
+        }
+        updateRecordingControlDisplayModel()
+    }
+
+    private func resetRecordingSessionStateForIdle() {
+        recordingSessionSegmentURLs = []
+        recordingSessionElapsedBeforeCurrentSegment = 0
+        recordingSessionCurrentSegmentStart = nil
+        stopRecordingSessionTimer()
+        stopRecordingControlSizeRefreshTimer()
+        recordingSessionLockedCaptureSizeDisplay = nil
+        recordingSessionStopIntent = .none
+        recordingControlMode = .ready
+        activeRecordingRegionSelection = nil
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+    }
+
+    private func updateRecordingControlDisplayModel() {
+        let elapsed = formatElapsedDisplay(currentRecordingElapsedSeconds())
+        recordingControlDisplayModel.elapsedDisplay = elapsed
+        recordingControlDisplayModel.isAnnotateActive = isDrawOverlayVisible
+        recordingControlDisplayModel.captureSizeDisplay = recordingSessionLockedCaptureSizeDisplay
+            ?? (recordingControlDisplayModel.captureSizeDisplay.isEmpty ? "-- x --" : recordingControlDisplayModel.captureSizeDisplay)
+        recordingControlDisplayModel.canRecordToggle = recordingControlMode != .stopping
+        recordingControlDisplayModel.canPauseToggle = (recordingControlMode == .recording || recordingControlMode == .paused)
+            && recordingControlMode != .stopping
+        recordingControlDisplayModel.canClose = recordingControlMode != .stopping
+    }
+
+    private func updateRecordingControlSurface() {
+        recordingControlController.setMode(recordingControlMode)
+        recordingControlController.setDisplayModel(recordingControlDisplayModel)
+    }
+
+    private func startRecordingSessionTimer() {
+        stopRecordingSessionTimer()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.updateRecordingControlDisplayModel()
+                self.updateRecordingControlSurface()
             }
         }
+        recordingSessionTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopRecordingSessionTimer() {
+        recordingSessionTimer?.invalidate()
+        recordingSessionTimer = nil
+    }
+
+    private func startRecordingControlSizeRefreshTimerIfNeeded() {
+        stopRecordingControlSizeRefreshTimer()
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.recordingControlController.isVisible else { return }
+                guard self.recordingControlMode == .ready || self.recordingControlMode == .paused else { return }
+                self.refreshRecordingControlSizeDisplayForCurrentMode()
+            }
+        }
+        recordingControlSizeRefreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopRecordingControlSizeRefreshTimer() {
+        recordingControlSizeRefreshTimer?.invalidate()
+        recordingControlSizeRefreshTimer = nil
+    }
+
+    private func currentRecordingElapsedSeconds() -> TimeInterval {
+        recordingSessionElapsedBeforeCurrentSegment
+            + (recordingSessionCurrentSegmentStart.map { max(0, Date().timeIntervalSince($0)) } ?? 0)
+    }
+
+    private func formatElapsedDisplay(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        let hh = total / 3600
+        let mm = (total % 3600) / 60
+        let ss = total % 60
+        return String(format: "%02d:%02d:%02d", hh, mm, ss)
+    }
+
+    private func formatSizeDisplay(for size: CGSize) -> String {
+        let width = max(1, Int(size.width.rounded()))
+        let height = max(1, Int(size.height.rounded()))
+        return "\(width) x \(height)"
+    }
+
+    private func formattedCurrentScreenSizeDisplay() -> String? {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return nil }
+        let size = CGSize(
+            width: screen.frame.width * screen.backingScaleFactor,
+            height: screen.frame.height * screen.backingScaleFactor
+        )
+        return formatSizeDisplay(for: size)
+    }
+
+    private func normalizedDurationSeconds(for url: URL) async -> Double? {
+        let asset = AVURLAsset(url: url)
+        guard let duration = try? await asset.load(.duration) else { return nil }
+        let durationSeconds = CMTimeGetSeconds(duration)
+        guard durationSeconds.isFinite, durationSeconds > 0 else { return nil }
+        return durationSeconds
+    }
+
+    private func makeSegmentMergedURL() throws -> URL {
+        let directory = try DemoFlowOutputDirectoryPolicy.recordingsDirectory()
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return directory.appendingPathComponent("DemoFlow-segment-merged-\(formatter.string(from: Date())).mp4")
     }
 
     private func activeScreenByPointer() -> NSScreen? {

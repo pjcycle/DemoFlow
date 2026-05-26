@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import AppIntents
 import SwiftUI
 
 @main
