@@ -244,7 +244,7 @@
 "legacy.key_187" = "Window Aspect & Auto Scale";
 "legacy.k_240x240" = "Window pops out at 240x240 by default; then freely resize via edge drag or mouse wheel.";
 "legacy.key_188" = "Stroke Tuning";
-"legacy.key_189" = "Waiting for camera start...";
+"legacy.key_189" = "Waiting for recording start...";
 "legacy.key_190" = "Waiting for recording start...";
 "legacy.key_191" = "Arrow";
 "legacy.demoflow_6" = "System denied camera access. Enable DemoFlow under System Settings > Privacy & Security > Camera.";
@@ -343,6 +343,7 @@
 "fmt.draw.intensity" = "Hand-drawn intensity: %d%%";
 "fmt.draw.mark_style_changed" = "Mark style switched: %@";
 "fmt.draw.shape_added" = "Added %@ (color %@)";
+"fmt.draw.text_added" = "Added text annotation: %@";
 "fmt.draw.tool_changed" = "Tool switched: %@";
 "fmt.input.level" = "Input level: %d";
 "fmt.pip.current_camera" = "Current PiP camera: %@";
@@ -450,6 +451,14 @@
 "draw.undo.preview_canceled" = "Canceled the current drawing preview.";
 "draw.undo.empty" = "Nothing to undo right now.";
 "draw.move.finished" = "Moved the existing annotation.";
+"draw.text.tool.title" = "Text";
+"draw.text.placeholder" = "Type text, press Enter, then click canvas";
+"draw.text.help" = "Text annotation";
+"draw.text.shortcut" = "Ctrl+Cmd + 6: focus text input and quickly enter text annotation mode.";
+"draw.text.focused" = "Text input focused.";
+"draw.text.empty" = "Enter text before placing annotation.";
+"draw.text.armed" = "Text annotation ready: click on canvas to place.";
+"draw.text.placement_canceled" = "Text placement canceled.";
 "pip.hotkey.registered.status" = "PiP global hotkey is ready: Cmd+Opt+P.";
 "pip.hotkey.fallback.status" = "PiP global hotkey unavailable: activate DemoFlow before using Cmd+Opt+P.";
 
@@ -628,3 +637,5 @@
 "menu.pip_recording_toggle" = "PiP Recording";
 "menu.screen_draw_toggle" = "Screen Annotation";
 "menu.recording_settings" = "Recording Settings";
+"recording.fixed_preset.title" = "Fixed Capture Area";
+"recording.fixed_preset.subtitle" = "6 choices, tap again to unlock resize";

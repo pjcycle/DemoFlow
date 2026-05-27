@@ -8,6 +8,11 @@
 import AppKit
 import Foundation
 
+enum RecordingRegionSelectionInteractionMode {
+    case freeform
+    case fixedSizeLocked
+}
+
 @MainActor
 final class RecordingRegionSelectionWindowController: NSObject {
     enum Result {
@@ -23,6 +28,7 @@ final class RecordingRegionSelectionWindowController: NSObject {
     private var localMouseMonitor: Any?
     private var passThroughRefreshTimer: Timer?
     private var hostScreenID: CGDirectDisplayID?
+    private var interactionMode: RecordingRegionSelectionInteractionMode = .freeform
     private let desiredCollectionBehavior: NSWindow.CollectionBehavior = [
         .canJoinAllSpaces,
         .fullScreenAuxiliary
@@ -38,6 +44,12 @@ final class RecordingRegionSelectionWindowController: NSObject {
     }
 
     var onSelectionChanged: ((RecordingRegionSelection) -> Void)?
+
+    func setSelectionInteractionMode(_ mode: RecordingRegionSelectionInteractionMode) {
+        guard interactionMode != mode else { return }
+        interactionMode = mode
+        overlayView?.interactionMode = mode
+    }
 
     override init() {
         super.init()
@@ -95,6 +107,7 @@ final class RecordingRegionSelectionWindowController: NSObject {
             return selection.rectInDisplayPoints
         }
 
+        overlayView?.interactionMode = interactionMode
         overlayView?.prepare(
             displayID: displayID,
             displaySize: displaySize,
@@ -337,6 +350,16 @@ private final class RecordingRegionSelectionOverlayView: NSView {
     private var dragStartRect: CGRect?
     private var dragStartPoint: CGPoint?
     var onSelectionChanged: ((RecordingRegionSelection) -> Void)?
+    var interactionMode: RecordingRegionSelectionInteractionMode = .freeform {
+        didSet {
+            guard interactionMode != oldValue else { return }
+            if interactionMode == .fixedSizeLocked,
+               activeHandle != .move {
+                activeHandle = nil
+            }
+            needsDisplay = true
+        }
+    }
     var isDraggingSelection: Bool {
         activeHandle != nil
     }
@@ -398,7 +421,9 @@ private final class RecordingRegionSelectionOverlayView: NSView {
         NSColor(calibratedRed: 0.72, green: 0.84, blue: 1.0, alpha: 0.95).setStroke()
         borderPath.stroke()
 
-        drawHandles(for: rect)
+        if interactionMode == .freeform {
+            drawHandles(for: rect)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -531,6 +556,9 @@ private final class RecordingRegionSelectionOverlayView: NSView {
     private func handle(at point: CGPoint) -> VideoCropHandle? {
         guard selectionRect.width > 1, selectionRect.height > 1 else { return nil }
         guard shouldHandleInteraction(at: point) else { return nil }
+        if interactionMode == .fixedSizeLocked {
+            return .move
+        }
         let rect = selectionRect
 
         let corners: [(VideoCropHandle, CGPoint)] = [

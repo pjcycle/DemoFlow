@@ -78,6 +78,7 @@ final class AppCoordinator: ObservableObject {
     }
     @Published var pipProcessingConfig: PiPProcessingConfig = .default
     @Published var recordingCaptureMode: RecordingCaptureMode = .fullScreen
+    @Published var recordingFixedCapturePreset: RecordingFixedCapturePreset?
     @Published var recordingQualityConfig: RecordingQualityConfig = .defaultConfig {
         didSet {
             let normalized = recordingQualityConfig.normalized()
@@ -854,6 +855,9 @@ final class AppCoordinator: ObservableObject {
             return
         }
         let screen = preferredScreen ?? NSScreen.main ?? NSScreen.screens.first
+        if recordingCaptureMode != captureMode {
+            recordingCaptureMode = captureMode
+        }
         resetRecordingSessionForArming(captureMode: captureMode)
         isRecordingArmed = true
         armedRecordingCaptureMode = captureMode
@@ -863,6 +867,9 @@ final class AppCoordinator: ObservableObject {
         recordingControlController.show(on: screen)
         startRecordingControlSizeRefreshTimerIfNeeded()
         if captureMode == .region {
+            if let fixedPreset = recordingFixedCapturePreset {
+                applyFixedCapturePresetSelection(fixedPreset, preferredScreen: screen)
+            }
             guard beginRegionSelectionIfNeededForReadyControl(preferredScreen: screen) else {
                 isRecordingArmed = false
                 recordingControlController.hide()
@@ -901,7 +908,10 @@ final class AppCoordinator: ObservableObject {
     }
 
     private var effectiveRecordingCaptureMode: RecordingCaptureMode {
-        recordingCaptureMode
+        if recordingFixedCapturePreset != nil {
+            return .region
+        }
+        return recordingCaptureMode
     }
 
     func setRecordingCaptureMode(_ mode: RecordingCaptureMode) {
@@ -909,6 +919,8 @@ final class AppCoordinator: ObservableObject {
         recordingCaptureMode = mode
         armedRecordingCaptureMode = mode
         if mode == .fullScreen {
+            recordingFixedCapturePreset = nil
+            recordingRegionSelectionController.setSelectionInteractionMode(.freeform)
             dismissRegionSelectionOverlay()
             statusMessage = L10n.tr("legacy.key_115")
             if isRecordingArmed || recordingControlController.isVisible {
@@ -918,6 +930,8 @@ final class AppCoordinator: ObservableObject {
         }
 
         dismissRegionSelectionOverlay()
+        let interactionMode: RecordingRegionSelectionInteractionMode = recordingFixedCapturePreset == nil ? .freeform : .fixedSizeLocked
+        recordingRegionSelectionController.setSelectionInteractionMode(interactionMode)
         if let pendingRegionSelection {
             updateRecordingRegionSelectionSizeText(from: pendingRegionSelection)
             statusMessage = L10n.tr("recording.region.status.confirmed")
@@ -928,6 +942,44 @@ final class AppCoordinator: ObservableObject {
         if isRecordingArmed || recordingControlController.isVisible {
             _ = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
             refreshRecordingControlSizeDisplayForCurrentMode()
+        }
+    }
+
+    func toggleRecordingFixedCapturePreset(_ preset: RecordingFixedCapturePreset) {
+        guard !recorderState.isRecording, !recorderState.isBusy else { return }
+        if recordingFixedCapturePreset == preset {
+            recordingFixedCapturePreset = nil
+            recordingRegionSelectionController.setSelectionInteractionMode(.freeform)
+            if recordingCaptureMode == .region,
+               (isRecordingArmed || recordingControlController.isVisible || isRecordingRegionSelecting) {
+                _ = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
+                refreshRecordingControlSizeDisplayForCurrentMode()
+            }
+            return
+        }
+
+        recordingFixedCapturePreset = preset
+        if recordingCaptureMode == .region,
+           (isRecordingArmed || recordingControlController.isVisible || isRecordingRegionSelecting) {
+            recordingRegionSelectionController.setSelectionInteractionMode(.fixedSizeLocked)
+            let preferredScreen = activeScreenByPointer() ?? NSScreen.main ?? NSScreen.screens.first
+            applyFixedCapturePresetSelection(
+                preset,
+                preferredScreen: preferredScreen
+            )
+            if isRecordingRegionSelecting {
+                dismissRegionSelectionOverlay()
+            }
+            if beginRegionSelectionIfNeededForReadyControl(preferredScreen: preferredScreen) {
+                refreshRecordingControlSizeDisplayForCurrentMode()
+            } else {
+                statusMessage = L10n.tr("recording.region.error.display_unavailable")
+            }
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            if statusMessage != L10n.tr("recording.region.error.display_unavailable") {
+                statusMessage = L10n.tr("recording.region.status.confirmed")
+            }
         }
     }
 
@@ -943,6 +995,12 @@ final class AppCoordinator: ObservableObject {
         guard let screen, screen.displayID != nil else {
             return false
         }
+        if let fixedPreset = recordingFixedCapturePreset {
+            applyFixedCapturePresetSelection(fixedPreset, preferredScreen: screen)
+        }
+        recordingRegionSelectionController.setSelectionInteractionMode(
+            recordingFixedCapturePreset == nil ? .freeform : .fixedSizeLocked
+        )
 
         isRecordingRegionSelecting = true
         recordingRegionSelectionController.onSelectionChanged = { [weak self] selection in
@@ -997,6 +1055,52 @@ final class AppCoordinator: ObservableObject {
         return true
     }
 
+    private func applyFixedCapturePresetSelection(
+        _ preset: RecordingFixedCapturePreset,
+        preferredScreen: NSScreen?
+    ) {
+        guard let screen = preferredScreen ?? NSScreen.main ?? NSScreen.screens.first,
+              let displayID = screen.displayID else {
+            return
+        }
+        let rect = fixedCaptureRectInPoints(for: preset, on: screen)
+        let selection = RecordingRegionSelection(
+            displayID: displayID,
+            rectInDisplayPoints: rect
+        )
+        pendingRegionSelection = selection
+        updateRecordingRegionSelectionSizeText(from: selection)
+    }
+
+    private func fixedCaptureRectInPoints(
+        for preset: RecordingFixedCapturePreset,
+        on screen: NSScreen
+    ) -> CGRect {
+        let screenSize = screen.frame.size
+        let scale = max(screen.backingScaleFactor, 1)
+        let targetPixelSize = preset.pixelSize
+        var targetPointSize = CGSize(
+            width: targetPixelSize.width / scale,
+            height: targetPixelSize.height / scale
+        )
+        if targetPointSize.width > screenSize.width || targetPointSize.height > screenSize.height {
+            let fitScale = min(
+                screenSize.width / max(targetPointSize.width, 1),
+                screenSize.height / max(targetPointSize.height, 1)
+            )
+            targetPointSize = CGSize(
+                width: targetPointSize.width * fitScale,
+                height: targetPointSize.height * fitScale
+            )
+        }
+
+        let origin = CGPoint(
+            x: max(0, (screenSize.width - targetPointSize.width) / 2),
+            y: max(0, (screenSize.height - targetPointSize.height) / 2)
+        )
+        return CGRect(origin: origin, size: targetPointSize).integral
+    }
+
     private func dismissRegionSelectionOverlay() {
         if isRecordingRegionSelecting {
             recordingRegionSelectionController.dismiss()
@@ -1018,10 +1122,13 @@ final class AppCoordinator: ObservableObject {
                 return formattedCurrentScreenSizeDisplay() ?? "-- x --"
             case .region:
                 if let activeRecordingRegionSelection {
-                    return formatSizeDisplay(for: activeRecordingRegionSelection.rectInDisplayPoints.size)
+                    return sizeDisplayForRegionSelection(activeRecordingRegionSelection)
                 }
                 if let pendingRegionSelection {
-                    return formatSizeDisplay(for: pendingRegionSelection.rectInDisplayPoints.size)
+                    return sizeDisplayForRegionSelection(pendingRegionSelection)
+                }
+                if let recordingFixedCapturePreset {
+                    return recordingFixedCapturePreset.displayText
                 }
                 return recordingRegionSelectionSizeText
             }
@@ -1031,7 +1138,22 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func updateRecordingRegionSelectionSizeText(from selection: RecordingRegionSelection) {
-        recordingRegionSelectionSizeText = formatSizeDisplay(for: selection.rectInDisplayPoints.size)
+        recordingRegionSelectionSizeText = sizeDisplayForRegionSelection(selection)
+    }
+
+    private func sizeDisplayForRegionSelection(_ selection: RecordingRegionSelection) -> String {
+        guard recordingFixedCapturePreset != nil else {
+            return formatSizeDisplay(for: selection.rectInDisplayPoints.size)
+        }
+        guard let screen = NSScreen.screen(with: selection.displayID) else {
+            return formatSizeDisplay(for: selection.rectInDisplayPoints.size)
+        }
+        let scale = max(screen.backingScaleFactor, 1)
+        let pixelSize = CGSize(
+            width: selection.rectInDisplayPoints.width * scale,
+            height: selection.rectInDisplayPoints.height * scale
+        )
+        return formatSizeDisplay(for: pixelSize)
     }
 
     private func bindState() {

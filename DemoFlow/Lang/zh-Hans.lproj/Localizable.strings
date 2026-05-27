@@ -244,7 +244,7 @@
 "legacy.key_187" = "窗口比例与自动放缩";
 "legacy.k_240x240" = "窗口默认以 240x240 弹出，后续可直接拖拽边缘或滚轮自由缩放。";
 "legacy.key_188" = "笔迹调校";
-"legacy.key_189" = "等待小相机开始...";
+"legacy.key_189" = "等待录屏开始...";
 "legacy.key_190" = "等待系统开始录屏...";
 "legacy.key_191" = "箭头线";
 "legacy.demoflow_6" = "系统已拒绝摄像头访问。请到系统设置 > 隐私与安全性 > 摄像头中开启 DemoFlow。";
@@ -343,6 +343,7 @@
 "fmt.draw.intensity" = "手绘强度：%d%%";
 "fmt.draw.mark_style_changed" = "对/错风格已切换：%@";
 "fmt.draw.shape_added" = "已添加%@（颜色 %@）";
+"fmt.draw.text_added" = "已添加文字标注：%@";
 "fmt.draw.tool_changed" = "工具已切换：%@";
 "fmt.input.level" = "输入电平：%d";
 "fmt.pip.current_camera" = "当前 PiP 摄像头：%@";
@@ -450,6 +451,14 @@
 "draw.undo.preview_canceled" = "已取消当前预览。";
 "draw.undo.empty" = "当前没有可回退内容。";
 "draw.move.finished" = "已移动现有标注。";
+"draw.text.tool.title" = "文字";
+"draw.text.placeholder" = "输入文字后回车，再点击画布";
+"draw.text.help" = "文字标注";
+"draw.text.shortcut" = "⌃⌘ + 6：聚焦文字输入，并可快速进入文字标注。";
+"draw.text.focused" = "文字输入已聚焦。";
+"draw.text.empty" = "请输入文字后再标注。";
+"draw.text.armed" = "文字标注已就绪：点击画布落字。";
+"draw.text.placement_canceled" = "已取消文字落点。";
 "pip.hotkey.registered.status" = "PiP 全局热键已就绪：⌘⌥P。";
 "pip.hotkey.fallback.status" = "PiP 全局热键不可用：请先激活 DemoFlow 后再用 ⌘⌥P。";
 
@@ -628,3 +637,5 @@
 "menu.pip_recording_toggle" = "PiP录像开关";
 "menu.screen_draw_toggle" = "屏幕标注显隐";
 "menu.recording_settings" = "录屏配置";
+"recording.fixed_preset.title" = "固定裁切区域，可快速上 Youtube Bilibili TikTok";
+"recording.fixed_preset.subtitle" = "";

@@ -134,7 +134,24 @@ struct RecordingSettingsView: View {
                     Spacer(minLength: 0)
                 }
 
+                fixedCapturePresetSection
                 allRecordingToggleRow
+            }
+        }
+    }
+
+    private var fixedCapturePresetSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(L10n.tr("recording.fixed_preset.title"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            LazyVGrid(columns: fixedPresetColumns, alignment: .leading, spacing: 8) {
+                ForEach(RecordingFixedCapturePreset.allCases) { preset in
+                    fixedCapturePresetButton(for: preset)
+                }
             }
         }
     }
@@ -152,6 +169,38 @@ struct RecordingSettingsView: View {
         .toggleStyle(.checkbox)
         .disabled(appCoordinator.recorderState.isBusy || appCoordinator.recorderState.isRecording || appCoordinator.isRecordingArmed)
         .controlSize(.small)
+    }
+
+    private func fixedCapturePresetButton(for preset: RecordingFixedCapturePreset) -> some View {
+        let isSelected = appCoordinator.recordingFixedCapturePreset == preset
+        return Button {
+            appCoordinator.toggleRecordingFixedCapturePreset(preset)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(preset.displayText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                Text(preset.aspectLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.08) : Color.black.opacity(0.01))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        isSelected ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.55),
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(appCoordinator.recorderState.isRecording || appCoordinator.recorderState.isBusy)
     }
 
     private var recordingQualityCard: some View {
@@ -449,6 +498,14 @@ struct RecordingSettingsView: View {
     private var customResolutionControlWidth: CGFloat { 320 }
 
     private var customCodecControlWidth: CGFloat { 220 }
+
+    private var fixedPresetColumns: [GridItem] {
+        [
+            GridItem(.flexible(minimum: 110, maximum: .infinity), spacing: 8, alignment: .leading),
+            GridItem(.flexible(minimum: 110, maximum: .infinity), spacing: 8, alignment: .leading),
+            GridItem(.flexible(minimum: 110, maximum: .infinity), spacing: 8, alignment: .leading)
+        ]
+    }
 
     @ViewBuilder
     private func card<Content: View>(
