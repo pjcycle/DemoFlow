@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>DemoFlow</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>DemoFlow requires system audio access for screen recording.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Access camera for video recording and PiP preview.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Access your Downloads folder to save screen recordings.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Access your microphone to record audio along with screen videos.</string>
+	<key>NSMoviesFolderUsageDescription</key>
+	<string>Access your Movies folder to save your screen recordings.</string>
+	<key>NSPicturesFolderUsageDescription</key>
+	<string>Access your Pictures folder to save screenshots and recordings.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Access your screen to capture screen content for recordings.</string>
+</dict>
+</plist>

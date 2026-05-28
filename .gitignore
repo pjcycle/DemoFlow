@@ -1,0 +1,33 @@
+# Xcode
+build/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/xcshareddata/xcschemes/DemoFlow.xcscheme
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcshareddata/swiftpm/Package.resolved
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+
+# ThirdParty binaries (keep source, remove quarantine artifacts)
+ThirdParty/yt-dlp/arm64/yt-dlp
+
+# Derived data / build intermediates
+DerivedData/
+Build/
+.xcodebuild_dd/
+.xcodebuild_dd_nosign/
+
+# IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Build output
+*.app/
+
+# AGENTS SPEC
+AGENTS.md
+SPEC.md
