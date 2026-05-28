@@ -27,3 +27,7 @@ Build/
 
 # Build output
 *.app/
+
+# 生成文档干掉
+AGENTS.md
+SPEC.md
