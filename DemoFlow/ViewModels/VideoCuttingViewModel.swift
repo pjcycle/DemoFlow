@@ -158,12 +158,12 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     func importFromRecordingOutput(_ outputURL: URL) {
-        do {
-            let persisted = try importService.persistImportedVideo(from: outputURL)
-            loadVideo(url: persisted)
-        } catch {
-            statusMessage = error.localizedDescription
+        let normalizedURL = outputURL.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: normalizedURL.path) else {
+            statusMessage = L10n.tr("legacy.key_53")
+            return
         }
+        loadVideo(url: normalizedURL)
     }
 
     func clearImportedVideo() {

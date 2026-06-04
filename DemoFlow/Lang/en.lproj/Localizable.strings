@@ -493,6 +493,7 @@
 "audio.extract.status.output_pick_cancelled" = "Output directory selection cancelled";
 "audio.extract.status.local_selected" = "Selected: %@";
 "audio.extract.status.output_selected" = "Output directory: %@";
+"audio.extract.status.output_open_failed" = "Failed to open output directory: %@";
 "audio.extract.status.installing_deps" = "Preparing dependencies...";
 "audio.extract.status.deps_installed" = "Dependencies ready";
 "audio.extract.error.reason" = "Reason:";
@@ -629,6 +630,8 @@
 "recording.control.close" = "Close";
 "recording.control.status.paused" = "Recording paused. Resume or stop to export.";
 "recording.control.error.no_segments" = "No recorded segments are available to merge.";
+"recording.output.open_folder" = "Open Output Folder";
+"recording.output.open_failed" = "Failed to open output folder: %@";
 "video.cut.source.remove" = "Remove Current Video";
 "video.cut.source.reveal" = "Reveal in Finder";
 "video.cut.source.removed" = "Current video removed.";

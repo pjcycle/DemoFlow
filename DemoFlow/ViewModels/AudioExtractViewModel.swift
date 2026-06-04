@@ -163,12 +163,14 @@ final class AudioExtractViewModel: ObservableObject {
     }
 
     func openOutputDirectory() {
-        guard let url = latestOutputDirectoryURL else {
-            statusMessage = L10n.tr("audio.extract.status.no_output_yet")
+        let url = latestOutputDirectoryURL ?? outputRootURL
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            statusMessage = L10n.f("audio.extract.status.output_open_failed", error.localizedDescription)
             appendLog("[output] \(statusMessage)")
-            return
         }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     func revealLatestMP3() {

@@ -46,7 +46,7 @@ Hotkeys:
 
 - Extract MP3 from local files (`.mp4` / `.mov` / `.mkv` / `.webm` / `.mp3`)
 - Online URL extraction (full version only)
-- Default output: `~/Movies/DemoFlow/AudioExtract/`
+- Default output: `~/Library/Containers/<bundle-id>/Data/Library/Application Support/DemoFlow/Outputs/AudioExtract/`
 
 ## Requirements
 
@@ -60,6 +60,9 @@ DemoFlow requests:
 - **Screen Recording** — for screen capture
 - **Camera** — for PiP preview and camera recording
 - **Microphone** — for recording and PiP audio
+- **User-selected files and folders** — for import, export, and manually selected output folders
+
+Generated recordings, PiP films, screen annotation captures, and default audio extracts are saved in the app container under `Application Support/DemoFlow/Outputs/`; DemoFlow does not write to `Movies` or `Pictures` by default.
 
 ## Download
 

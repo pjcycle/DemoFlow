@@ -23,9 +23,9 @@ struct GlobalActionBarView: View {
             .buttonStyle(.borderedProminent)
             .disabled(actionButtonDisabled)
 
-            if let outputURL = appCoordinator.recorder.lastOutputURL {
+            if appCoordinator.recorder.lastOutputURL != nil {
                 Button(L10n.tr("legacy.key_123")) {
-                    NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                    appCoordinator.openRecordingOutputDirectory()
                 }
                 .buttonStyle(.bordered)
             }

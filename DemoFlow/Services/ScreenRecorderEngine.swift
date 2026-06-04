@@ -68,7 +68,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         lastArtifact = nil
 
         do {
-            let outputContext = try makeOutputContext()
+            let outputContext = try makeOutputContext(for: request)
             screenRawURL = outputContext.screenRawURL
             cameraRawURL = outputContext.cameraRawURL
             cameraFramingSidecarURL = outputContext.cameraFramingSidecarURL
@@ -195,7 +195,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             let screenURL = try ensureURL(screenRawURL, name: L10n.tr("legacy.key_79"))
             try validateRecordedScreenOutput(at: screenURL)
             let finalURL: URL
-            if reason == .pause {
+            if capturedCameraURL == nil {
+                finalURL = screenURL
+            } else if reason == .pause {
                 // Pause path keeps an intermediate segment only; session-level final output is created on finalize.
                 let segmentURL = try makePausedSegmentURL()
                 finalURL = try await compositionEngine.mergeScreenAndCamera(
@@ -537,18 +539,25 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         }
     }
 
-    private func makeOutputContext() throws -> OutputContext {
-        let folder = FileManager.default.temporaryDirectory
+    private func makeOutputContext(for request: RecordingRequest) throws -> OutputContext {
+        let temporaryFolder = FileManager.default.temporaryDirectory
             .appendingPathComponent("DemoFlow", isDirectory: true)
             .appendingPathComponent("tmp", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: temporaryFolder, withIntermediateDirectories: true)
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         let timestamp = formatter.string(from: Date())
-        let screenRawURL = folder.appendingPathComponent("screen-\(timestamp).mp4")
-        let cameraRawURL = folder.appendingPathComponent("camera-\(timestamp).mov")
-        let cameraFramingSidecarURL = folder.appendingPathComponent("camera-framing-\(timestamp).json")
+        let screenRawURL: URL
+        if request.cameraDeviceID == nil {
+            let recordingsDirectory = try DemoFlowOutputDirectoryPolicy.recordingsDirectory()
+            screenRawURL = recordingsDirectory.appendingPathComponent("DemoFlow-\(timestamp).mp4")
+        } else {
+            screenRawURL = temporaryFolder.appendingPathComponent("screen-\(timestamp).mp4")
+        }
+        let cameraRawURL = temporaryFolder.appendingPathComponent("camera-\(timestamp).mov")
+        let cameraFramingSidecarURL = temporaryFolder.appendingPathComponent("camera-framing-\(timestamp).json")
         return OutputContext(
             screenRawURL: screenRawURL,
             cameraRawURL: cameraRawURL,

@@ -46,7 +46,7 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 
 - 从本地文件提取 MP3（`.mp4` / `.mov` / `.mkv` / `.webm` / `.mp3`）
 - 在线 URL 提取（完整版）
-- 默认输出：`~/Movies/DemoFlow/AudioExtract/`
+- 默认输出：`~/Library/Containers/<bundle-id>/Data/Library/Application Support/DemoFlow/Outputs/AudioExtract/`
 
 ## 系统要求
 
@@ -60,6 +60,9 @@ DemoFlow 会请求以下权限：
 - **屏幕录制** — 用于屏幕捕获
 - **摄像头** — 用于画中画预览和摄像头录制
 - **麦克风** — 用于录制和画中画音频
+- **用户选择的文件与目录** — 用于导入、导出和手动选择输出目录
+
+自动生成的录屏、PiP 录像、屏幕标注截图和默认音频提取结果会保存在 App 沙盒容器的 `Application Support/DemoFlow/Outputs/` 下，默认不会写入用户的 `Movies` 或 `Pictures` 目录。
 
 ## 下载
 

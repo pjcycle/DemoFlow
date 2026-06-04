@@ -106,9 +106,14 @@ struct RecordingSettingsView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(actionButtonDisabled)
 
-                    if let outputURL = appCoordinator.recorder.lastOutputURL {
+                    Button(L10n.tr("recording.output.open_folder")) {
+                        appCoordinator.openRecordingOutputDirectory()
+                    }
+                    .buttonStyle(.bordered)
+
+                    if appCoordinator.recorder.lastOutputURL != nil {
                         Button(L10n.tr("legacy.key_123")) {
-                            NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                            appCoordinator.openRecordingOutputDirectory()
                         }
                         .buttonStyle(.bordered)
 

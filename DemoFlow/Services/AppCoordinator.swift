@@ -721,6 +721,19 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    func openRecordingOutputDirectory() {
+        do {
+            let directory = try DemoFlowOutputDirectoryPolicy.recordingsDirectory()
+            if let outputURL = recorder.lastOutputURL {
+                NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+            } else {
+                NSWorkspace.shared.activateFileViewerSelecting([directory])
+            }
+        } catch {
+            statusMessage = L10n.f("recording.output.open_failed", error.localizedDescription)
+        }
+    }
+
     func showScreenDrawOverlay() {
         guard !isDrawOverlayVisible else { return }
         let targetScreen = activeScreenByPointer()

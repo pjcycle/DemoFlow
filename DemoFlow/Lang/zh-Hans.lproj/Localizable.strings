@@ -493,6 +493,7 @@
 "audio.extract.status.output_pick_cancelled" = "已取消选择输出目录";
 "audio.extract.status.local_selected" = "已选择：%@";
 "audio.extract.status.output_selected" = "输出目录：%@";
+"audio.extract.status.output_open_failed" = "打开输出目录失败：%@";
 "audio.extract.status.installing_deps" = "依赖准备中...";
 "audio.extract.status.deps_installed" = "依赖已就绪";
 "audio.extract.error.reason" = "原因:";
@@ -629,6 +630,8 @@
 "recording.control.close" = "关闭";
 "recording.control.status.paused" = "录制已暂停，可继续或停止输出成片。";
 "recording.control.error.no_segments" = "未采集到可合并的录制片段。";
+"recording.output.open_folder" = "打开输出目录";
+"recording.output.open_failed" = "打开输出目录失败：%@";
 "video.cut.source.remove" = "移除当前视频";
 "video.cut.source.reveal" = "在访达中显示";
 "video.cut.source.removed" = "已移除当前视频。";

@@ -18,9 +18,7 @@ final class CompositionExportEngine {
         outputURL: URL
     ) async throws -> URL {
         guard let cameraURL else {
-            try removeFileIfExists(at: outputURL)
-            try FileManager.default.copyItem(at: screenURL, to: outputURL)
-            return outputURL
+            return screenURL
         }
 
         let screenAsset = AVAssetAsyncLoaders.makeURLAsset(screenURL)
