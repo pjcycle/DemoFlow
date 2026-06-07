@@ -105,8 +105,6 @@ remove_stale_resource_code() {
 }
 
 collect_archive_dsyms_if_needed() {
-	# During "Archive", TARGET_BUILD_DIR points into *.xcarchive/Products/Applications.
-	# In normal build/run this pattern won't match, so we skip safely.
 	if [[ "$app_bundle" != *.xcarchive/Products/Applications/*.app ]]; then
 		return 0
 	fi
@@ -136,9 +134,24 @@ copy_path "${ffmpeg_source_dir}/ffprobe" "${helpers_dir}/ffprobe"
 chmod +x "${helpers_dir}/ffmpeg" "${helpers_dir}/ffprobe"
 remove_stale_resource_code
 
+# When code signing is disabled (CI builds), copy yt-dlp without signing and exit early
 if [[ "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
 	collect_archive_dsyms_if_needed
-	echo "[DemoFlow codesign] Code signing disabled — continuing without signing."
+	include_ytdlp="${INCLUDE_YT_DLP:-${DEMOFLOW_INCLUDE_YT_DLP:-YES}}"
+	if [[ "$include_ytdlp" == "YES" ]]; then
+		ytdlp_source="${ytdlp_source_dir}/yt-dlp"
+		ytdlp_dest="${helpers_dir}/yt-dlp"
+		if [[ -f "$ytdlp_source" ]]; then
+			copy_path "$ytdlp_source" "$ytdlp_dest"
+			chmod +x "$ytdlp_dest"
+			echo "[DemoFlow codesign] yt-dlp included without signing (CI build)."
+		else
+			echo "[DemoFlow codesign] Warning: yt-dlp source not found at ${ytdlp_source}, skipping." >&2
+		fi
+	else
+		echo "[DemoFlow codesign] yt-dlp excluded from this build (AppStore)."
+	fi
+	exit 0
 fi
 
 signing_identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
