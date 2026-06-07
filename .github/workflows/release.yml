@@ -22,11 +22,12 @@ jobs:
 
       - name: Build Release
         run: |
-          xcodebuild build \
+          xcodebuild archive \
             -project DemoFlow.xcodeproj \
             -scheme DemoFlow \
             -configuration Release \
-            -destination 'platform=macOS' \
+            -destination "generic/platform=macOS" \
+            -archivePath ${{ github.workspace }}/Build/DemoFlow.xcarchive \
             -derivedDataPath ${{ github.workspace }}/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             INCLUDE_YT_DLP=YES
@@ -41,7 +42,7 @@ jobs:
             --icon "DemoFlow.app" 160 200 \
             --app-drop-link 420 200 \
             "DemoFlow-${{ github.ref_name }}.dmg" \
-            "${{ github.workspace }}/DerivedData/Build/Products/Release/DemoFlow.app"
+            "${{ github.workspace }}/Build/DemoFlow.xcarchive/Products/Applications/DemoFlow.app"
 
       - name: Release
         uses: softprops/action-gh-release@v2
