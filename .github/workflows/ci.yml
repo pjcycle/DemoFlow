@@ -21,6 +21,14 @@ jobs:
       - name: Resolve Packages
         run: xcodebuild -resolvePackageDependencies -project DemoFlow.xcodeproj
 
+      - name: SwiftLint
+        run: |
+          if which swiftlint > /dev/null; then
+            swiftlint lint --strict DemoFlow/
+          else
+            echo "SwiftLint not installed, skipping"
+          fi
+
       - name: Build AppStore
         run: |
           xcodebuild build \
