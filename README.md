@@ -4,6 +4,8 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">中文</a>
 </p>
 
+<img src="img/logo.png" width="80">
+
 [![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
 
 DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawing, video cutting, and audio extraction.
@@ -12,11 +14,15 @@ DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawi
 
 ### Recording
 
+![Recording](img/we1.png)
+
 - Full-screen recording on the primary display
 - Floating recording controller for stop/pause
 - Auto-hide main window during recording
 
 ### PiP Camera
+
+![PiP Camera](img/we2.png)
 
 - Independent floating camera preview (always-on-top, works across Spaces)
 - Video/audio device selection including Continuity Camera
@@ -25,6 +31,8 @@ DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawi
 - Global hotkey: `⌘⌥P`
 
 ### Screen Drawing
+
+![Screen Drawing](img/we3.png)
 
 - Floating toolbar + transparent canvas overlay
 - 6 tools: line, arrow, rectangle, ellipse, cross, check
@@ -38,6 +46,8 @@ Hotkeys:
 - `⌘⌃X` — toggle canvas passthrough
 
 ### Video Cutting
+
+![Video Cutting](img/we4.png)
 
 - Drag-and-drop or file import for `.mp4` / `.mov`
 - Timeline trimming, multi-range deletion, crop, audio denoise/EQ, export
@@ -106,6 +116,7 @@ See [BUILD_CHANNELS.md](BUILD_CHANNELS.md) for details.
 │   ├── Extensions/
 │   ├── ThirdParty/
 │   └── Assets.xcassets/
+├── img/
 ├── Scripts/
 ├── BUILD_CHANNELS.md
 ├── README.md
