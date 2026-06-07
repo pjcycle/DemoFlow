@@ -4,6 +4,8 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">中文</a>
 </p>
 
+<img src="img/logo.png" width="80">
+
 [![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
 
 DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄像头、屏幕画笔、视频裁剪和音频提取。
@@ -12,11 +14,15 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 
 ### 录屏
 
+![录屏](img/we1.png)
+
 - 主显示器全屏录制
 - 浮动控制器用于暂停/停止
 - 录制期间自动隐藏主窗口
 
 ### 画中画摄像头
+
+![画中画摄像头](img/we2.png)
 
 - 独立浮动预览窗口（始终置顶，跨空间/全屏可用）
 - 支持视频/音频设备选择，包括 Continuity Camera
@@ -25,6 +31,8 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 - 全局快捷键：`⌘⌥P`
 
 ### 屏幕画笔
+
+![屏幕画笔](img/we3.png)
 
 - 浮动工具栏 + 透明画布
 - 6 种工具：直线、箭头、矩形、椭圆、十字、对勾
@@ -38,6 +46,8 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 - `⌘⌃X` — 切换画布交互模式
 
 ### 视频裁剪
+
+![视频裁剪](img/we4.png)
 
 - 拖拽或导入 `.mp4` / `.mov`
 - 时间轴剪辑、多段删除、裁剪、音频降噪/EQ、导出
@@ -91,6 +101,27 @@ xcodebuild -project DemoFlow.xcodeproj -scheme DemoFlow -destination 'platform=m
 | **Release** | 包含 | 直接下载 |
 
 详见 [BUILD_CHANNELS.md](BUILD_CHANNELS.md)。
+
+## 仓库结构
+
+```
+├── DemoFlow.xcodeproj
+├── DemoFlow/
+│   ├── DemoFlowApp.swift
+│   ├── Views/
+│   ├── Models/
+│   ├── Services/
+│   ├── ViewModels/
+│   ├── Lang/
+│   ├── Extensions/
+│   ├── ThirdParty/
+│   └── Assets.xcassets/
+├── img/
+├── Scripts/
+├── BUILD_CHANNELS.md
+├── README.md
+└── README.zh-CN.md
+```
 
 ## 许可
 
