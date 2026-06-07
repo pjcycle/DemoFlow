@@ -138,8 +138,7 @@ remove_stale_resource_code
 
 if [[ "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
 	collect_archive_dsyms_if_needed
-	echo "[DemoFlow codesign] Embedded helper tools without signing because code signing is disabled."
-	exit 0
+	echo "[DemoFlow codesign] Code signing disabled — continuing without signing."
 fi
 
 signing_identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
