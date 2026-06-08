@@ -29,7 +29,23 @@ jobs:
             -configuration AppStore \
             -destination 'platform=macOS' \
             -derivedDataPath ${{ github.workspace }}/DerivedData \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            INCLUDE_YT_DLP=NO
+
+      - name: Verify AppStore App
+        run: |
+          app_path="${{ github.workspace }}/DerivedData/Build/Products/AppStore/DemoFlow.app"
+          ytdlp_path="${app_path}/Contents/Helpers/yt-dlp"
+
+          test -d "$app_path" || {
+            echo "AppStore build missing app bundle at: $app_path" >&2
+            exit 1
+          }
+
+          if [[ -e "$ytdlp_path" ]]; then
+            echo "AppStore build must not include yt-dlp: $ytdlp_path" >&2
+            exit 1
+          fi
 
       - name: Build Release
         run: |
@@ -39,7 +55,23 @@ jobs:
             -configuration Release \
             -destination 'platform=macOS' \
             -derivedDataPath ${{ github.workspace }}/DerivedData \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            INCLUDE_YT_DLP=YES
+
+      - name: Verify Release App
+        run: |
+          app_path="${{ github.workspace }}/DerivedData/Build/Products/Release/DemoFlow.app"
+          ytdlp_path="${app_path}/Contents/Helpers/yt-dlp"
+
+          test -d "$app_path" || {
+            echo "Release build missing app bundle at: $app_path" >&2
+            exit 1
+          }
+
+          test -f "$ytdlp_path" || {
+            echo "Release build missing yt-dlp helper at: $ytdlp_path" >&2
+            exit 1
+          }
 
       - name: Upload AppStore App
         uses: actions/upload-artifact@v4
