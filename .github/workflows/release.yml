@@ -11,7 +11,7 @@ env:
 jobs:
   build-and-release:
     name: Build & Release
-    runs-on: macos-14
+    runs-on: macos-26
 
     steps:
       - name: Checkout
@@ -22,18 +22,41 @@ jobs:
 
       - name: Build Release
         run: |
-          xcodebuild build \
+          xcodebuild archive \
             -project DemoFlow.xcodeproj \
             -scheme DemoFlow \
             -configuration Release \
-            -destination 'platform=macOS' \
+            -destination "generic/platform=macOS" \
+            -archivePath ${{ github.workspace }}/Build/DemoFlow.xcarchive \
             -derivedDataPath ${{ github.workspace }}/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             INCLUDE_YT_DLP=YES
 
+      - name: Verify Release App
+        run: |
+          app_path="${{ github.workspace }}/Build/DemoFlow.xcarchive/Products/Applications/DemoFlow.app"
+          ytdlp_path="${app_path}/Contents/Helpers/yt-dlp"
+
+          test -d "$app_path" || {
+            echo "Release archive missing app bundle at: $app_path" >&2
+            exit 1
+          }
+
+          test -f "$ytdlp_path" || {
+            echo "Release archive missing yt-dlp helper at: $ytdlp_path" >&2
+            exit 1
+          }
+
       - name: Create DMG
         run: |
           brew install create-dmg
+          app_path="${{ github.workspace }}/Build/DemoFlow.xcarchive/Products/Applications/DemoFlow.app"
+          dmg_stage_dir="${{ github.workspace }}/Build/dmg-stage"
+
+          rm -rf "$dmg_stage_dir"
+          mkdir -p "$dmg_stage_dir"
+          ditto "$app_path" "$dmg_stage_dir/DemoFlow.app"
+
           create-dmg \
             --volname "DemoFlow" \
             --window-pos 200 200 \
@@ -41,7 +64,7 @@ jobs:
             --icon "DemoFlow.app" 160 200 \
             --app-drop-link 420 200 \
             "DemoFlow-${{ github.ref_name }}.dmg" \
-            "${{ github.workspace }}/DerivedData/Build/Products/Release/DemoFlow.app"
+            "$dmg_stage_dir"
 
       - name: Release
         uses: softprops/action-gh-release@v2

@@ -59,6 +59,24 @@ Or in Xcode:
 - **Release**: no `INCLUDE_YT_DLP` set (script defaults to `YES`)
 - **AppStore**: sets `INCLUDE_YT_DLP = NO`
 
+## GitHub Releases Automation
+
+GitHub `v*` tags use the **Release** channel to generate a DMG automatically:
+
+1. Workflow: `.github/workflows/release.yml`
+2. Trigger: push a tag such as `v1.0.8`
+3. Build configuration: `Release`
+4. `yt-dlp`: included
+5. Artifact: `DemoFlow-<tag>.dmg`
+
+This path is only for GitHub Releases and remains fully isolated from the `AppStore` submission/export path.
+
+To avoid silent DMG packaging failures, the workflow now verifies:
+
+1. `DemoFlow.app` exists inside the archive
+2. `Contents/Helpers/yt-dlp` exists in the Release app
+3. The `.app` is copied into a staging directory before calling `create-dmg`
+
 ## How It Works
 
 ### Signing Script `Scripts/sign_embedded_tools.sh`
