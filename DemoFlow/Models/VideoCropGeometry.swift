@@ -73,10 +73,10 @@ enum VideoCropGeometry {
 
     static func adjustedRectForAspect(
         rect: CGRect,
-        targetRatio: CGFloat?,
+        targetNormalizedRatio: CGFloat?,
         minSize: CGSize
     ) -> CGRect {
-        guard let targetRatio, targetRatio > 0 else {
+        guard let targetNormalizedRatio, targetNormalizedRatio > 0 else {
             return enforceMinSize(rect, minSize: minSize)
         }
 
@@ -84,19 +84,19 @@ enum VideoCropGeometry {
         let center = CGPoint(x: next.midX, y: next.midY)
 
         var width = max(next.width, minSize.width)
-        var height = width / targetRatio
+        var height = width / targetNormalizedRatio
         if height < minSize.height {
             height = minSize.height
-            width = height * targetRatio
+            width = height * targetNormalizedRatio
         }
 
         if width > 1 {
             width = 1
-            height = width / targetRatio
+            height = width / targetNormalizedRatio
         }
         if height > 1 {
             height = 1
-            width = height * targetRatio
+            width = height * targetNormalizedRatio
         }
 
         next = CGRect(
@@ -114,7 +114,7 @@ enum VideoCropGeometry {
         translation: CGSize,
         handle: VideoCropHandle,
         displaySize: CGSize,
-        lockedAspectRatio: CGFloat?,
+        lockedNormalizedAspectRatio: CGFloat?,
         minSize: CGSize
     ) -> CGRect {
         guard displaySize.width > 0, displaySize.height > 0 else { return startRect }
@@ -133,7 +133,7 @@ enum VideoCropGeometry {
         }
 
         // Adaptive mode: free-resize with min-size and bounds clamp.
-        guard let lockedAspectRatio, lockedAspectRatio > 0 else {
+        guard let lockedNormalizedAspectRatio, lockedNormalizedAspectRatio > 0 else {
             var rect = applyHandleResize(
                 rect: normalizedStart,
                 dx: dx,
@@ -144,20 +144,20 @@ enum VideoCropGeometry {
             return clampNormalizedRect(rect)
         }
 
-        // Fixed-ratio mode: any edge/corner scales around center.
+        // Fixed-ratio mode: any edge/corner scales around center using normalized crop-space ratio.
         let centerScaled = scaleFromCenter(
             startRect: normalizedStart,
             dx: dx,
             dy: dy,
             handle: handle,
-            aspectRatio: lockedAspectRatio,
+            normalizedAspectRatio: lockedNormalizedAspectRatio,
             minSize: normalizedMinSize
         )
         let clamped = clampPositionOnly(centerScaled)
         let corrected = fitRectKeepingCenter(
             rect: clamped,
             center: CGPoint(x: clamped.midX, y: clamped.midY),
-            aspectRatio: lockedAspectRatio,
+            normalizedAspectRatio: lockedNormalizedAspectRatio,
             minSize: normalizedMinSize
         )
         return clampPositionOnly(corrected)
@@ -166,23 +166,23 @@ enum VideoCropGeometry {
     static func fitRectKeepingCenter(
         rect: CGRect,
         center: CGPoint,
-        aspectRatio: CGFloat,
+        normalizedAspectRatio: CGFloat,
         minSize: CGSize
     ) -> CGRect {
         var width = max(rect.width, minSize.width)
-        var height = width / aspectRatio
+        var height = width / normalizedAspectRatio
         if height < minSize.height {
             height = minSize.height
-            width = height * aspectRatio
+            width = height * normalizedAspectRatio
         }
 
         if width > 1 {
             width = 1
-            height = width / aspectRatio
+            height = width / normalizedAspectRatio
         }
         if height > 1 {
             height = 1
-            width = height * aspectRatio
+            width = height * normalizedAspectRatio
         }
 
         let next = CGRect(
@@ -240,13 +240,13 @@ enum VideoCropGeometry {
         dx: CGFloat,
         dy: CGFloat,
         handle: VideoCropHandle,
-        aspectRatio: CGFloat,
+        normalizedAspectRatio: CGFloat,
         minSize: CGSize
     ) -> CGRect {
         let base = fitRectKeepingCenter(
             rect: startRect,
             center: CGPoint(x: startRect.midX, y: startRect.midY),
-            aspectRatio: aspectRatio,
+            normalizedAspectRatio: normalizedAspectRatio,
             minSize: minSize
         )
         let center = CGPoint(x: base.midX, y: base.midY)
@@ -275,13 +275,13 @@ enum VideoCropGeometry {
             scaleDelta = 0
         }
 
-        let minWidthForAspect = max(minSize.width, minSize.height * aspectRatio)
-        let minHeightForAspect = max(minSize.height, minSize.width / aspectRatio)
+        let minWidthForAspect = max(minSize.width, minSize.height * normalizedAspectRatio)
+        let minHeightForAspect = max(minSize.height, minSize.width / normalizedAspectRatio)
         let minScale = max(minWidthForAspect / width, minHeightForAspect / height)
         let targetScale = max(minScale, 1 + scaleDelta)
 
         let scaledWidth = min(1, max(minWidthForAspect, width * targetScale))
-        let scaledHeight = min(1, max(minHeightForAspect, scaledWidth / aspectRatio))
+        let scaledHeight = min(1, max(minHeightForAspect, scaledWidth / normalizedAspectRatio))
 
         return CGRect(
             x: center.x - scaledWidth / 2.0,

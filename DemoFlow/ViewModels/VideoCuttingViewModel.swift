@@ -56,6 +56,7 @@ final class VideoCuttingViewModel: ObservableObject {
     private let minimumFrameDuration: Double = 1.0 / 120.0
     private let maximumFrameDuration: Double = 1.0
     private let cropMinPoints = CGSize(width: 120, height: 120)
+    private let normalizedAspectMatchTolerance: CGFloat = 0.001
     let player = AVPlayer()
     let noiseReductionStep: Double = 10
 
@@ -634,10 +635,14 @@ final class VideoCuttingViewModel: ObservableObject {
 
     func applyPresetToCropRect() {
         guard hasSource else { return }
+        if normalizedLockedAspectRatio == 1 {
+            cropRectNormalized = .full
+            return
+        }
         let minSize = normalizedCropMinSize(for: sourceVideoSize)
         let adjusted = VideoCropGeometry.adjustedRectForAspect(
             rect: normalizedCropRect,
-            targetRatio: selectedAspectPreset.widthOverHeightRatio,
+            targetNormalizedRatio: normalizedLockedAspectRatio,
             minSize: minSize
         )
         cropRectNormalized = VideoCropRect(adjusted)
@@ -655,7 +660,7 @@ final class VideoCuttingViewModel: ObservableObject {
             translation: translation,
             handle: handle,
             displaySize: overlayVideoDisplaySize,
-            lockedAspectRatio: selectedAspectPreset.widthOverHeightRatio,
+            lockedNormalizedAspectRatio: normalizedLockedAspectRatio,
             minSize: minSize
         )
         cropRectNormalized = VideoCropRect(next)
@@ -745,6 +750,33 @@ final class VideoCuttingViewModel: ObservableObject {
 
     private var normalizedCropRect: CGRect {
         VideoCropGeometry.clampNormalizedRect(cropRectNormalized.cgRect)
+    }
+
+    private var normalizedLockedAspectRatio: CGFloat? {
+        normalizedLockedAspectRatio(for: selectedAspectPreset)
+    }
+
+    private func normalizedLockedAspectRatio(for preset: VideoCuttingAspectPreset) -> CGFloat? {
+        guard let targetAspectRatio = preset.widthOverHeightRatio else { return nil }
+
+        let fallbackSourceAspect = CGFloat(16.0 / 9.0)
+        let resolvedSourceAspect = CGFloat(sourceVideoAspect)
+        let sourceAspect = resolvedSourceAspect.isFinite && resolvedSourceAspect > 0
+            ? resolvedSourceAspect
+            : fallbackSourceAspect
+
+        // Crop geometry operates in normalized crop-space. Convert the target
+        // display ratio into that space so source videos already matching the
+        // preset can resolve to the full-frame rect.
+        let normalizedAspectRatio = targetAspectRatio / sourceAspect
+        guard normalizedAspectRatio.isFinite, normalizedAspectRatio > 0 else {
+            return targetAspectRatio
+        }
+
+        if abs(normalizedAspectRatio - 1) <= normalizedAspectMatchTolerance {
+            return 1
+        }
+        return normalizedAspectRatio
     }
 
     private func loadVideo(url: URL) {
