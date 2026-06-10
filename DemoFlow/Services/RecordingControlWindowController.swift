@@ -7,6 +7,7 @@
 
 import AppKit
 import Foundation
+import SwiftUI
 
 enum RecordingControlMode {
     case ready
@@ -19,8 +20,10 @@ struct RecordingControlDisplayModel: Equatable {
     var elapsedDisplay: String
     var captureSizeDisplay: String
     var captureMode: RecordingCaptureMode
+    var selectedFixedCapturePreset: RecordingFixedCapturePreset?
     var isPiPActive: Bool
     var isAnnotateActive: Bool
+    var canSelectCaptureSize: Bool
     var canRecordToggle: Bool
     var canPauseToggle: Bool
     var canClose: Bool
@@ -29,8 +32,10 @@ struct RecordingControlDisplayModel: Equatable {
         elapsedDisplay: "00:00:00",
         captureSizeDisplay: "-- x --",
         captureMode: .fullScreen,
+        selectedFixedCapturePreset: nil,
         isPiPActive: false,
         isAnnotateActive: false,
+        canSelectCaptureSize: true,
         canRecordToggle: true,
         canPauseToggle: false,
         canClose: true
@@ -44,10 +49,12 @@ final class RecordingControlWindowController: NSObject {
     private let desiredCollectionBehavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     private var mode: RecordingControlMode = .ready
     private var displayModel: RecordingControlDisplayModel = .default
+    private var captureSizePickerPopover: NSPopover?
 
     var onRecordToggleRequested: (() -> Void)?
     var onPauseToggleRequested: (() -> Void)?
     var onRegionToggleRequested: (() -> Void)?
+    var onCaptureSizeTapped: (() -> Void)?
     var onPiPToggleRequested: (() -> Void)?
     var onAnnotateToggleRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
@@ -90,6 +97,7 @@ final class RecordingControlWindowController: NSObject {
     }
 
     func hide() {
+        hideCaptureSizePicker()
         panel?.orderOut(nil)
         mode = .ready
         displayModel = .default
@@ -98,11 +106,17 @@ final class RecordingControlWindowController: NSObject {
 
     func setMode(_ mode: RecordingControlMode) {
         self.mode = mode
+        if mode != .ready {
+            hideCaptureSizePicker()
+        }
         applyViewState()
     }
 
     func setDisplayModel(_ model: RecordingControlDisplayModel) {
         displayModel = model
+        if !model.canSelectCaptureSize {
+            hideCaptureSizePicker()
+        }
         applyViewState()
     }
 
@@ -114,6 +128,43 @@ final class RecordingControlWindowController: NSObject {
     func setCaptureSizeDisplay(_ text: String) {
         displayModel.captureSizeDisplay = text
         applyViewState()
+    }
+
+    func showCaptureSizePicker(
+        options: [RecordingControlCaptureSizeOption],
+        selectedOption: RecordingControlCaptureSizeOption?,
+        onSelect: @escaping (RecordingControlCaptureSizeOption) -> Void
+    ) {
+        guard mode == .ready, displayModel.canSelectCaptureSize else { return }
+        guard let contentView = panel?.contentView as? RecordingControlView else { return }
+        let anchorView = contentView.captureSizeAnchorView
+
+        let rootView = RecordingCaptureSizePickerView(
+            options: options,
+            selectedOption: selectedOption
+        ) { [weak self] option in
+            self?.hideCaptureSizePicker()
+            onSelect(option)
+        }
+
+        let hostingController = NSHostingController(rootView: rootView)
+        let popover = captureSizePickerPopover ?? {
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.animates = true
+            popover.contentSize = NSSize(width: 188, height: 262)
+            captureSizePickerPopover = popover
+            return popover
+        }()
+        if popover.isShown {
+            popover.performClose(nil)
+        }
+        popover.contentViewController = hostingController
+        popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .minY)
+    }
+
+    func hideCaptureSizePicker() {
+        captureSizePickerPopover?.performClose(nil)
     }
 
     func setAnnotateActive(_ isActive: Bool) {
@@ -237,6 +288,9 @@ final class RecordingControlWindowController: NSObject {
         contentView.onRegionTapped = { [weak self] in
             self?.onRegionToggleRequested?()
         }
+        contentView.onCaptureSizeTapped = { [weak self] in
+            self?.onCaptureSizeTapped?()
+        }
         contentView.onPiPTapped = { [weak self] in
             self?.onPiPToggleRequested?()
         }
@@ -279,6 +333,7 @@ private final class RecordingControlPanel: NSPanel {
 
 private final class RecordingControlView: NSView {
     var onRegionTapped: (() -> Void)?
+    var onCaptureSizeTapped: (() -> Void)?
     var onPiPTapped: (() -> Void)?
     var onAnnotateTapped: (() -> Void)?
     var onRecordTapped: (() -> Void)?
@@ -287,7 +342,7 @@ private final class RecordingControlView: NSView {
 
     private let effectView = NSVisualEffectView()
     private let elapsedLabel = NSTextField(labelWithString: "00:00:00")
-    private let captureSizeLabel = NSTextField(labelWithString: "-- x --")
+    private let captureSizeButton = NSButton(title: "-- x --", target: nil, action: nil)
     private let regionButton = NSButton(title: "", target: nil, action: nil)
     private let pipButton = NSButton(title: "", target: nil, action: nil)
     private let annotateButton = NSButton(title: "", target: nil, action: nil)
@@ -307,9 +362,13 @@ private final class RecordingControlView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    var captureSizeAnchorView: NSView {
+        captureSizeButton
+    }
+
     func render(mode: RecordingControlMode, model: RecordingControlDisplayModel) {
         elapsedLabel.stringValue = model.elapsedDisplay
-        captureSizeLabel.stringValue = model.captureSizeDisplay
+        updateCaptureSizeButton(title: model.captureSizeDisplay, isEnabled: model.canSelectCaptureSize)
         let isRegionMode = (model.captureMode == .region)
         let regionDescription = isRegionMode
             ? L10n.tr(RecordingCaptureMode.fullScreen.titleKey)
@@ -385,6 +444,7 @@ private final class RecordingControlView: NSView {
         let canPauseByMode = (mode == .recording || mode == .paused)
         let canRegionToggle = (mode == .ready)
         regionButton.isEnabled = canRegionToggle && model.canRecordToggle
+        captureSizeButton.isEnabled = model.canSelectCaptureSize && mode == .ready
         recordButton.isEnabled = model.canRecordToggle && mode != .stopping
         pauseButton.isEnabled = model.canPauseToggle && canPauseByMode && mode != .stopping
         closeButton.isEnabled = model.canClose && mode != .stopping
@@ -418,10 +478,24 @@ private final class RecordingControlView: NSView {
         elapsedLabel.alignment = .left
         elapsedLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-        captureSizeLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        captureSizeLabel.textColor = .secondaryLabelColor
-        captureSizeLabel.alignment = .left
-        captureSizeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        captureSizeButton.translatesAutoresizingMaskIntoConstraints = false
+        captureSizeButton.bezelStyle = .regularSquare
+        captureSizeButton.isBordered = false
+        captureSizeButton.setButtonType(.momentaryPushIn)
+        captureSizeButton.title = "-- x --"
+        captureSizeButton.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        captureSizeButton.image = resolveSymbolImage(
+            preferred: "chevron.down",
+            fallback: "chevron.down",
+            description: L10n.tr("recording.control.capture_size")
+        )
+        captureSizeButton.imagePosition = .imageRight
+        captureSizeButton.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+        captureSizeButton.contentTintColor = .tertiaryLabelColor
+        captureSizeButton.target = self
+        captureSizeButton.action = #selector(handleCaptureSizeTapped)
+        captureSizeButton.setContentHuggingPriority(.required, for: .horizontal)
+        captureSizeButton.alignment = .left
 
         configureButton(
             regionButton,
@@ -478,7 +552,7 @@ private final class RecordingControlView: NSView {
         let stack = NSStackView(views: [
             elapsedLabel,
             verticalSeparator(),
-            captureSizeLabel,
+            captureSizeButton,
             verticalSeparator(),
             regionButton,
             pipButton,
@@ -515,7 +589,7 @@ private final class RecordingControlView: NSView {
             stack.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
 
             elapsedLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 66),
-            captureSizeLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 66),
+            captureSizeButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 84),
             regionButton.widthAnchor.constraint(equalToConstant: 28),
             pipButton.widthAnchor.constraint(equalToConstant: 28),
             annotateButton.widthAnchor.constraint(equalToConstant: 28),
@@ -575,6 +649,11 @@ private final class RecordingControlView: NSView {
     }
 
     @objc
+    private func handleCaptureSizeTapped() {
+        onCaptureSizeTapped?()
+    }
+
+    @objc
     private func handlePiPTapped() {
         onPiPTapped?()
     }
@@ -603,5 +682,115 @@ private final class RecordingControlView: NSView {
             return preferredImage
         }
         return NSImage(systemSymbolName: fallback, accessibilityDescription: description)
+    }
+
+    private func updateCaptureSizeButton(title: String, isEnabled: Bool) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: isEnabled ? NSColor.labelColor : NSColor.secondaryLabelColor
+        ]
+        captureSizeButton.attributedTitle = NSAttributedString(string: title, attributes: attributes)
+        captureSizeButton.contentTintColor = isEnabled ? .tertiaryLabelColor : .quaternaryLabelColor
+        captureSizeButton.image = isEnabled
+            ? resolveSymbolImage(
+                preferred: "chevron.down",
+                fallback: "chevron.down",
+                description: L10n.tr("recording.control.capture_size")
+            )
+            : nil
+    }
+}
+
+private struct RecordingCaptureSizePickerView: View {
+    let options: [RecordingControlCaptureSizeOption]
+    let selectedOption: RecordingControlCaptureSizeOption?
+    let onSelect: (RecordingControlCaptureSizeOption) -> Void
+
+    private var landscapeOptions: [RecordingControlCaptureSizeOption] {
+        options.filter { option in
+            guard case let .preset(preset) = option else { return false }
+            return preset.aspectLabel == "16:9"
+        }
+    }
+
+    private var portraitOptions: [RecordingControlCaptureSizeOption] {
+        options.filter { option in
+            guard case let .preset(preset) = option else { return false }
+            return preset.aspectLabel == "9:16"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            optionButton(for: .freeform)
+
+            if !landscapeOptions.isEmpty {
+                groupSection(title: "16:9", options: landscapeOptions)
+            }
+
+            if !portraitOptions.isEmpty {
+                groupSection(title: "9:16", options: portraitOptions)
+            }
+        }
+        .padding(10)
+        .frame(width: 188, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func groupSection(title: String, options: [RecordingControlCaptureSizeOption]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            VStack(spacing: 4) {
+                ForEach(options) { option in
+                    optionButton(for: option)
+                }
+            }
+        }
+    }
+
+    private func optionButton(for option: RecordingControlCaptureSizeOption) -> some View {
+        let isSelected = selectedOption == option
+        return Button {
+            onSelect(option)
+        } label: {
+            HStack(spacing: 8) {
+                Text(title(for: option))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+
+                Spacer(minLength: 8)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func title(for option: RecordingControlCaptureSizeOption) -> String {
+        switch option {
+        case .freeform:
+            return L10n.tr("recording.capture_size.freeform")
+        case let .preset(preset):
+            return preset.displayText
+        }
     }
 }

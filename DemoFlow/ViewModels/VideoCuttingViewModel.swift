@@ -59,6 +59,7 @@ final class VideoCuttingViewModel: ObservableObject {
     private let normalizedAspectMatchTolerance: CGFloat = 0.001
     let player = AVPlayer()
     let noiseReductionStep: Double = 10
+    var onPrimaryExportCompleted: ((URL) -> Void)?
 
     init(trimEngine: TrimExportEngine? = nil) {
         self.trimEngine = trimEngine ?? TrimExportEngine()
@@ -515,6 +516,7 @@ final class VideoCuttingViewModel: ObservableObject {
                 } else {
                     statusMessage = L10n.f("fmt.video.export_done", exported.lastPathComponent)
                 }
+                onPrimaryExportCompleted?(exported)
             } catch {
                 statusMessage = L10n.f("fmt.video.export_failed", error.localizedDescription)
             }

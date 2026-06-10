@@ -179,7 +179,7 @@ struct RecordingSettingsView: View {
     private func fixedCapturePresetButton(for preset: RecordingFixedCapturePreset) -> some View {
         let isSelected = appCoordinator.recordingFixedCapturePreset == preset
         return Button {
-            appCoordinator.toggleRecordingFixedCapturePreset(preset)
+            appCoordinator.activateRecordingFixedCapturePresetFromSettings(preset)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(preset.displayText)
@@ -205,7 +205,7 @@ struct RecordingSettingsView: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(appCoordinator.recorderState.isRecording || appCoordinator.recorderState.isBusy)
+        .disabled(!appCoordinator.canAdjustRecordingFixedCapturePresetFromSettings)
     }
 
     private var recordingQualityCard: some View {

@@ -41,6 +41,8 @@ final class AppCoordinator: ObservableObject {
     private static let recordingAllCaptureEnabledDefaultsKey = "demoflow.recording.allCapture.enabled"
     private static let pipRecordingQualityPresetDefaultsKey = "demoflow.pip.recording.quality.preset"
     private static let pipRecordingQualityCustomBitrateDefaultsKey = "demoflow.pip.recording.quality.custom.videoBitrateMbps"
+    private static let appStoreReviewPrimaryURL = "macappstore://itunes.apple.com/app/id6771219574?action=write-review"
+    private static let appStoreReviewFallbackURL = "https://apps.apple.com/app/id6771219574?action=write-review"
     private static let pipHotkeyRegisteredStatusKey = "pip.hotkey.registered.status"
     private static let pipHotkeyFallbackStatusKey = "pip.hotkey.fallback.status"
     private static let pipFilmTitleRecordingSuffix = " - 录像中"
@@ -107,7 +109,12 @@ final class AppCoordinator: ObservableObject {
             persistPiPRecordingQualityConfig()
         }
     }
-    @Published var selectedSettingsSection: SettingsSection = .recording
+    @Published var selectedSettingsSection: SettingsSection = .recording {
+        didSet {
+            guard selectedSettingsSection != oldValue else { return }
+            processPendingReviewPromptsIfNeeded()
+        }
+    }
     @Published var languageOption: AppLanguageOption = .auto {
         didSet {
             guard languageOption != oldValue else { return }
@@ -155,6 +162,7 @@ final class AppCoordinator: ObservableObject {
     @Published private(set) var recordingRegionSelectionSizeText = "400 x 400"
     @Published private(set) var isPrivacyNoticePresented = false
     @Published private(set) var privacyPolicyOpenErrorMessage: String?
+    @Published private(set) var isReviewPromptVisible = false
 
     let audioEngine: AudioInputEngine
     let pipPreviewRuntime: PiPPreviewRuntime
@@ -172,6 +180,7 @@ final class AppCoordinator: ObservableObject {
     private let pipFilmRecorder = PiPFilmRecorderService()
     private let screenDrawAutoCaptureService = ScreenDrawAutoCaptureService()
     private let compositionEngine = CompositionExportEngine()
+    private let reviewPromptController = ReviewPromptWindowController()
     private var cancellables: Set<AnyCancellable> = []
     private var shouldRestoreMainWindowAfterRecording = false
     private var drawSystemDefinedMonitor: Any?
@@ -190,6 +199,10 @@ final class AppCoordinator: ObservableObject {
     private var recordingControlSizeRefreshTimer: Timer?
     private var recordingSessionLockedCaptureSizeDisplay: String?
     private var recordingSessionStopIntent: RecordingSessionStopIntent = .none
+    private var currentReviewPromptPayload: ReviewPromptPayload?
+    private var pendingReviewPromptPayloads: [ReviewPromptPayload] = []
+    private var pendingDeferredRecordingReviewPayload: ReviewPromptPayload?
+    private var deferredRecordingReviewPromptTask: Task<Void, Never>?
     private var hasEvaluatedPrivacyNoticeThisLaunch = false
     private var hasBootstrapped = false
 
@@ -276,6 +289,12 @@ final class AppCoordinator: ObservableObject {
         self.pipPreviewRuntime.onRecordingFailure = { [weak self] error in
             self?.handlePiPRecordingRuntimeFailure(error)
         }
+        self.reviewPromptController.onLater = { [weak self] in
+            self?.dismissReviewPrompt()
+        }
+        self.reviewPromptController.onStarSelected = { [weak self] star in
+            self?.handleReviewStarTap(star)
+        }
 
         self.pipController.onVisibilityChanged = { [weak self] isVisible in
             guard let self else { return }
@@ -321,6 +340,9 @@ final class AppCoordinator: ObservableObject {
         }
         self.recordingControlController.onRegionToggleRequested = { [weak self] in
             self?.handleRecordingControlRegionToggle()
+        }
+        self.recordingControlController.onCaptureSizeTapped = { [weak self] in
+            self?.handleRecordingControlCaptureSizeTapped()
         }
         self.recordingControlController.onPiPToggleRequested = { [weak self] in
             self?.togglePiPPreviewFromRecordingControl()
@@ -402,6 +424,16 @@ final class AppCoordinator: ObservableObject {
                 || recorder.state.isRecording
                 || recordingControlMode == .paused
         ) && recordingControlMode != .stopping
+    }
+
+    var canAdjustRecordingFixedCapturePresetFromSettings: Bool {
+        guard !recorderState.isRecording, !recorderState.isBusy, !isRecordingPermissionRequestInFlight else {
+            return false
+        }
+        if isRecordingArmed || recordingControlController.isVisible || isRecordingRegionSelecting {
+            return recordingControlMode == .ready
+        }
+        return true
     }
 
     var isPiPFilmRecording: Bool {
@@ -546,6 +578,42 @@ final class AppCoordinator: ObservableObject {
         resolveLanguage()
     }
 
+    func recordCompletedRecording() {
+        handleDeferredRecordingReviewEventCompletion()
+    }
+
+    func recordCompletedVideoExport() {
+        handleReviewEventCompletion(for: .videoExport)
+    }
+
+    func dismissReviewPrompt(processPending: Bool = true) {
+        currentReviewPromptPayload = nil
+        isReviewPromptVisible = false
+        reviewPromptController.hide()
+        guard processPending else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.processPendingReviewPromptsIfNeeded()
+        }
+    }
+
+    func handleReviewStarTap(_ star: Int) {
+        guard let payload = currentReviewPromptPayload else {
+            dismissReviewPrompt(processPending: false)
+            return
+        }
+
+        guard star == 5 else {
+            dismissReviewPrompt()
+            return
+        }
+
+        var state = loadReviewPromptCounterState(for: payload.source)
+        state.lastFiveStarCount = payload.promptedMilestone
+        persistReviewPromptCounterState(state, for: payload.source)
+        dismissReviewPrompt(processPending: false)
+        openAppStoreReviewPage()
+    }
+
     func showPiPPreview(on screen: NSScreen? = nil) {
         guard enableCameraPiP else {
             pipStatusMessage = L10n.tr("legacy.pip_pip")
@@ -612,6 +680,25 @@ final class AppCoordinator: ObservableObject {
         pipLayout = pipController.currentLayoutState()
         pipController.hide()
         refreshRecordingWindowCaptureIfNeeded()
+    }
+
+    private func handleDeferredRecordingReviewEventCompletion() {
+        let payload = incrementReviewCounterAndResolvePrompt(for: .recording)
+        guard let payload else { return }
+        pendingDeferredRecordingReviewPayload = payload
+        processPendingReviewPromptsIfNeeded()
+    }
+
+    private func handleReviewEventCompletion(for source: ReviewPromptSource) {
+        let payload = incrementReviewCounterAndResolvePrompt(for: source)
+        guard let payload else { return }
+
+        if isReviewPromptVisible {
+            enqueuePendingReviewPrompt(payload)
+            return
+        }
+
+        presentReviewPrompt(payload)
     }
 
     func startPiPFilmRecording() {
@@ -958,6 +1045,30 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    func activateRecordingFixedCapturePresetFromSettings(_ preset: RecordingFixedCapturePreset) {
+        guard canAdjustRecordingFixedCapturePresetFromSettings else { return }
+        let option: RecordingControlCaptureSizeOption = recordingFixedCapturePreset == preset
+            ? .freeform
+            : .preset(preset)
+        let preferredScreen = activeScreenByPointer() ?? NSScreen.main ?? NSScreen.screens.first
+
+        if isRecordingArmed || isRecordingRegionSelecting || (recordingControlController.isVisible && recordingControlMode == .ready) {
+            applyRecordingCaptureSizeOptionForReadyControl(option, preferredScreen: preferredScreen)
+            if let preferredScreen, recordingControlController.isVisible {
+                recordingControlController.show(on: preferredScreen)
+            }
+            return
+        }
+
+        runRecordingPermissionRequest {
+            self.prepareRecordingCaptureSizeOptionForArming(option)
+            self.presentRecordingStartControl(
+                preferredScreen: preferredScreen,
+                captureMode: .region
+            )
+        }
+    }
+
     func toggleRecordingFixedCapturePreset(_ preset: RecordingFixedCapturePreset) {
         guard !recorderState.isRecording, !recorderState.isBusy else { return }
         if recordingFixedCapturePreset == preset {
@@ -993,6 +1104,49 @@ final class AppCoordinator: ObservableObject {
             if statusMessage != L10n.tr("recording.region.error.display_unavailable") {
                 statusMessage = L10n.tr("recording.region.status.confirmed")
             }
+        }
+    }
+
+    private func prepareRecordingCaptureSizeOptionForArming(_ option: RecordingControlCaptureSizeOption) {
+        recordingCaptureMode = .region
+        armedRecordingCaptureMode = .region
+        switch option {
+        case .freeform:
+            recordingFixedCapturePreset = nil
+            recordingRegionSelectionController.setSelectionInteractionMode(.freeform)
+        case let .preset(preset):
+            recordingFixedCapturePreset = preset
+            recordingRegionSelectionController.setSelectionInteractionMode(.fixedSizeLocked)
+        }
+    }
+
+    private func applyRecordingCaptureSizeOptionForReadyControl(
+        _ option: RecordingControlCaptureSizeOption,
+        preferredScreen: NSScreen?
+    ) {
+        guard recordingControlMode == .ready || isRecordingRegionSelecting else { return }
+        prepareRecordingCaptureSizeOptionForArming(option)
+        dismissRegionSelectionOverlay()
+
+        switch option {
+        case .freeform:
+            break
+        case let .preset(preset):
+            applyFixedCapturePresetSelection(preset, preferredScreen: preferredScreen)
+        }
+
+        if beginRegionSelectionIfNeededForReadyControl(preferredScreen: preferredScreen) {
+            refreshRecordingControlSizeDisplayForCurrentMode()
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            switch option {
+            case .freeform:
+                statusMessage = L10n.tr("recording.region.status.selecting")
+            case .preset:
+                statusMessage = L10n.tr("recording.region.status.confirmed")
+            }
+        } else {
+            statusMessage = L10n.tr("recording.region.error.display_unavailable")
         }
     }
 
@@ -1170,6 +1324,20 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func bindState() {
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.processPendingReviewPromptsIfNeeded()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.processPendingReviewPromptsIfNeeded()
+            }
+            .store(in: &cancellables)
+
         pipPreviewRuntime.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -1477,6 +1645,26 @@ final class AppCoordinator: ObservableObject {
         updateRecordingControlSurface()
     }
 
+    private func handleRecordingControlCaptureSizeTapped() {
+        guard recordingControlMode == .ready else { return }
+        let selectedOption: RecordingControlCaptureSizeOption? = {
+            guard recordingCaptureMode == .region else { return nil }
+            if let recordingFixedCapturePreset {
+                return .preset(recordingFixedCapturePreset)
+            }
+            return .freeform
+        }()
+
+        recordingControlController.showCaptureSizePicker(
+            options: RecordingControlCaptureSizeOption.allCases,
+            selectedOption: selectedOption
+        ) { [weak self] option in
+            guard let self else { return }
+            let preferredScreen = self.activeScreenByPointer() ?? NSScreen.main ?? NSScreen.screens.first
+            self.applyRecordingCaptureSizeOptionForReadyControl(option, preferredScreen: preferredScreen)
+        }
+    }
+
     private func handleRecordingControlCloseRequested() {
         switch recordingControlMode {
         case .recording, .paused:
@@ -1691,6 +1879,9 @@ final class AppCoordinator: ObservableObject {
                 name: .demoFlowRecordingDidFinalizeOutput,
                 object: finalizedOutputURL
             )
+            DispatchQueue.main.async { [weak self] in
+                self?.recordCompletedRecording()
+            }
         }
     }
 
@@ -1764,9 +1955,11 @@ final class AppCoordinator: ObservableObject {
         recordingControlDisplayModel.isAnnotateActive = isDrawOverlayVisible
         armedRecordingCaptureMode = captureMode
         if captureMode == .region {
-            recordingControlDisplayModel.captureSizeDisplay = pendingRegionSelection.map {
-                formatSizeDisplay(for: $0.rectInDisplayPoints.size)
-            } ?? recordingRegionSelectionSizeText
+            recordingControlDisplayModel.captureSizeDisplay = recordingFixedCapturePreset?.displayText
+                ?? pendingRegionSelection.map {
+                    formatSizeDisplay(for: $0.rectInDisplayPoints.size)
+                }
+                ?? recordingRegionSelectionSizeText
         } else {
             recordingControlDisplayModel.captureSizeDisplay = formattedCurrentScreenSizeDisplay() ?? "-- x --"
         }
@@ -1793,8 +1986,10 @@ final class AppCoordinator: ObservableObject {
         recordingControlDisplayModel.isAnnotateActive = isDrawOverlayVisible
         recordingControlDisplayModel.isPiPActive = isPiPPreviewVisible
         recordingControlDisplayModel.captureMode = recordingCaptureMode
+        recordingControlDisplayModel.selectedFixedCapturePreset = recordingFixedCapturePreset
         recordingControlDisplayModel.captureSizeDisplay = recordingSessionLockedCaptureSizeDisplay
             ?? (recordingControlDisplayModel.captureSizeDisplay.isEmpty ? "-- x --" : recordingControlDisplayModel.captureSizeDisplay)
+        recordingControlDisplayModel.canSelectCaptureSize = recordingControlMode == .ready
         recordingControlDisplayModel.canRecordToggle = recordingControlMode != .stopping
         recordingControlDisplayModel.canPauseToggle = (recordingControlMode == .recording || recordingControlMode == .paused)
             && recordingControlMode != .stopping
@@ -1890,6 +2085,140 @@ final class AppCoordinator: ObservableObject {
         let fileManager = FileManager.default
         for url in recordingSessionSegmentURLs where url.path != keepURL.path {
             try? fileManager.removeItem(at: url)
+        }
+    }
+
+    private func incrementReviewCounterAndResolvePrompt(for source: ReviewPromptSource) -> ReviewPromptPayload? {
+        var state = loadReviewPromptCounterState(for: source)
+        state.count += 1
+
+        let nextMilestone = nextReviewPromptMilestone(for: source, state: state)
+        guard state.count >= nextMilestone else {
+            persistReviewPromptCounterState(state, for: source)
+            return nil
+        }
+
+        state.lastPromptedMilestone = nextMilestone
+        persistReviewPromptCounterState(state, for: source)
+        return ReviewPromptPayload(
+            source: source,
+            count: state.count,
+            promptedMilestone: nextMilestone
+        )
+    }
+
+    private func nextReviewPromptMilestone(
+        for source: ReviewPromptSource,
+        state: ReviewPromptCounterState
+    ) -> Int {
+        if state.lastFiveStarCount > 0 {
+            return max(state.lastPromptedMilestone, state.lastFiveStarCount) + 100
+        }
+
+        if let threshold = source.initialMilestones.first(where: { $0 > state.lastPromptedMilestone }) {
+            return threshold
+        }
+
+        let terminalMilestone = max(state.lastPromptedMilestone, source.initialMilestones.last ?? 100)
+        return terminalMilestone + 100
+    }
+
+    private func loadReviewPromptCounterState(for source: ReviewPromptSource) -> ReviewPromptCounterState {
+        let defaults = UserDefaults.standard
+        return ReviewPromptCounterState(
+            count: defaults.object(forKey: source.countDefaultsKey) as? Int ?? 0,
+            lastPromptedMilestone: defaults.object(forKey: source.lastPromptedMilestoneDefaultsKey) as? Int ?? 0,
+            lastFiveStarCount: defaults.object(forKey: source.lastFiveStarCountDefaultsKey) as? Int ?? 0
+        )
+    }
+
+    private func persistReviewPromptCounterState(
+        _ state: ReviewPromptCounterState,
+        for source: ReviewPromptSource
+    ) {
+        let defaults = UserDefaults.standard
+        defaults.set(state.count, forKey: source.countDefaultsKey)
+        defaults.set(state.lastPromptedMilestone, forKey: source.lastPromptedMilestoneDefaultsKey)
+        defaults.set(state.lastFiveStarCount, forKey: source.lastFiveStarCountDefaultsKey)
+    }
+
+    private func enqueuePendingReviewPrompt(_ payload: ReviewPromptPayload) {
+        guard !pendingReviewPromptPayloads.contains(payload) else { return }
+        pendingReviewPromptPayloads.append(payload)
+    }
+
+    private func processPendingReviewPromptsIfNeeded() {
+        guard !isReviewPromptVisible, currentReviewPromptPayload == nil else { return }
+        if !pendingReviewPromptPayloads.isEmpty {
+            let nextPayload = pendingReviewPromptPayloads.removeFirst()
+            presentReviewPrompt(nextPayload)
+            return
+        }
+        guard pendingDeferredRecordingReviewPayload != nil else {
+            cancelDeferredRecordingReviewPromptTask()
+            return
+        }
+        guard canPresentDeferredRecordingReviewPromptNow else {
+            cancelDeferredRecordingReviewPromptTask()
+            return
+        }
+        scheduleDeferredRecordingReviewPromptIfNeeded()
+    }
+
+    private func presentReviewPrompt(_ payload: ReviewPromptPayload) {
+        cancelDeferredRecordingReviewPromptTask()
+        currentReviewPromptPayload = payload
+        isReviewPromptVisible = true
+        NSApp.activate(ignoringOtherApps: true)
+        let targetScreen = activeScreenByPointer()
+            ?? NSApp.keyWindow?.screen
+            ?? NSApp.mainWindow?.screen
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        reviewPromptController.show(payload: payload, on: targetScreen)
+    }
+
+    private var canPresentDeferredRecordingReviewPromptNow: Bool {
+        guard selectedSettingsSection == .recording else { return false }
+        guard NSApp.isActive else { return false }
+        guard recorderState == .idle else { return false }
+        guard recordingControlMode == .ready else { return false }
+        guard !isRecordingArmed else { return false }
+        guard !isRecordingRegionSelecting else { return false }
+        guard !recordingControlController.isVisible else { return false }
+        guard !isPrivacyNoticePresented else { return false }
+        return NSApp.windows.contains { window in
+            !(window is NSPanel) && window.isVisible && (window.isKeyWindow || window.isMainWindow)
+        }
+    }
+
+    private func scheduleDeferredRecordingReviewPromptIfNeeded() {
+        guard deferredRecordingReviewPromptTask == nil else { return }
+        deferredRecordingReviewPromptTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            self.deferredRecordingReviewPromptTask = nil
+            guard !self.isReviewPromptVisible, self.currentReviewPromptPayload == nil else { return }
+            guard self.canPresentDeferredRecordingReviewPromptNow else { return }
+            guard let payload = self.pendingDeferredRecordingReviewPayload else { return }
+            self.pendingDeferredRecordingReviewPayload = nil
+            self.presentReviewPrompt(payload)
+        }
+    }
+
+    private func cancelDeferredRecordingReviewPromptTask() {
+        deferredRecordingReviewPromptTask?.cancel()
+        deferredRecordingReviewPromptTask = nil
+    }
+
+    private func openAppStoreReviewPage() {
+        if let primaryURL = URL(string: Self.appStoreReviewPrimaryURL),
+           NSWorkspace.shared.open(primaryURL) {
+            return
+        }
+        if let fallbackURL = URL(string: Self.appStoreReviewFallbackURL) {
+            _ = NSWorkspace.shared.open(fallbackURL)
         }
     }
 

@@ -5,6 +5,7 @@
 //  Created by PJ Lee + Ai on 2026/4/30.
 //
 
+import AppKit
 import SwiftUI
 
 struct SettingsSidebarView: View {
@@ -27,15 +28,21 @@ struct SettingsSidebarView: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 10) {
+            Image(nsImage: applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: isCollapsed ? 24 : 28, height: isCollapsed ? 24 : 28)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+
             if !isCollapsed {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L10n.tr("sidebar.header.title"))
+                Text(productDisplayName)
                         .font(.headline)
-                    Text(L10n.tr("sidebar.header.subtitle"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 0)
@@ -50,6 +57,25 @@ struct SettingsSidebarView: View {
             .buttonStyle(.plain)
             .help(isCollapsed ? L10n.tr("sidebar.expand") : L10n.tr("sidebar.collapse"))
         }
+    }
+
+    private var applicationIconImage: NSImage {
+        NSApp.applicationIconImage
+    }
+
+    private var productDisplayName: String {
+        let info = Bundle.main.infoDictionary
+        if let displayName = (info?["CFBundleDisplayName"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !displayName.isEmpty {
+            return displayName
+        }
+        if let bundleName = (info?["CFBundleName"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !bundleName.isEmpty {
+            return bundleName
+        }
+        return "DemoFlow"
     }
 
     private var mainNavList: some View {

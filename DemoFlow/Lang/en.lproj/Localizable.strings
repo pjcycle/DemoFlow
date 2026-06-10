@@ -312,6 +312,9 @@
 "privacy.notice.later" = "Later";
 "privacy.notice.url_invalid" = "Privacy policy URL is not configured correctly.";
 "privacy.notice.open_failed" = "Failed to open privacy policy. Please try again later.";
+"review.prompt.title" = "Like DemoFlow?";
+"review.prompt.message" = "Tap a star to rate it on the App Store.";
+"review.prompt.later" = "Later";
 "section.recording.title" = "Recording";
 "section.pipCamera.title" = "PiP Camera";
 "section.screenDrawing.title" = "Screen Drawing";
@@ -625,6 +628,7 @@
 "recording.region.error.display_unavailable" = "Display unavailable. Cannot start region recording.";
 "recording.control.annotate" = "Annotate";
 "recording.control.region" = "Region Capture";
+"recording.control.capture_size" = "Capture Size";
 "recording.control.pause" = "Pause";
 "recording.control.resume" = "Resume";
 "recording.control.close" = "Close";
@@ -642,3 +646,4 @@
 "menu.recording_settings" = "Recording Settings";
 "recording.fixed_preset.title" = "Fixed Capture Area";
 "recording.fixed_preset.subtitle" = "6 choices, tap again to unlock resize";
+"recording.capture_size.freeform" = "Freeform";

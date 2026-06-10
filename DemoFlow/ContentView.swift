@@ -62,6 +62,10 @@ struct ContentView: View {
                 lastKnownContainerWidth = measuredWidth
                 bootstrapUIStateIfNeeded(totalWidth: measuredWidth)
                 appCoordinator.bootstrap()
+                let coordinator = appCoordinator
+                videoCuttingViewModel.onPrimaryExportCompleted = { [weak coordinator] _ in
+                    coordinator?.recordCompletedVideoExport()
+                }
             }
             .onChange(of: width) { _, newWidth in
                 let measuredWidth = max(newWidth, 1)
