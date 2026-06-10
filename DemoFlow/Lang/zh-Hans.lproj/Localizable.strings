@@ -312,6 +312,9 @@
 "privacy.notice.later" = "稍后查看";
 "privacy.notice.url_invalid" = "隐私协议地址配置无效。";
 "privacy.notice.open_failed" = "打开隐私协议失败，请稍后重试。";
+"review.prompt.title" = "喜欢“DemoFlow”吗？";
+"review.prompt.message" = "轻点星形以在 App Store 中评分。";
+"review.prompt.later" = "以后";
 "section.recording.title" = "录屏";
 "section.pipCamera.title" = "PiP 摄像";
 "section.screenDrawing.title" = "屏幕画图";
@@ -625,6 +628,7 @@
 "recording.region.error.display_unavailable" = "当前显示器不可用，无法开始区域录制。";
 "recording.control.annotate" = "标注";
 "recording.control.region" = "区域录屏";
+"recording.control.capture_size" = "裁切尺寸";
 "recording.control.pause" = "暂停";
 "recording.control.resume" = "继续";
 "recording.control.close" = "关闭";
@@ -642,3 +646,4 @@
 "menu.recording_settings" = "录屏配置";
 "recording.fixed_preset.title" = "固定裁切区域，可快速上 Youtube Bilibili TikTok";
 "recording.fixed_preset.subtitle" = "";
+"recording.capture_size.freeform" = "自由裁切";

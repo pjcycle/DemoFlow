@@ -65,3 +65,21 @@ enum RecordingFixedCapturePreset: String, CaseIterable, Identifiable {
         return "\(Int(size.width)) x \(Int(size.height))"
     }
 }
+
+enum RecordingControlCaptureSizeOption: Hashable, Identifiable {
+    case freeform
+    case preset(RecordingFixedCapturePreset)
+
+    var id: String {
+        switch self {
+        case .freeform:
+            return "freeform"
+        case let .preset(preset):
+            return "preset-\(preset.rawValue)"
+        }
+    }
+
+    static var allCases: [RecordingControlCaptureSizeOption] {
+        [.freeform] + RecordingFixedCapturePreset.allCases.map(Self.preset)
+    }
+}
