@@ -458,7 +458,7 @@ private final class RecordingRegionSelectionOverlayView: NSView {
             translation: translation,
             handle: activeHandle,
             displaySize: bounds.size,
-            lockedAspectRatio: nil,
+            lockedNormalizedAspectRatio: nil,
             minSize: minNormalized
         )
         selectionRect = denormalizedRect(from: nextNormalized)
