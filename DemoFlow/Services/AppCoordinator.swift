@@ -416,6 +416,15 @@ final class AppCoordinator: ObservableObject {
             && !isRecordingArmed
             && !isRecordingPermissionRequestInFlight
             && !isRecordingRegionSelecting
+            && DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured()
+    }
+
+    var isRecordingsOutputDirectoryConfigured: Bool {
+        DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured()
+    }
+
+    var recordingsOutputDirectoryPath: String? {
+        DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory()?.path
     }
 
     var canStopRecording: Bool {
@@ -449,6 +458,7 @@ final class AppCoordinator: ObservableObject {
 
     var canStartPiPFilmRecording: Bool {
         !pipFilmState.isBusy && !pipFilmState.isRecording
+            && DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured()
     }
 
     var canStopPiPFilmRecording: Bool {
@@ -703,6 +713,11 @@ final class AppCoordinator: ObservableObject {
 
     func startPiPFilmRecording() {
         guard canStartPiPFilmRecording else { return }
+        guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else {
+            pipStatusMessage = L10n.tr("output.recording.unset_toast")
+            selectedSettingsSection = .appSettings
+            return
+        }
         pipFilmRecorder.resetFailureIfNeeded()
         pendingPiPFilmStopTrigger = nil
         pipFilmState = .preparing
@@ -724,7 +739,11 @@ final class AppCoordinator: ObservableObject {
                     }
                     return
                 }
-                let outputDirectory = try DemoFlowOutputDirectoryPolicy.preparePiPRecordingsDirectory()
+                guard let outputDirectory = DemoFlowOutputDirectoryPolicy.pipRecordingsBookmarkedDirectory() else {
+                    throw PiPFilmRecorderServiceError.runtimeStartFailed(
+                        L10n.tr("output.recording.unset_toast")
+                    )
+                }
                 pipStatusMessage = L10n.tr("pip.film.status.preparing")
                 try await pipFilmRecorder.startRecording(
                     with: pipPreviewRuntime,
@@ -796,28 +815,28 @@ final class AppCoordinator: ObservableObject {
     }
 
     func openPiPRecordingsDirectory() {
-        do {
-            let directory = try DemoFlowOutputDirectoryPolicy.preparePiPRecordingsDirectory()
-            if let lastPiPFilmOutputURL {
-                NSWorkspace.shared.activateFileViewerSelecting([lastPiPFilmOutputURL])
-            } else {
-                NSWorkspace.shared.activateFileViewerSelecting([directory])
-            }
-        } catch {
-            pipStatusMessage = L10n.f("pip.film.status.failed", readablePiPFilmMessage(error))
+        guard let directory = DemoFlowOutputDirectoryPolicy.pipRecordingsBookmarkedDirectory() else {
+            pipStatusMessage = L10n.tr("output.recording.unset_toast")
+            selectedSettingsSection = .appSettings
+            return
+        }
+        if let lastPiPFilmOutputURL {
+            NSWorkspace.shared.activateFileViewerSelecting([lastPiPFilmOutputURL])
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([directory])
         }
     }
 
     func openRecordingOutputDirectory() {
-        do {
-            let directory = try DemoFlowOutputDirectoryPolicy.recordingsDirectory()
-            if let outputURL = recorder.lastOutputURL {
-                NSWorkspace.shared.activateFileViewerSelecting([outputURL])
-            } else {
-                NSWorkspace.shared.activateFileViewerSelecting([directory])
-            }
-        } catch {
-            statusMessage = L10n.f("recording.output.open_failed", error.localizedDescription)
+        guard let directory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
+            statusMessage = L10n.tr("output.recording.unset_toast")
+            selectedSettingsSection = .appSettings
+            return
+        }
+        if let outputURL = recorder.lastOutputURL {
+            NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([directory])
         }
     }
 
@@ -896,12 +915,29 @@ final class AppCoordinator: ObservableObject {
     }
 
     func openScreenDrawAutoCaptureDirectory() {
-        do {
-            let directory = try DemoFlowOutputDirectoryPolicy.prepareScreenDrawAutoCaptureDirectory()
-            NSWorkspace.shared.activateFileViewerSelecting([directory])
-        } catch {
-            drawStatusMessage = L10n.f("fmt.draw.capture_failed", error.localizedDescription)
+        guard let directory = DemoFlowOutputDirectoryPolicy.screenDrawAutoCaptureBookmarkedDirectory() else {
+            drawStatusMessage = L10n.tr("output.recording.unset_toast")
+            selectedSettingsSection = .appSettings
+            return
         }
+        NSWorkspace.shared.activateFileViewerSelecting([directory])
+    }
+
+    // MARK: - 输出位置 UI 钩子
+
+    /// 弹 NSOpenPanel 让用户选录屏保存目录。返回是否成功。
+    @discardableResult
+    func requestPickRecordingsDirectory() -> Bool {
+        guard let url = DemoFlowOutputDirectoryPolicy.requestRecordingsDirectoryPicker() else {
+            return false
+        }
+        statusMessage = L10n.f("output.location.recordings.chosen", url.path)
+        return true
+    }
+
+    func clearRecordingsDirectorySelection() {
+        DemoFlowOutputDirectoryPolicy.clearRecordingsDirectorySelection()
+        statusMessage = L10n.tr("output.location.recordings.cleared")
     }
 
     // Compatibility wrappers for existing callers.
@@ -920,6 +956,11 @@ final class AppCoordinator: ObservableObject {
     }
 
     func startRecordingFromCurrentConfig(preferredScreen: NSScreen? = nil) {
+        guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else {
+            statusMessage = L10n.tr("output.recording.unset_toast")
+            selectedSettingsSection = .appSettings
+            return
+        }
         guard canStartRecording else {
             statusMessage = unavailableReason()
             return
@@ -933,6 +974,11 @@ final class AppCoordinator: ObservableObject {
     }
 
     func startRecordingImmediatelyFromMenuBar(preferredScreen: NSScreen? = nil) {
+        guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else {
+            statusMessage = L10n.tr("output.recording.unset_toast")
+            selectedSettingsSection = .appSettings
+            return
+        }
         guard canStartRecording else {
             statusMessage = unavailableReason()
             return
@@ -2075,7 +2121,13 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func makeSegmentMergedURL() throws -> URL {
-        let directory = try DemoFlowOutputDirectoryPolicy.recordingsDirectory()
+        guard let directory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
+            throw NSError(
+                domain: "DemoFlow.AppCoordinator",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: L10n.tr("output.recording.unset_toast")]
+            )
+        }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return directory.appendingPathComponent("DemoFlow-segment-merged-\(formatter.string(from: Date())).mp4")

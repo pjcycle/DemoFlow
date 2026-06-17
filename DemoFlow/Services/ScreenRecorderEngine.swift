@@ -551,7 +551,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         let timestamp = formatter.string(from: Date())
         let screenRawURL: URL
         if request.cameraDeviceID == nil {
-            let recordingsDirectory = try DemoFlowOutputDirectoryPolicy.recordingsDirectory()
+            guard let recordingsDirectory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
+                throw RecorderError.outputDirectoryNotConfigured
+            }
             screenRawURL = recordingsDirectory.appendingPathComponent("DemoFlow-\(timestamp).mp4")
         } else {
             screenRawURL = temporaryFolder.appendingPathComponent("screen-\(timestamp).mp4")
@@ -566,7 +568,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     }
 
     private func makeMergedURL() throws -> URL {
-        let folder = try DemoFlowOutputDirectoryPolicy.recordingsDirectory()
+        guard let folder = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
+            throw RecorderError.outputDirectoryNotConfigured
+        }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return folder.appendingPathComponent("DemoFlow-\(formatter.string(from: Date())).mp4")
@@ -817,6 +821,7 @@ extension ScreenRecorderEngine {
         case emptyIntermediate(String)
         case startTimedOut
         case stopTimedOut
+        case outputDirectoryNotConfigured
 
         @MainActor
         var displayMessage: String {
@@ -835,6 +840,8 @@ extension ScreenRecorderEngine {
                 return L10n.tr("legacy.key_192")
             case .stopTimedOut:
                 return L10n.tr("legacy.key_16")
+            case .outputDirectoryNotConfigured:
+                return L10n.tr("output.recording.unset_toast")
             }
         }
     }

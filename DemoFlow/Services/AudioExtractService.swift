@@ -24,7 +24,7 @@ final class AudioExtractService {
         localFileURL: URL?,
         sourceURLString: String,
         quality: AudioExtractQualityPreset,
-        outputRootURL: URL,
+        outputMP3URL: URL,
         installDeps: Bool,
         onLog: @escaping (String) -> Void
     ) async throws -> AudioExtractResult {
@@ -36,14 +36,14 @@ final class AudioExtractService {
             return try await extractFromLocalFile(
                 localFileURL: localFileURL,
                 quality: quality,
-                outputRootURL: outputRootURL,
+                outputMP3URL: outputMP3URL,
                 onLog: onLog
             )
         case .onlineURL:
             return try await extractFromOnlineURL(
                 sourceURLString: sourceURLString,
                 quality: quality,
-                outputRootURL: outputRootURL,
+                outputMP3URL: outputMP3URL,
                 installDeps: installDeps,
                 onLog: onLog
             )
@@ -53,7 +53,7 @@ final class AudioExtractService {
     private func extractFromLocalFile(
         localFileURL: URL,
         quality: AudioExtractQualityPreset,
-        outputRootURL: URL,
+        outputMP3URL: URL,
         onLog: @escaping (String) -> Void
     ) async throws -> AudioExtractResult {
         guard localFileURL.isSupportedAudioExtractLocalFile else {
@@ -84,9 +84,8 @@ final class AudioExtractService {
             )
         }
 
-        let outputDirectory = try makeOutputDirectory(root: outputRootURL, sourceTag: sanitizeSourceTag(localFileURL.deletingPathExtension().lastPathComponent))
-        let outputFileName = "\(sanitizeSourceTag(localFileURL.deletingPathExtension().lastPathComponent)).mp3"
-        let outputMP3URL = outputDirectory.appendingPathComponent(outputFileName)
+        let outputDirectory = outputMP3URL.deletingLastPathComponent()
+        try? fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         let command = ProcessCommand(
             executableURL: tools.ffmpegURL,
@@ -128,7 +127,7 @@ final class AudioExtractService {
     private func extractFromOnlineURL(
         sourceURLString: String,
         quality: AudioExtractQualityPreset,
-        outputRootURL: URL,
+        outputMP3URL: URL,
         installDeps: Bool,
         onLog: @escaping (String) -> Void
     ) async throws -> AudioExtractResult {
@@ -152,8 +151,14 @@ final class AudioExtractService {
             )
         }
 
-        let outputDirectory = try makeOutputDirectory(root: outputRootURL, sourceTag: sourceTagForURL(sourceURLString))
-        let templatePath = outputDirectory.appendingPathComponent("%(title).120B-%(id)s.%(ext)s").path
+        let outputDirectory = outputMP3URL.deletingLastPathComponent()
+        try? fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        // yt-dlp `-o` 接受固定文件路径：若后缀与音频格式不一致会自行加 .mp3。
+        // 我们用 deletingPathExtension + .%(ext)s 模板，让 yt-dlp 落到选定目录并采用选定 basename。
+        let outputTemplate = outputMP3URL
+            .deletingPathExtension()
+            .appendingPathExtension("%(ext)s")
+            .path
 
         guard let ytDlpCommand = tools.ytDlpCommand else {
             throw AudioExtractServiceError.dependencyHint(
@@ -173,7 +178,7 @@ final class AudioExtractService {
                 "-x",
                 "--audio-format", "mp3",
                 "--audio-quality", quality.ytDlpQualityValue,
-                "--output", templatePath,
+                "--output", outputTemplate,
                 sourceURLString
             ])
         )
@@ -191,18 +196,25 @@ final class AudioExtractService {
             )
         }
 
-        guard let mp3URL = latestMP3(in: outputDirectory) else {
-            throw AudioExtractServiceError.urlExtractionFailed(
-                AudioExtractCommandHint(
-                    reason: L10n.tr("audio.extract.reason.no_output"),
-                    nextCommand: "ls -la \"\(outputDirectory.path)\""
+        let resolvedMP3URL: URL
+        if fileManager.fileExists(atPath: outputMP3URL.path) {
+            resolvedMP3URL = outputMP3URL
+        } else {
+            // 兜底：yt-dlp 因扩展名策略落到同目录其他文件名时，按"最新 .mp3"找回
+            guard let fallback = latestMP3(in: outputDirectory) else {
+                throw AudioExtractServiceError.urlExtractionFailed(
+                    AudioExtractCommandHint(
+                        reason: L10n.tr("audio.extract.reason.no_output"),
+                        nextCommand: "ls -la \"\(outputDirectory.path)\""
+                    )
                 )
-            )
+            }
+            resolvedMP3URL = fallback
         }
 
         return try validateOutput(
             directory: outputDirectory,
-            mp3URL: mp3URL,
+            mp3URL: resolvedMP3URL,
             ffprobeURL: tools.ffprobeURL,
             onLog: onLog
         )

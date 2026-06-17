@@ -146,7 +146,7 @@ struct AudioExtractSettingsView: View {
     private var outputCard: some View {
         card(title: L10n.tr("audio.extract.label.output_dir"), icon: "folder.badge.gearshape") {
             HStack(spacing: 10) {
-                logLikeField(viewModel.outputRootPathText)
+                logLikeField(viewModel.outputPathText)
                 Button(L10n.tr("audio.extract.action.select_output")) {
                     viewModel.pickOutputDirectory()
                 }
@@ -159,11 +159,13 @@ struct AudioExtractSettingsView: View {
                     viewModel.openOutputDirectory()
                 }
                 .buttonStyle(.bordered)
+                .disabled(viewModel.outputMP3URL == nil && viewModel.latestMP3URL == nil)
 
                 Button(L10n.tr("audio.extract.action.reveal_latest")) {
                     viewModel.revealLatestMP3()
                 }
                 .buttonStyle(.bordered)
+                .disabled(viewModel.latestMP3URL == nil)
             }
         }
     }

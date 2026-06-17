@@ -137,7 +137,13 @@ struct ContentView: View {
         case .audioExtract:
             AudioExtractSettingsView(viewModel: audioExtractViewModel)
         case .appSettings:
-            LanguageSettingsView(appCoordinator: appCoordinator)
+            VStack(alignment: .leading, spacing: 18) {
+                OutputLocationSettingsView(
+                    appCoordinator: appCoordinator,
+                    audioExtractViewModel: audioExtractViewModel
+                )
+                LanguageSettingsView(appCoordinator: appCoordinator)
+            }
         }
     }
 
