@@ -15,7 +15,7 @@ final class AudioExtractViewModel: ObservableObject {
     @Published var sourceType: AudioExtractSourceType = .localFile
     @Published var localFileURL: URL?
     @Published var sourceURLString: String = ""
-    @Published var outputRootURL: URL = DemoFlowOutputDirectoryPolicy.defaultAudioExtractRootDirectory()
+    @Published var outputMP3URL: URL?
     @Published var quality: AudioExtractQualityPreset = .best
     @Published var installDependencies = true
 
@@ -30,6 +30,7 @@ final class AudioExtractViewModel: ObservableObject {
 
     var canStart: Bool {
         guard !isExtracting else { return false }
+        guard outputMP3URL != nil else { return false }
         switch sourceType {
         case .localFile:
             return localFileURL != nil
@@ -42,8 +43,8 @@ final class AudioExtractViewModel: ObservableObject {
         isExtracting
     }
 
-    var outputRootPathText: String {
-        outputRootURL.path
+    var outputPathText: String {
+        outputMP3URL?.path ?? L10n.tr("output.location.audio.empty")
     }
 
     var localFilePathText: String {
@@ -82,24 +83,60 @@ final class AudioExtractViewModel: ObservableObject {
     }
 
     func pickOutputDirectory() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = L10n.tr("audio.extract.action.select_output")
-
-        let response = panel.runModal()
-        guard response == .OK, let url = panel.url else {
+        let suggested = suggestedOutputFileName()
+        guard let url = DemoFlowOutputDirectoryPolicy.requestAudioExtractOutputPicker(suggestedFileName: suggested) else {
             appendLog("[output] \(L10n.tr("audio.extract.status.output_pick_cancelled"))")
             return
         }
-
-        outputRootURL = url
+        outputMP3URL = url
         statusMessage = L10n.f("audio.extract.status.output_selected", url.path)
         appendLog("[output] \(statusMessage)")
     }
 
+    private func suggestedOutputFileName() -> String {
+        switch sourceType {
+        case .localFile:
+            let base = localFileURL?.deletingPathExtension().lastPathComponent ?? "source"
+            return "\(sanitize(base)).mp3"
+        case .onlineURL:
+            let base = sourceTag(from: sourceURLString)
+            return "\(sanitize(base)).mp3"
+        }
+    }
+
+    private func sanitize(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let transformed = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let compacted = String(transformed)
+            .replacingOccurrences(of: "_+", with: "_", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        if compacted.isEmpty {
+            return "source"
+        }
+        return String(compacted.prefix(80))
+    }
+
+    private func sourceTag(from urlString: String) -> String {
+        if let matched = urlString.range(of: "BV[0-9A-Za-z]{10}", options: .regularExpression) {
+            return String(urlString[matched])
+        }
+        if let matched = urlString.range(of: "[?&]v=([0-9A-Za-z_-]{11})", options: .regularExpression) {
+            let segment = String(urlString[matched])
+            if let v = segment.split(separator: "=").last {
+                return String(v)
+            }
+        }
+        return urlString
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+    }
+
     func startExtraction() {
+        guard let outputMP3URL else {
+            statusMessage = L10n.tr("output.audio.unset_toast")
+            appendLog("[error] \(statusMessage)")
+            return
+        }
         guard canStart else {
             statusMessage = L10n.tr("audio.extract.error.missing_input")
             appendLog("[error] \(statusMessage)")
@@ -114,7 +151,6 @@ final class AudioExtractViewModel: ObservableObject {
         let localFileURL = localFileURL
         let sourceURLString = sourceURLString
         let quality = quality
-        let outputRootURL = outputRootURL
         let installDependencies = installDependencies
 
         extractionTask?.cancel()
@@ -125,7 +161,7 @@ final class AudioExtractViewModel: ObservableObject {
                     localFileURL: localFileURL,
                     sourceURLString: sourceURLString,
                     quality: quality,
-                    outputRootURL: outputRootURL,
+                    outputMP3URL: outputMP3URL,
                     installDeps: installDependencies,
                     onLog: { [weak self] text in
                         Task { @MainActor in
@@ -163,9 +199,14 @@ final class AudioExtractViewModel: ObservableObject {
     }
 
     func openOutputDirectory() {
-        let url = latestOutputDirectoryURL ?? outputRootURL
+        let url = latestMP3URL ?? outputMP3URL
+        guard let url else {
+            statusMessage = L10n.tr("output.audio.unset_toast")
+            appendLog("[output] \(statusMessage)")
+            return
+        }
         do {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch {
             statusMessage = L10n.f("audio.extract.status.output_open_failed", error.localizedDescription)

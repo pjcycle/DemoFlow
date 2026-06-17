@@ -56,7 +56,7 @@ Hotkeys:
 
 - Extract MP3 from local files (`.mp4` / `.mov` / `.mkv` / `.webm` / `.mp3`)
 - Online URL extraction (full version only)
-- Default output: `~/Library/Containers/<bundle-id>/Data/Library/Application Support/DemoFlow/Outputs/AudioExtract/`
+- Default output: **user-selected `.mp3` file** (NSSavePanel). DemoFlow no longer defaults to the app container; you must choose a save location before extracting.
 
 ## Requirements
 
@@ -72,7 +72,7 @@ DemoFlow requests:
 - **Microphone** — for recording and PiP audio
 - **User-selected files and folders** — for import, export, and manually selected output folders
 
-Generated recordings, PiP films, screen annotation captures, and default audio extracts are saved in the app container under `Application Support/DemoFlow/Outputs/`; DemoFlow does not write to `Movies` or `Pictures` by default.
+Generated recordings, PiP films, and screen-drawing auto-captures are saved in a user-selected folder (configured in **Settings → Output Locations**). The audio extract module also requires a user-selected `.mp3` save path before starting. DemoFlow no longer writes any user data to the app container's `Application Support/DemoFlow/Outputs/` directory. Intermediate files (recording segments, camera `.mov`, framing sidecars) are kept in the temporary directory and are not user-accessible artifacts.
 
 ## Download
 

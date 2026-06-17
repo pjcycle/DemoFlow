@@ -53,7 +53,9 @@ struct ScreenDrawAutoCaptureService {
             throw ScreenDrawAutoCaptureError.canvasUnavailable
         }
 
-        let directory = try DemoFlowOutputDirectoryPolicy.prepareScreenDrawAutoCaptureDirectory()
+        guard let directory = DemoFlowOutputDirectoryPolicy.screenDrawAutoCaptureBookmarkedDirectory() else {
+            throw ScreenDrawAutoCaptureError.canvasUnavailable
+        }
         let outputURL = directory.appendingPathComponent(fileName(), isDirectory: false)
         try writePNG(from: composed, to: outputURL)
         try cleanupExpiredFiles(in: directory)
