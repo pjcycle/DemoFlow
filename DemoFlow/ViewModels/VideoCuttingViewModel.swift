@@ -23,6 +23,9 @@ final class VideoCuttingViewModel: ObservableObject {
     @Published var isExporting = false
     @Published var exportURL: URL?
     @Published var selectedAspectPreset: VideoCuttingAspectPreset = .adaptive
+    @Published var exportSizeMode: VideoCuttingExportSizeMode = .source
+    @Published var customExportWidthText: String = ""
+    @Published var customExportHeightText: String = ""
     @Published var playbackPosition: Double = 0
     @Published var isPlaying = false
     @Published var hasPlaybackReady = false
@@ -74,7 +77,7 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     var canExport: Bool {
-        sourceURL != nil && !isBusy && sourceDuration > 0
+        sourceURL != nil && !isBusy && sourceDuration > 0 && isExportSizeInputValid
     }
 
     var canDeleteSelectedRangeAndReload: Bool {
@@ -186,6 +189,9 @@ final class VideoCuttingViewModel: ObservableObject {
         selectedDeleteRangeID = nil
         exportURL = nil
         selectedAspectPreset = .adaptive
+        exportSizeMode = .source
+        customExportWidthText = ""
+        customExportHeightText = ""
         playbackPosition = 0
         isPlaying = false
         hasPlaybackReady = false
@@ -480,11 +486,33 @@ final class VideoCuttingViewModel: ObservableObject {
             statusMessage = L10n.tr("legacy.key_62")
             return
         }
+        guard isExportSizeInputValid else {
+            statusMessage = L10n.tr("video.cut.export_size.validation.invalid")
+            return
+        }
+        let targetRenderSize = resolvedCustomExportTargetSize
+        if let targetRenderSize,
+           shouldConfirmUpscale(targetRenderSize: targetRenderSize),
+           !exportService.confirmUpscaleExport(
+                sourceSize: currentRealExportSize,
+                targetSize: targetRenderSize
+           ) {
+            statusMessage = L10n.tr("video.cut.export_size.upscale_cancelled")
+            return
+        }
 
         guard let outputURL = exportService.pickOutputURL(suggestedName: suggestedOutputName(for: sourceURL)) else {
             statusMessage = L10n.tr("legacy.key_85")
             return
         }
+
+        let normalizedDeleteRanges = normalizeDeleteRanges(deleteRanges)
+        let keepRanges = trimEngine.keepRanges(from: normalizedDeleteRanges, sourceDuration: makeDurationTime())
+        guard !keepRanges.isEmpty else {
+            statusMessage = L10n.tr("legacy.key_153")
+            return
+        }
+        let cropRectForExport = VideoCropRect(normalizedCropRect)
 
         isExporting = true
         if hasAudioTrack {
@@ -497,11 +525,12 @@ final class VideoCuttingViewModel: ObservableObject {
             do {
                 let exported = try await runFFmpegExport(
                     sourceURL: sourceURL,
-                    keepRanges: [CMTimeRange(start: .zero, duration: makeDurationTime())],
-                    cropRectNormalized: .full,
+                    keepRanges: keepRanges,
+                    cropRectNormalized: cropRectForExport,
                     outputURL: outputURL,
                     applyAudioProcessing: true,
-                    performanceProfile: .quality
+                    performanceProfile: .quality,
+                    targetRenderSize: targetRenderSize
                 )
                 exportURL = exported
                 let removedTempFiles = cleanupHistoricalTemporaryFilesAfterExport(
@@ -750,8 +779,54 @@ final class VideoCuttingViewModel: ObservableObject {
         formatTime(playbackPosition)
     }
 
+    var currentRealSizeText: String {
+        pixelSizeText(currentRealExportSize)
+    }
+
+    var isUsingCustomExportSize: Bool {
+        exportSizeMode == .custom
+    }
+
+    var exportSizeHelperText: String {
+        if let validationMessage = exportSizeValidationMessage {
+            return validationMessage
+        }
+        return L10n.f("video.cut.export_size.current_size", currentRealSizeText)
+    }
+
+    var exportSizeValidationMessage: String? {
+        guard exportSizeMode == .custom else { return nil }
+        guard let width = parsedCustomWidth, let height = parsedCustomHeight else {
+            return L10n.tr("video.cut.export_size.validation.invalid")
+        }
+        guard width >= 2, height >= 2 else {
+            return L10n.tr("video.cut.export_size.validation.minimum")
+        }
+        guard width % 2 == 0, height % 2 == 0 else {
+            return L10n.tr("video.cut.export_size.validation.even")
+        }
+        return nil
+    }
+
+    func setExportSizeMode(_ mode: VideoCuttingExportSizeMode) {
+        exportSizeMode = mode
+        if mode == .custom {
+            syncCustomExportSizeToCurrentRealSize()
+        }
+    }
+
     private var normalizedCropRect: CGRect {
         VideoCropGeometry.clampNormalizedRect(cropRectNormalized.cgRect)
+    }
+
+    private var resolvedCustomExportTargetSize: CGSize? {
+        guard exportSizeMode == .custom else { return nil }
+        guard let width = parsedCustomWidth, let height = parsedCustomHeight,
+              width >= 2, height >= 2,
+              width % 2 == 0, height % 2 == 0 else {
+            return nil
+        }
+        return CGSize(width: width, height: height)
     }
 
     private var normalizedLockedAspectRatio: CGFloat? {
@@ -816,6 +891,8 @@ final class VideoCuttingViewModel: ObservableObject {
                     self.player.replaceCurrentItem(with: item)
                     self.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
                     self.isPlaying = false
+                    self.exportSizeMode = .source
+                    self.syncCustomExportSizeToCurrentRealSize()
                     if hasAudioTrack {
                         self.statusMessage = L10n.f("fmt.video.imported", url.lastPathComponent)
                     } else {
@@ -1041,7 +1118,8 @@ final class VideoCuttingViewModel: ObservableObject {
         cropRectNormalized: VideoCropRect,
         outputURL: URL,
         applyAudioProcessing: Bool,
-        performanceProfile: VideoCuttingFFmpegProject.PerformanceProfile
+        performanceProfile: VideoCuttingFFmpegProject.PerformanceProfile,
+        targetRenderSize: CGSize? = nil
     ) async throws -> URL {
         await prepareFFmpegIfNeeded()
         if isFFmpegReady {
@@ -1049,6 +1127,7 @@ final class VideoCuttingViewModel: ObservableObject {
                 sourceURL: sourceURL,
                 keepRanges: keepRanges,
                 cropRectNormalized: cropRectNormalized,
+                targetRenderSize: targetRenderSize,
                 audioProcessingConfig: applyAudioProcessing ? audioProcessingConfig : VideoCuttingAudioProcessingConfig(
                     noiseReductionEnabled: false,
                     noiseReductionPercent: 0,
@@ -1077,7 +1156,8 @@ final class VideoCuttingViewModel: ObservableObject {
             keepRanges: keepRanges,
             cropRectNormalized: cropRectNormalized,
             outputURL: outputURL,
-            applyAudioProcessing: applyAudioProcessing
+            applyAudioProcessing: applyAudioProcessing,
+            targetRenderSize: targetRenderSize
         )
     }
 
@@ -1104,7 +1184,8 @@ final class VideoCuttingViewModel: ObservableObject {
         keepRanges: [CMTimeRange],
         cropRectNormalized: VideoCropRect,
         outputURL: URL,
-        applyAudioProcessing: Bool
+        applyAudioProcessing: Bool,
+        targetRenderSize: CGSize?
     ) async throws -> URL {
         let deleteRanges = deleteRangesFromKeepRanges(keepRanges, sourceDuration: sourceDuration)
         let composeProject = VideoCuttingComposeProject(
@@ -1112,6 +1193,7 @@ final class VideoCuttingViewModel: ObservableObject {
             deleteRanges: deleteRanges,
             cropRectNormalized: cropRectNormalized,
             targetAspectPreset: selectedAspectPreset,
+            targetRenderSize: targetRenderSize,
             audioProcessingConfig: applyAudioProcessing
                 ? audioProcessingConfig
                 : VideoCuttingAudioProcessingConfig(
@@ -1200,6 +1282,60 @@ final class VideoCuttingViewModel: ObservableObject {
             deletes.append(CutRange(start: makeTime(cursor), end: makeTime(total)))
         }
         return deletes
+    }
+
+    private var fallbackExportSize: CGSize {
+        let fallback = sourceVideoSize.width > 1 && sourceVideoSize.height > 1
+            ? sourceVideoSize
+            : CGSize(width: 1920, height: 1080)
+        return CGSize(
+            width: evenDimension(fallback.width),
+            height: evenDimension(fallback.height)
+        )
+    }
+
+    private var currentRealExportSize: CGSize {
+        guard sourceVideoSize.width > 1, sourceVideoSize.height > 1 else {
+            return fallbackExportSize
+        }
+        return CGSize(
+            width: evenDimension(sourceVideoSize.width),
+            height: evenDimension(sourceVideoSize.height)
+        )
+    }
+
+    private var isExportSizeInputValid: Bool {
+        exportSizeMode == .source || resolvedCustomExportTargetSize != nil
+    }
+
+    private var parsedCustomWidth: Int? {
+        Int(customExportWidthText.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private var parsedCustomHeight: Int? {
+        Int(customExportHeightText.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func syncCustomExportSizeToCurrentRealSize() {
+        let size = currentRealExportSize
+        customExportWidthText = String(max(2, Int(size.width.rounded())))
+        customExportHeightText = String(max(2, Int(size.height.rounded())))
+    }
+
+    private func pixelSizeText(_ size: CGSize) -> String {
+        let width = max(2, Int(size.width.rounded()))
+        let height = max(2, Int(size.height.rounded()))
+        return "\(width)x\(height)"
+    }
+
+    private func shouldConfirmUpscale(targetRenderSize: CGSize) -> Bool {
+        targetRenderSize.width > currentRealExportSize.width || targetRenderSize.height > currentRealExportSize.height
+    }
+
+    private func evenDimension(_ value: CGFloat) -> CGFloat {
+        let rounded = max(2, Int(value.rounded()))
+        let even = rounded % 2 == 0 ? rounded : rounded - 1
+        return CGFloat(max(2, even))
     }
 
     private func configurePlayerObservers() {

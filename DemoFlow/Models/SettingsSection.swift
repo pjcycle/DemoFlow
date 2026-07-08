@@ -51,6 +51,15 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         }
     }
 
+    var sidebarSubtitle: String {
+        switch self {
+        case .audioExtract:
+            return L10n.tr("section.audioExtract.sidebar_subtitle")
+        default:
+            return subtitle
+        }
+    }
+
     var symbolName: String {
         switch self {
         case .recording:

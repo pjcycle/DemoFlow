@@ -40,8 +40,16 @@ struct VideoCuttingComposeProject {
     let deleteRanges: [CutRange]
     let cropRectNormalized: VideoCropRect
     let targetAspectPreset: VideoCuttingAspectPreset
+    let targetRenderSize: CGSize?
     let audioProcessingConfig: VideoCuttingAudioProcessingConfig
     let outputURL: URL
+}
+
+enum VideoCuttingExportSizeMode: String, CaseIterable, Identifiable {
+    case source
+    case custom
+
+    var id: String { rawValue }
 }
 
 enum VideoCropHandle: CaseIterable, Hashable {

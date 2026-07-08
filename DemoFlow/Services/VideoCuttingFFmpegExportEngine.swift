@@ -56,6 +56,7 @@ private extension VideoCuttingFFmpegExportEngine {
         let expectedOutputDuration: Double
         let keepRanges: [CMTimeRange]
         let cropPixels: CGRect
+        let targetRenderSize: CGSize?
         let isFullCrop: Bool
         let isFullKeep: Bool
         let hasAudioTrack: Bool
@@ -99,6 +100,10 @@ private extension VideoCuttingFFmpegExportEngine {
         guard cropPixels.width > 1, cropPixels.height > 1 else {
             throw FFmpegComposeError.invalidCropRect
         }
+        let targetRenderSize = normalizedTargetRenderSize(
+            project.targetRenderSize,
+            fallbackTo: cropPixels.size
+        )
 
         let fullCrop = isFullCrop(cropPixels, orientedSize: orientedSize)
         let fullKeep = isFullKeep(keepRanges, duration: duration)
@@ -118,6 +123,7 @@ private extension VideoCuttingFFmpegExportEngine {
             expectedOutputDuration: expectedOutputDuration,
             keepRanges: keepRanges,
             cropPixels: cropPixels,
+            targetRenderSize: targetRenderSize,
             isFullCrop: fullCrop,
             isFullKeep: fullKeep,
             hasAudioTrack: hasAudioTrack,
@@ -131,8 +137,10 @@ private extension VideoCuttingFFmpegExportEngine {
         context: ExportContext,
         outputURL: URL
     ) throws -> FFmpegCommand? {
+        let videoFilters = buildVideoFilters(for: context)
         let shouldFastCopy = context.isFullKeep &&
             context.isFullCrop &&
+            context.targetRenderSize == nil &&
             context.audioFilterChain == nil
 
         if shouldFastCopy {
@@ -155,7 +163,7 @@ private extension VideoCuttingFFmpegExportEngine {
             )
         }
 
-        if context.isFullKeep && context.isFullCrop && !context.hasAudioTrack {
+        if context.isFullKeep && !videoFilters.isEmpty {
             let videoEncode = videoEncodeSettings(for: context.performanceProfile)
             var args: [String] = [
                 "-hide_banner",
@@ -164,14 +172,26 @@ private extension VideoCuttingFFmpegExportEngine {
                 "-progress", "pipe:1",
                 "-i", context.sourceURL.path,
                 "-map", "0:v:0",
+            ]
+            args.append(contentsOf: ["-vf", videoFilters.joined(separator: ",")])
+            args.append(contentsOf: [
                 "-c:v", "libx264",
                 "-preset", videoEncode.preset,
                 "-crf", videoEncode.crf,
-                "-pix_fmt", "yuv420p",
-                "-an"
-            ]
+                "-pix_fmt", "yuv420p"
+            ])
             if let threadLimit = videoEncode.threadLimit {
                 args.append(contentsOf: ["-threads", String(threadLimit)])
+            }
+            if context.hasAudioTrack {
+                args.append(contentsOf: ["-map", "0:a:0"])
+                if let audioFilter = context.audioFilterChain {
+                    args.append(contentsOf: ["-af", audioFilter, "-c:a", "aac", "-b:a", "192k"])
+                } else {
+                    args.append(contentsOf: ["-c:a", "copy"])
+                }
+            } else {
+                args.append("-an")
             }
             args.append(contentsOf: ["-movflags", "+faststart", outputURL.path])
             return FFmpegCommand(
@@ -181,7 +201,7 @@ private extension VideoCuttingFFmpegExportEngine {
             )
         }
 
-        if context.isFullKeep && context.isFullCrop, let audioFilter = context.audioFilterChain {
+        if context.isFullKeep && context.isFullCrop && context.targetRenderSize == nil, let audioFilter = context.audioFilterChain {
             let args: [String] = [
                 "-hide_banner",
                 "-loglevel", "error",
@@ -341,6 +361,7 @@ private extension VideoCuttingFFmpegExportEngine {
         job: SegmentJob
     ) -> FFmpegCommand {
         let encode = videoEncodeSettings(for: context.performanceProfile)
+        let videoFilters = buildVideoFilters(for: context)
         var args: [String] = [
             "-hide_banner",
             "-loglevel", "error",
@@ -352,12 +373,8 @@ private extension VideoCuttingFFmpegExportEngine {
             "-map", "0:v:0"
         ]
 
-        if !context.isFullCrop {
-            let crop = context.cropPixels
-            args.append(contentsOf: [
-                "-vf",
-                "crop=\(Int(crop.width)):\(Int(crop.height)):\(Int(crop.minX)):\(Int(crop.minY))"
-            ])
+        if !videoFilters.isEmpty {
+            args.append(contentsOf: ["-vf", videoFilters.joined(separator: ",")])
         }
 
         args.append(contentsOf: [
@@ -515,6 +532,29 @@ private extension VideoCuttingFFmpegExportEngine {
         return normalized.sorted { $0.start < $1.start }
     }
 
+    func buildVideoFilters(for context: ExportContext) -> [String] {
+        var videoFilters: [String] = []
+
+        if !context.isFullCrop {
+            let crop = context.cropPixels
+            videoFilters.append(
+                "crop=\(Int(crop.width)):\(Int(crop.height)):\(Int(crop.minX)):\(Int(crop.minY))"
+            )
+        }
+
+        if let targetRenderSize = context.targetRenderSize {
+            videoFilters.append(
+                "scale=\(Int(targetRenderSize.width)):\(Int(targetRenderSize.height)):flags=lanczos"
+            )
+        }
+
+        if !videoFilters.isEmpty {
+            videoFilters.append("setsar=1")
+        }
+
+        return videoFilters
+    }
+
     func isFullKeep(_ keepRanges: [CMTimeRange], duration: Double) -> Bool {
         guard keepRanges.count == 1 else { return false }
         let range = keepRanges[0]
@@ -550,6 +590,33 @@ private extension VideoCuttingFFmpegExportEngine {
         }
 
         return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    func normalizedTargetRenderSize(
+        _ requestedSize: CGSize?,
+        fallbackTo sourceSize: CGSize
+    ) -> CGSize? {
+        guard let requestedSize, requestedSize.width > 1, requestedSize.height > 1 else {
+            return nil
+        }
+        let normalized = normalizedPixelSize(requestedSize)
+        let normalizedSource = normalizedPixelSize(sourceSize)
+        if normalized == normalizedSource {
+            return nil
+        }
+        return normalized
+    }
+
+    func normalizedPixelSize(_ size: CGSize) -> CGSize {
+        CGSize(
+            width: CGFloat(normalizedPixelDimension(size.width)),
+            height: CGFloat(normalizedPixelDimension(size.height))
+        )
+    }
+
+    func normalizedPixelDimension(_ value: CGFloat) -> Int {
+        let rounded = max(2, Int(value.rounded()))
+        return rounded % 2 == 0 ? rounded : max(2, rounded - 1)
     }
 
     func buildAudioFilterChain(config: VideoCuttingAudioProcessingConfig) -> String? {

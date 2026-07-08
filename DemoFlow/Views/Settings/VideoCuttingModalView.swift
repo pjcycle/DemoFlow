@@ -32,6 +32,11 @@ struct VideoCuttingModalView: View {
     private let cropResizeHotspotDiameter: CGFloat = 50
     private let cropInteractionCoordinateSpace = "videoCuttingCropInteractionSpace"
     private let cropInteractionABMode: CropInteractionABMode = .normal
+    private let modalMinWidth: CGFloat = 1120
+    private let modalMinHeight: CGFloat = 720
+    private let sidePanelWidth: CGFloat = 352
+    private let aspectCardSize: CGFloat = 72
+    private let importDropZoneSize = CGSize(width: 600, height: 360)
 
     private let aspectGridRows: [[VideoCuttingAspectPreset]] = [
         [.adaptive, .nineBySixteen, .sixteenByNine, .oneByOne],
@@ -56,7 +61,7 @@ struct VideoCuttingModalView: View {
             Divider().overlay(Color.black.opacity(0.35))
             bottomBar
         }
-        .frame(minWidth: 1320, minHeight: 860)
+        .frame(minWidth: modalMinWidth, minHeight: modalMinHeight)
         .background(Color(red: 0.08, green: 0.09, blue: 0.11))
         .onDrop(of: dropTypeIdentifiers, isTargeted: nil) { providers in
             viewModel.handleDrop(providers: providers)
@@ -128,7 +133,7 @@ struct VideoCuttingModalView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(width: 680, height: 430)
+        .frame(width: importDropZoneSize.width, height: importDropZoneSize.height)
         .background(Color.white.opacity(0.04))
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -770,7 +775,7 @@ struct VideoCuttingModalView: View {
 
             VStack(spacing: 10) {
                 ForEach(Array(aspectGridRows.enumerated()), id: \.offset) { _, row in
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         ForEach(row) { preset in
                             aspectCard(for: preset)
                         }
@@ -794,6 +799,10 @@ struct VideoCuttingModalView: View {
                 }
             }
 
+            if viewModel.hasSource {
+                exportSizeControls
+            }
+
             Divider().overlay(Color.white.opacity(0.08))
                 .padding(.vertical, 4)
 
@@ -803,7 +812,7 @@ struct VideoCuttingModalView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 20)
-        .frame(width: 380)
+        .frame(width: sidePanelWidth)
         .background(Color(red: 0.11, green: 0.12, blue: 0.14))
     }
 
@@ -815,18 +824,88 @@ struct VideoCuttingModalView: View {
             VStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .stroke(Color.white.opacity(0.5), lineWidth: 1.2)
-                    .frame(width: 32, height: 20)
+                    .frame(width: 28, height: 18)
                 Text(preset.title)
-                    .font(.body.weight(.medium))
+                    .font(.callout.weight(.medium))
                     .foregroundStyle(Color.white.opacity(0.8))
             }
-            .frame(width: 80, height: 80)
+            .frame(width: aspectCardSize, height: aspectCardSize)
             .background(Color.white.opacity(0.06))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(selected ? Color.cyan.opacity(0.95) : Color.clear, lineWidth: 2)
             )
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var exportSizeControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text(L10n.tr("video.cut.export_size.title"))
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                exportSizeModeButton(.source, titleKey: "video.cut.export_size.mode.default")
+                exportSizeModeButton(.custom, titleKey: "video.cut.export_size.mode.custom")
+
+                Spacer(minLength: 0)
+
+                Text(viewModel.currentRealSizeText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(Color.white.opacity(0.58))
+            }
+
+            if viewModel.isUsingCustomExportSize {
+                HStack(spacing: 8) {
+                    TextField(
+                        L10n.tr("video.cut.export_size.width"),
+                        text: $viewModel.customExportWidthText
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 92)
+
+                    Text("×")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(Color.white.opacity(0.68))
+
+                    TextField(
+                        L10n.tr("video.cut.export_size.height"),
+                        text: $viewModel.customExportHeightText
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 92)
+
+                    Spacer(minLength: 0)
+                }
+            }
+
+            Text(viewModel.exportSizeHelperText)
+                .font(.caption)
+                .foregroundStyle(
+                    viewModel.exportSizeValidationMessage == nil
+                        ? Color.white.opacity(0.58)
+                        : Color.orange.opacity(0.9)
+                )
+        }
+    }
+
+    private func exportSizeModeButton(
+        _ mode: VideoCuttingExportSizeMode,
+        titleKey: String
+    ) -> some View {
+        let isSelected = viewModel.exportSizeMode == mode
+        return Button {
+            viewModel.setExportSizeMode(mode)
+        } label: {
+            HStack(alignment: .center, spacing: 6) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(isSelected ? Color.cyan.opacity(0.96) : Color.white.opacity(0.5))
+                Text(L10n.tr(titleKey))
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.white.opacity(0.88))
+            }
         }
         .buttonStyle(.plain)
     }

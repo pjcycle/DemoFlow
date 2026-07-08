@@ -15,7 +15,7 @@ struct DemoFlowApp: App {
     @NSApplicationDelegateAdaptor(DemoFlowAppDelegate.self) private var appDelegate
     @StateObject private var appCoordinator = AppCoordinator()
     @StateObject private var videoCuttingViewModel = VideoCuttingViewModel()
-    @StateObject private var audioExtractViewModel = AudioExtractViewModel()
+    @StateObject private var audioToolViewModel = AudioToolViewModel()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -23,7 +23,7 @@ struct DemoFlowApp: App {
             ContentView(
                 appCoordinator: appCoordinator,
                 videoCuttingViewModel: videoCuttingViewModel,
-                audioExtractViewModel: audioExtractViewModel,
+                audioToolViewModel: audioToolViewModel,
                 videoCuttingWindowID: Self.videoCuttingWindowID
             )
             .environment(\.locale, appCoordinator.appLocale)
@@ -46,7 +46,7 @@ struct DemoFlowApp: App {
             .environment(\.locale, appCoordinator.appLocale)
             .id(appCoordinator.resolvedLanguage.rawValue)
         }
-        .defaultSize(width: 1320, height: 860)
+        .defaultSize(width: 1180, height: 760)
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
     }
