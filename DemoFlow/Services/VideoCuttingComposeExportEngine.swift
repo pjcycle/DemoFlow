@@ -39,7 +39,10 @@ final class VideoCuttingComposeExportEngine {
         let request = ComposeRequest(
             keepRanges: keepRanges,
             cropPixels: cropPixels,
-            renderSize: cropPixels.size,
+            renderSize: normalizedRenderSize(
+                requestedSize: project.targetRenderSize,
+                fallbackTo: cropPixels.size
+            ),
             audioProcessingConfig: project.audioProcessingConfig,
             outputURL: project.outputURL
         )
@@ -78,7 +81,8 @@ final class VideoCuttingComposeExportEngine {
             let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoCompTrack)
             let transform = cropTransform(
                 sourcePreferredTransform: sourcePreferredTransform,
-                cropPixels: request.cropPixels
+                cropPixels: request.cropPixels,
+                renderSize: request.renderSize
             )
             layerInstruction.setTransform(transform, at: timeline)
 
@@ -159,11 +163,15 @@ final class VideoCuttingComposeExportEngine {
 
     private func cropTransform(
         sourcePreferredTransform: CGAffineTransform,
-        cropPixels: CGRect
+        cropPixels: CGRect,
+        renderSize: CGSize
     ) -> CGAffineTransform {
         // Keep orientation by applying source preferred transform first, then shift cropped top-left to render origin.
         let base = sourcePreferredTransform
-        return base.concatenating(CGAffineTransform(translationX: -cropPixels.minX, y: -cropPixels.minY))
+        let translated = base.concatenating(CGAffineTransform(translationX: -cropPixels.minX, y: -cropPixels.minY))
+        let scaleX = renderSize.width / max(cropPixels.width, 1)
+        let scaleY = renderSize.height / max(cropPixels.height, 1)
+        return translated.concatenating(CGAffineTransform(scaleX: scaleX, y: scaleY))
     }
 
     private func orientedSize(of track: AVAssetTrack) async throws -> CGSize {
@@ -174,6 +182,26 @@ final class VideoCuttingComposeExportEngine {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
+    }
+
+    private func normalizedRenderSize(
+        requestedSize: CGSize?,
+        fallbackTo sourceSize: CGSize
+    ) -> CGSize {
+        guard let requestedSize, requestedSize.width > 1, requestedSize.height > 1 else {
+            return sourceSize
+        }
+        let width = normalizedPixelDimension(requestedSize.width)
+        let height = normalizedPixelDimension(requestedSize.height)
+        let evenWidth = width
+        let evenHeight = height
+        guard evenWidth > 1, evenHeight > 1 else { return sourceSize }
+        return CGSize(width: evenWidth, height: evenHeight)
+    }
+
+    private func normalizedPixelDimension(_ value: CGFloat) -> Int {
+        let rounded = max(2, Int(value.rounded()))
+        return rounded % 2 == 0 ? rounded : max(2, rounded - 1)
     }
 }
 

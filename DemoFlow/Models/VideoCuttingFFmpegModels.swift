@@ -18,6 +18,7 @@ struct VideoCuttingFFmpegProject {
     let sourceURL: URL
     let keepRanges: [CMTimeRange]
     let cropRectNormalized: VideoCropRect
+    let targetRenderSize: CGSize?
     let audioProcessingConfig: VideoCuttingAudioProcessingConfig
     let outputURL: URL
     let hasAudioTrack: Bool

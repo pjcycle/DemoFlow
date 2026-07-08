@@ -11,7 +11,7 @@ struct ContentView: View {
     private static let sidebarLaunchWidth: CGFloat = 200
     @ObservedObject private var appCoordinator: AppCoordinator
     @ObservedObject private var videoCuttingViewModel: VideoCuttingViewModel
-    @ObservedObject private var audioExtractViewModel: AudioExtractViewModel
+    @ObservedObject private var audioToolViewModel: AudioToolViewModel
     @Environment(\.openWindow) private var openWindow
     private let videoCuttingWindowID: String
 
@@ -26,12 +26,12 @@ struct ContentView: View {
     init(
         appCoordinator: AppCoordinator,
         videoCuttingViewModel: VideoCuttingViewModel,
-        audioExtractViewModel: AudioExtractViewModel,
+        audioToolViewModel: AudioToolViewModel,
         videoCuttingWindowID: String
     ) {
         self._appCoordinator = ObservedObject(wrappedValue: appCoordinator)
         self._videoCuttingViewModel = ObservedObject(wrappedValue: videoCuttingViewModel)
-        self._audioExtractViewModel = ObservedObject(wrappedValue: audioExtractViewModel)
+        self._audioToolViewModel = ObservedObject(wrappedValue: audioToolViewModel)
         self.videoCuttingWindowID = videoCuttingWindowID
     }
 
@@ -135,15 +135,12 @@ struct ContentView: View {
         case .videoCutting:
             videoCuttingEntryView
         case .audioExtract:
-            AudioExtractSettingsView(viewModel: audioExtractViewModel)
+            AudioExtractSettingsView(viewModel: audioToolViewModel)
         case .appSettings:
-            VStack(alignment: .leading, spacing: 18) {
-                OutputLocationSettingsView(
-                    appCoordinator: appCoordinator,
-                    audioExtractViewModel: audioExtractViewModel
-                )
-                LanguageSettingsView(appCoordinator: appCoordinator)
-            }
+            OutputLocationSettingsView(
+                appCoordinator: appCoordinator,
+                audioExtractViewModel: audioToolViewModel.extractViewModel
+            )
         }
     }
 

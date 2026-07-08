@@ -6,7 +6,7 @@
 //
 //  2026-06-17 整改：录屏 / PiP 录像 / 屏幕画图自动截图默认输出位置改为由用户主动选择
 //  （NSOpenPanel 选目录 + security-scoped bookmark 持久化）；未配置时返回 nil，UI 强制引导去设置。
-//  音频提取 / 视频剪切 落点策略不在本文件统一管控。
+//  2026-07-08 调整：音频工具新增一个总输出目录设置，供音频提取 / 转换 / 裁切共用默认落点。
 //
 
 import AppKit
@@ -58,8 +58,11 @@ struct DemoFlowOutputDirectoryPolicy {
     /// 录屏 / PiP 录像 / 屏幕画图自动截图 共用的"用户选定目录"的安全作用域 bookmark。
     private static let recordingsBookmarkDefaultsKey = "demoflow.output.recordings.bookmark"
 
-    /// 音频提取用户选定的"输出 .mp3 文件"的安全作用域 bookmark。
-    private static let audioExtractOutputBookmarkDefaultsKey = "demoflow.output.audio_extract.mp3.bookmark"
+    /// 音频工具用户选定的总输出目录的安全作用域 bookmark。
+    private static let audioOutputDirectoryBookmarkDefaultsKey = "demoflow.output.audio.directory.bookmark"
+
+    /// 兼容旧版本：音频提取用户选定的"输出 .mp3 文件" bookmark。
+    private static let legacyAudioExtractOutputBookmarkDefaultsKey = "demoflow.output.audio_extract.mp3.bookmark"
 
     // MARK: - 旧目录 API（保留以兼容旧调用点，**不**在新代码里使用）
 
@@ -215,38 +218,57 @@ struct DemoFlowOutputDirectoryPolicy {
         UserDefaults.standard.removeObject(forKey: recordingsBookmarkDefaultsKey)
     }
 
-    // MARK: - 音频提取：用户选定的输出 .mp3 文件（合规整改后主路径）
+    // MARK: - 音频工具：用户选定的总输出目录
 
-    /// 解析用户选定的音频输出 .mp3 文件 URL。
+    /// 解析用户选定的音频总输出目录 URL。
+    static func audioOutputDirectoryBookmarkedURL() -> URL? {
+        resolveAudioOutputDirectoryURL()
+    }
+
+    /// 兼容旧调用点：返回音频总输出目录。
     static func audioExtractOutputBookmarkedURL() -> URL? {
-        resolveAudioExtractOutputURL()
+        resolveAudioOutputDirectoryURL()
     }
 
     /// 申请一个访问 token（写文件期间持有）。
     static func makeAudioExtractOutputAccessToken() -> OutputLocationAccessToken? {
-        guard let url = resolveAudioExtractOutputURL() else { return nil }
+        guard let url = resolveAudioOutputDirectoryURL() else { return nil }
         let token = OutputLocationAccessToken(url: url)
         guard token.startIfNeeded() else { return nil }
         return token
     }
 
-    /// 显示 NSSavePanel 选输出 .mp3 文件，保存为 security-scoped bookmark。
+    /// 显示 NSOpenPanel 选音频总输出目录，保存为 security-scoped bookmark。
     @MainActor
-    static func requestAudioExtractOutputPicker(suggestedFileName: String) -> URL? {
-        let panel = NSSavePanel()
+    static func requestAudioOutputDirectoryPicker() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
-        panel.allowedContentTypes = [.audio, .mp3]
-        panel.nameFieldStringValue = suggestedFileName
         panel.prompt = L10n.tr("output.location.audio.choose")
         let response = panel.runModal()
         guard response == .OK, let url = panel.url else { return nil }
-        saveAudioExtractOutputBookmark(for: url)
+        saveAudioOutputDirectoryBookmark(for: url)
         return url
     }
 
-    /// 清空用户选定的音频输出位置。
+    /// 兼容旧调用点：现在改为选音频总目录。
+    @MainActor
+    static func requestAudioExtractOutputPicker(suggestedFileName: String) -> URL? {
+        _ = suggestedFileName
+        return requestAudioOutputDirectoryPicker()
+    }
+
+    /// 清空用户选定的音频总输出目录。
+    static func clearAudioOutputDirectorySelection() {
+        UserDefaults.standard.removeObject(forKey: audioOutputDirectoryBookmarkDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: legacyAudioExtractOutputBookmarkDefaultsKey)
+    }
+
+    /// 兼容旧调用点。
     static func clearAudioExtractOutputSelection() {
-        UserDefaults.standard.removeObject(forKey: audioExtractOutputBookmarkDefaultsKey)
+        clearAudioOutputDirectorySelection()
     }
 
     // MARK: - 内部 helpers
@@ -350,10 +372,38 @@ struct DemoFlowOutputDirectoryPolicy {
         }
     }
 
-    private static func resolveAudioExtractOutputURL() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: audioExtractOutputBookmarkDefaultsKey) else {
+    private static func resolveAudioOutputDirectoryURL() -> URL? {
+        if let data = UserDefaults.standard.data(forKey: audioOutputDirectoryBookmarkDefaultsKey),
+           let resolved = resolveBookmarkedURL(data: data, defaultsKey: audioOutputDirectoryBookmarkDefaultsKey) {
+            return ensureDirectoryURL(resolved)
+        }
+
+        guard let data = UserDefaults.standard.data(forKey: legacyAudioExtractOutputBookmarkDefaultsKey),
+              let resolved = resolveBookmarkedURL(data: data, defaultsKey: legacyAudioExtractOutputBookmarkDefaultsKey) else {
             return nil
         }
+
+        let migratedDirectory = ensureDirectoryURL(resolved)
+        saveAudioOutputDirectoryBookmark(for: migratedDirectory)
+        UserDefaults.standard.removeObject(forKey: legacyAudioExtractOutputBookmarkDefaultsKey)
+        return migratedDirectory
+    }
+
+    private static func saveAudioOutputDirectoryBookmark(for url: URL) {
+        do {
+            let directoryURL = ensureDirectoryURL(url)
+            let data = try directoryURL.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            UserDefaults.standard.set(data, forKey: audioOutputDirectoryBookmarkDefaultsKey)
+        } catch {
+            UserDefaults.standard.removeObject(forKey: audioOutputDirectoryBookmarkDefaultsKey)
+        }
+    }
+
+    private static func resolveBookmarkedURL(data: Data, defaultsKey: String) -> URL? {
         var stale = false
         do {
             let url = try URL(
@@ -363,26 +413,20 @@ struct DemoFlowOutputDirectoryPolicy {
                 bookmarkDataIsStale: &stale
             )
             if stale {
-                UserDefaults.standard.removeObject(forKey: audioExtractOutputBookmarkDefaultsKey)
+                UserDefaults.standard.removeObject(forKey: defaultsKey)
                 return nil
             }
             return url
         } catch {
-            UserDefaults.standard.removeObject(forKey: audioExtractOutputBookmarkDefaultsKey)
+            UserDefaults.standard.removeObject(forKey: defaultsKey)
             return nil
         }
     }
 
-    private static func saveAudioExtractOutputBookmark(for url: URL) {
-        do {
-            let data = try url.bookmarkData(
-                options: [.withSecurityScope],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            UserDefaults.standard.set(data, forKey: audioExtractOutputBookmarkDefaultsKey)
-        } catch {
-            UserDefaults.standard.removeObject(forKey: audioExtractOutputBookmarkDefaultsKey)
+    private static func ensureDirectoryURL(_ url: URL) -> URL {
+        if url.hasDirectoryPath {
+            return url.standardizedFileURL
         }
+        return url.deletingLastPathComponent().standardizedFileURL
     }
 }

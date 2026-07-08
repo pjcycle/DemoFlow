@@ -27,4 +27,26 @@ struct VideoCuttingExportService {
     func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+
+    func confirmUpscaleExport(sourceSize: CGSize, targetSize: CGSize) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.f(
+            "video.cut.export_size.upscale_confirm",
+            pixelSizeText(sourceSize)
+        )
+        alert.informativeText = L10n.f(
+            "video.cut.export_size.upscale_target",
+            pixelSizeText(targetSize)
+        )
+        alert.addButton(withTitle: L10n.tr("video.cut.export_size.confirm_continue"))
+        alert.addButton(withTitle: L10n.tr("video.cut.export_size.confirm_cancel"))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func pixelSizeText(_ size: CGSize) -> String {
+        let width = max(2, Int(size.width.rounded()))
+        let height = max(2, Int(size.height.rounded()))
+        return "\(width)x\(height)"
+    }
 }

@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
 
-DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawing, video cutting, and audio extraction.
+DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawing, video cutting, and an audio workbench exposed through the existing Audio Extract module.
 
 ## Modules
 
@@ -52,11 +52,15 @@ Hotkeys:
 - Drag-and-drop or file import for `.mp4` / `.mov`
 - Timeline trimming, multi-range deletion, crop, audio denoise/EQ, export
 
-### Audio Extract
+### Audio Extract (Module 5)
 
-- Extract MP3 from local files (`.mp4` / `.mov` / `.mkv` / `.webm` / `.mp3`)
-- Online URL extraction (full version only)
-- Default output: **user-selected `.mp3` file** (NSSavePanel). DemoFlow no longer defaults to the app container; you must choose a save location before extracting.
+- The sidebar entry remains **Audio Extract (MP3)**, but the page is now a 3-tab audio workbench:
+  - `Audio Extract` — local file / online URL to MP3
+  - `Audio Transcode` — local audio batch conversion
+  - `Music Trim` — single-file waveform trim and export
+- `Audio Transcode` and `Music Trim` are local-file only in the first release
+- Every extract/transcode/trim run requires an explicit user-selected target file before it starts
+- DemoFlow no longer defaults any audio output to the app container
 
 ## Requirements
 
@@ -72,7 +76,7 @@ DemoFlow requests:
 - **Microphone** — for recording and PiP audio
 - **User-selected files and folders** — for import, export, and manually selected output folders
 
-Generated recordings, PiP films, and screen-drawing auto-captures are saved in a user-selected folder (configured in **Settings → Output Locations**). The audio extract module also requires a user-selected `.mp3` save path before starting. DemoFlow no longer writes any user data to the app container's `Application Support/DemoFlow/Outputs/` directory. Intermediate files (recording segments, camera `.mov`, framing sidecars) are kept in the temporary directory and are not user-accessible artifacts.
+Generated recordings, PiP films, and screen-drawing auto-captures are saved in a user-selected folder (configured in **Settings → Output Locations**). Audio Extract, Audio Transcode, and Music Trim each require an explicit user-selected target file before output begins. DemoFlow no longer writes user-visible audio outputs to the app container's `Application Support/DemoFlow/Outputs/` directory. Intermediate files (recording segments, camera `.mov`, framing sidecars, temporary audio working copies) remain in temporary storage and are not user-visible artifacts.
 
 ## Download
 
