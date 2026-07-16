@@ -64,6 +64,6 @@ struct GlobalActionBarView: View {
         if appCoordinator.recorderState.isRecording {
             return appCoordinator.recorderState.isBusy
         }
-        return appCoordinator.recorderState.isBusy || !appCoordinator.canStartRecording
+        return appCoordinator.recorderState.isBusy || !appCoordinator.canPresentRecordingControl
     }
 }

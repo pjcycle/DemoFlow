@@ -50,7 +50,7 @@ Hotkeys:
 ![Video Cutting](img/we4.png)
 
 - Drag-and-drop or file import for `.mp4` / `.mov`
-- Timeline trimming, multi-range deletion, crop, audio denoise/EQ, export
+- Timeline trimming, single active delete range, crop, audio denoise/EQ, export
 
 ### Audio Extract (Module 5)
 
@@ -59,8 +59,8 @@ Hotkeys:
   - `Audio Transcode` — local audio batch conversion
   - `Music Trim` — single-file waveform trim and export
 - `Audio Transcode` and `Music Trim` are local-file only in the first release
-- Every extract/transcode/trim run requires an explicit user-selected target file before it starts
-- DemoFlow no longer defaults any audio output to the app container
+- Audio Extract now defaults to the unified workspace's `Music/` folder
+- Audio Transcode and Music Trim still confirm the target file in a save panel, but that panel opens in `Music/` first
 
 ## Requirements
 
@@ -76,7 +76,7 @@ DemoFlow requests:
 - **Microphone** — for recording and PiP audio
 - **User-selected files and folders** — for import, export, and manually selected output folders
 
-Generated recordings, PiP films, and screen-drawing auto-captures are saved in a user-selected folder (configured in **Settings → Output Locations**). Audio Extract, Audio Transcode, and Music Trim each require an explicit user-selected target file before output begins. DemoFlow no longer writes user-visible audio outputs to the app container's `Application Support/DemoFlow/Outputs/` directory. Intermediate files (recording segments, camera `.mov`, framing sidecars, temporary audio working copies) remain in temporary storage and are not user-visible artifacts.
+After you choose a parent folder in **Settings**, DemoFlow creates a `DemoFlow/` workspace there and lazily adds `Recoding / Pip / Draw / Vido / Music` subfolders as needed. Recording, PiP films, and screen-drawing auto captures write directly into their mapped folders. Video Cutting, Audio Transcode, and Music Trim open their save panels in the matching workspace folder first, while Audio Extract defaults to `Music/`. DemoFlow no longer writes user-visible outputs to the app container's `Application Support/DemoFlow/Outputs/` directory. Intermediate files (recording segments, camera `.mov`, framing sidecars, temporary audio working copies) remain in temporary storage and are not user-visible artifacts.
 
 ## Download
 

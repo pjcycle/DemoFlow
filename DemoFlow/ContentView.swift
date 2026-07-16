@@ -99,6 +99,7 @@ struct ContentView: View {
                 get: { appCoordinator.isSidebarCollapsed },
                 set: { appCoordinator.isSidebarCollapsed = $0 }
             ),
+            subscriptionViewModel: appCoordinator.subscriptionViewModel,
             onSectionSelected: { section in
                 if section == .videoCutting {
                     hasUserOpenedVideoCutting = true

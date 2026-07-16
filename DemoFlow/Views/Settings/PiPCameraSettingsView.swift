@@ -748,6 +748,10 @@ struct PiPCameraSettingsView: View {
         let config = pipQualityConfig(for: preset)
         let isSelected = appCoordinator.pipRecordingQualityConfig.preset == preset
         return Button {
+            guard appCoordinator.subscriptionViewModel.isProUnlocked || !preset.requiresSubscription else {
+                appCoordinator.requestSubscriptionUnlock(for: .pipQuality, statusChannel: .pip)
+                return
+            }
             customPiPBitrateRangeMessage = nil
             updatePiPRecordingQualityConfig { $0.preset = preset }
         } label: {
@@ -765,6 +769,10 @@ struct PiPCameraSettingsView: View {
                 }
 
                 Spacer(minLength: 10)
+
+                if preset.requiresSubscription {
+                    premiumBadge
+                }
 
                 secondarySupportingText(
                     L10n.f(
@@ -836,6 +844,18 @@ struct PiPCameraSettingsView: View {
         }
 
         updatePiPRecordingQualityConfig { $0.customVideoBitrateMbps = rawValue }
+    }
+
+    private var premiumBadge: some View {
+        Text(L10n.tr("subscription.membership.vip"))
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(Color.orange)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(Color.orange.opacity(0.12))
+            )
     }
 
     private func runInAppDiagnostics() {

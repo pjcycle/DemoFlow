@@ -18,6 +18,20 @@ struct VideoCuttingModalView: View {
         case moveOnly
     }
 
+    private enum DeleteTrackDragMode {
+        case create
+        case move
+        case trimStart
+        case trimEnd
+    }
+
+    private struct DeleteTrackDragContext {
+        let mode: DeleteTrackDragMode
+        let gestureStartSeconds: Double
+        let initialRangeStart: Double
+        let initialRangeEnd: Double
+    }
+
     @ObservedObject var viewModel: VideoCuttingViewModel
     @ObservedObject var appCoordinator: AppCoordinator
     @Environment(\.dismissWindow) private var dismissWindow
@@ -26,9 +40,7 @@ struct VideoCuttingModalView: View {
     @State private var cropDragStartRect: CGRect?
     @State private var hoveredCropHandle: VideoCropHandle?
     @State private var activeDragHandle: VideoCropHandle?
-    @State private var isDeleteTrackHovered = false
-    @State private var pendingDeleteStartText = ""
-    @State private var pendingDeleteEndText = ""
+    @State private var deleteTrackDragContext: DeleteTrackDragContext?
     private let cropResizeHotspotDiameter: CGFloat = 50
     private let cropInteractionCoordinateSpace = "videoCuttingCropInteractionSpace"
     private let cropInteractionABMode: CropInteractionABMode = .normal
@@ -36,6 +48,9 @@ struct VideoCuttingModalView: View {
     private let modalMinHeight: CGFloat = 720
     private let sidePanelWidth: CGFloat = 352
     private let aspectCardSize: CGFloat = 72
+    private let deleteTrackHeight: CGFloat = 96
+    private let deleteTrackHandleHitWidth: CGFloat = 14
+    private let deleteTrackMinimumSelectionWidth: CGFloat = 48
     private let importDropZoneSize = CGSize(width: 600, height: 360)
 
     private let aspectGridRows: [[VideoCuttingAspectPreset]] = [
@@ -76,6 +91,7 @@ struct VideoCuttingModalView: View {
         }
         .onAppear {
             updateWindowTitle()
+            viewModel.autoImportLatestRecentRecordingIfNeeded()
         }
     }
 
@@ -440,25 +456,9 @@ struct VideoCuttingModalView: View {
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(Color.cyan.opacity(0.92))
 
-                Text(L10n.tr("legacy.key_12"))
-                    .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.65))
-                TextField("0", text: $viewModel.keepStartText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 96)
-
-                Text(L10n.tr("legacy.key_13"))
-                    .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.65))
-                TextField("10", text: $viewModel.keepEndText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 96)
-
-                Button(L10n.tr("legacy.key_96")) {
-                    viewModel.applyQuickKeepRangeInput()
-                }
-                .buttonStyle(.bordered)
-
+                Text("/")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(Color.white.opacity(0.45))
                 Text(viewModel.totalDurationText)
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(Color.white.opacity(0.72))
@@ -485,276 +485,307 @@ struct VideoCuttingModalView: View {
     }
 
     private var deleteTrackToolbar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Text(L10n.tr("legacy.key_24"))
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Color.white.opacity(0.8))
+        HStack(spacing: 8) {
+            Text(L10n.tr("legacy.key_12"))
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.62))
 
-                Text("FPS \(String(format: "%.2f", viewModel.videoFPS))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(Color.white.opacity(0.52))
-
-                Spacer(minLength: 0)
-            }
-
-            HStack(spacing: 10) {
-                Text(L10n.tr("video.delete.hover_add_hint"))
-                    .font(.caption)
-                    .foregroundStyle(Color.white.opacity(0.72))
-
-                Button(viewModel.isExporting ? L10n.tr("legacy.key_46") : L10n.tr("legacy.key_211")) {
-                    viewModel.deleteSelectedRangeAndReload()
+            TextField("0", text: $viewModel.keepStartText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 88)
+                .onSubmit {
+                    viewModel.applyQuickKeepRangeInput()
                 }
-                .buttonStyle(.bordered)
-                .disabled(!viewModel.canDeleteSelectedRangeAndReload)
 
-                Button(viewModel.isExporting ? L10n.tr("legacy.key_46") : L10n.tr("video.delete.apply_all")) {
-                    viewModel.applyAllDeleteRangesAndReload()
+            Text(L10n.tr("legacy.key_13"))
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.62))
+
+            TextField("0", text: $viewModel.keepEndText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 88)
+                .onSubmit {
+                    viewModel.applyQuickKeepRangeInput()
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!viewModel.canApplyAllDeleteRangesAndReload)
 
-                Spacer(minLength: 0)
+            Button {
+                viewModel.applyQuickKeepRangeInput()
+            } label: {
+                Image(systemName: "checkmark")
+                    .font(.headline.weight(.semibold))
+                    .frame(width: 18, height: 18)
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .help(L10n.tr("video.delete.input.apply"))
+            .disabled(viewModel.isBusy)
+
+            Spacer(minLength: 0)
+
+            Text(L10n.tr("video.delete.track_hint"))
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.58))
+
+            Button(viewModel.isExporting ? L10n.tr("legacy.key_46") : L10n.tr("video.delete.action.delete_current")) {
+                viewModel.deleteActiveRangeAndReload()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!viewModel.canDeleteActiveRangeAndReload)
         }
     }
 
     private var deleteTrackArea: some View {
         GeometryReader { proxy in
-            VStack(spacing: 6) {
-                if shouldShowDeleteInputBubble {
-                    deleteInputBubble
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+            ZStack(alignment: .leading) {
+                deleteTrackBackground(width: proxy.size.width, height: deleteTrackHeight)
+
+                deleteTrackPlayhead(width: proxy.size.width, height: deleteTrackHeight)
+
+                if let range = viewModel.activeDeleteRange {
+                    deleteSelectionOverlay(
+                        range: range,
+                        trackWidth: proxy.size.width,
+                        trackHeight: deleteTrackHeight
+                    )
+                } else {
+                    Text(L10n.tr("video.delete.track_hint"))
+                        .font(.caption)
+                        .foregroundStyle(Color.white.opacity(0.42))
+                        .padding(.horizontal, 12)
                 }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+            .gesture(deleteTrackDragGesture(trackWidth: proxy.size.width))
+        }
+        .frame(height: deleteTrackHeight)
+    }
 
-                if !viewModel.deleteRanges.isEmpty {
-                    deleteRangeBubblesRow
-                }
+    private func deleteTrackBackground(width: CGFloat, height: CGFloat) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.08),
+                            Color.black.opacity(0.24)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
 
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.white.opacity(0.06))
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
-
-                    if viewModel.deleteRanges.isEmpty {
-                        Text(L10n.tr("legacy.key_158"))
-                            .font(.caption)
-                            .foregroundStyle(Color.white.opacity(0.45))
-                            .padding(.horizontal, 10)
-                    } else {
-                        ForEach(viewModel.deleteRanges) { range in
-                            deleteRangeChip(range: range, trackWidth: proxy.size.width)
-                        }
+            if viewModel.timelineThumbnails.isEmpty {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(0.03))
+            } else {
+                HStack(spacing: 2) {
+                    ForEach(viewModel.timelineThumbnails) { thumbnail in
+                        Image(decorative: thumbnail.image, scale: 1)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
                     }
                 }
-                .frame(height: 42)
-            }
-            .contentShape(Rectangle())
-            .onAppear {
-                syncPendingDeleteInput()
-            }
-            .onHover { isHovering in
-                withAnimation(.easeOut(duration: 0.15)) {
-                    isDeleteTrackHovered = isHovering
-                }
-                if isHovering {
-                    syncPendingDeleteInput()
-                }
-            }
-            .onTapGesture {
-                viewModel.selectDeleteRange(id: nil)
+                .padding(2)
             }
         }
-        .frame(height: deleteTrackAreaHeight)
+        .frame(width: width, height: height)
     }
 
-    private var deleteTrackAreaHeight: CGFloat {
-        let inputHeight: CGFloat = shouldShowDeleteInputBubble ? 40 : 0
-        let bubblesHeight: CGFloat = viewModel.deleteRanges.isEmpty ? 0 : 32
-        return 42 + inputHeight + bubblesHeight
+    private func deleteTrackPlayhead(width: CGFloat, height: CGFloat) -> some View {
+        let ratio = min(max(viewModel.playbackPosition / max(viewModel.sourceDuration, 0.001), 0), 1)
+        return Rectangle()
+            .fill(Color.cyan.opacity(0.95))
+            .frame(width: 2, height: height)
+            .shadow(color: Color.cyan.opacity(0.35), radius: 4)
+            .offset(x: max(0, min(width - 2, width * ratio)))
     }
 
-    private var shouldShowDeleteInputBubble: Bool {
-        isDeleteTrackHovered
-    }
-
-    private var deleteInputBubble: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "plus.bubble.fill")
-                .font(.caption)
-                .foregroundStyle(Color.cyan.opacity(0.92))
-            Text(L10n.tr("legacy.key_149"))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Color.white.opacity(0.9))
-
-            Text(L10n.tr("legacy.key_12"))
-                .font(.caption2)
-                .foregroundStyle(Color.white.opacity(0.7))
-            TextField("0", text: $pendingDeleteStartText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 78)
-
-            Text(L10n.tr("legacy.key_13"))
-                .font(.caption2)
-                .foregroundStyle(Color.white.opacity(0.7))
-            TextField("10", text: $pendingDeleteEndText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 78)
-
-            Button(L10n.tr("video.delete.confirm")) {
-                viewModel.addDeleteRange(startText: pendingDeleteStartText, endText: pendingDeleteEndText)
-                syncPendingDeleteInput()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.black.opacity(0.72))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.cyan.opacity(0.32), lineWidth: 1)
-        )
-    }
-
-    private var deleteRangeBubblesRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(viewModel.deleteRanges) { range in
-                    deleteRangeBubble(range: range)
-                }
-            }
-            .padding(.vertical, 2)
-        }
-    }
-
-    private func deleteRangeBubble(range: CutRange) -> some View {
-        let start = viewModel.deleteRangeStartSeconds(for: range.id)
-        let end = viewModel.deleteRangeEndSeconds(for: range.id)
-        let isSelected = viewModel.selectedDeleteRangeID == range.id
-        let label = L10n.f(
-            "fmt.video.delete_bubble_range",
-            String(format: "%.2f", start),
-            String(format: "%.2f", end)
-        )
-
-        return HStack(spacing: 6) {
-            Text("🫧")
-                .font(.caption)
-            Text(label)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(Color.white.opacity(0.92))
-                .lineLimit(1)
-            Button {
-                viewModel.removeDeleteRange(id: range.id)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(Color.white.opacity(0.75))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            Capsule(style: .continuous)
-                .fill(isSelected ? Color.cyan.opacity(0.28) : Color.white.opacity(0.13))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(isSelected ? Color.cyan.opacity(0.92) : Color.white.opacity(0.2), lineWidth: 1)
-        )
-        .contentShape(Capsule(style: .continuous))
-        .onTapGesture {
-            viewModel.selectDeleteRange(id: range.id)
-        }
-    }
-
-    private func syncPendingDeleteInput() {
-        if let selected = viewModel.selectedDeleteRange {
-            pendingDeleteStartText = String(format: "%.3f", selected.start.seconds)
-            pendingDeleteEndText = String(format: "%.3f", selected.end.seconds)
-            return
-        }
-        let suggested = viewModel.suggestedDeleteRangeInput(defaultLength: 5.0)
-        pendingDeleteStartText = suggested.start
-        pendingDeleteEndText = suggested.end
-    }
-
-    private func deleteRangeChip(range: CutRange, trackWidth: CGFloat) -> some View {
-        let duration = max(viewModel.sourceDuration, 0.001)
-        let start = viewModel.deleteRangeStartSeconds(for: range.id)
-        let end = viewModel.deleteRangeEndSeconds(for: range.id)
-        let startText = String(format: "%.2f", start)
-        let endText = String(format: "%.2f", end)
-        let deleteTip = L10n.f("fmt.video.delete_tip_range", startText, endText)
-        let startRatio = CGFloat(start / duration)
-        let endRatio = CGFloat(end / duration)
-        let x = trackWidth * startRatio
-        let width = max(18, trackWidth * max(0, endRatio - startRatio))
-        let isSelected = viewModel.selectedDeleteRangeID == range.id
+    private func deleteSelectionOverlay(
+        range: CutRange,
+        trackWidth: CGFloat,
+        trackHeight: CGFloat
+    ) -> some View {
+        let metrics = deleteSelectionMetrics(for: range, trackWidth: trackWidth)
+        let startText = formatSeconds(range.start.seconds)
+        let endText = formatSeconds(range.end.seconds)
+        let durationText = formatSeconds(range.durationSeconds)
 
         return HStack(spacing: 0) {
-            handleView(systemName: "chevron.left.2", trackWidth: trackWidth) { delta in
-                let nextStart = start + delta * duration
-                viewModel.updateDeleteRange(id: range.id, start: nextStart)
-            }
+            deleteTrackHandle(systemName: "line.3.horizontal.decrease")
 
-            Rectangle()
-                .fill(Color.red.opacity(isSelected ? 0.75 : 0.55))
+            RoundedRectangle(cornerRadius: 0, style: .continuous)
+                .fill(Color.red.opacity(0.32))
                 .overlay(
-                    Text("\(startText)s - \(endText)s")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(Color.white.opacity(0.92))
-                        .lineLimit(1)
-                        .padding(.horizontal, 6),
-                    alignment: .center
+                    RoundedRectangle(cornerRadius: 0, style: .continuous)
+                        .stroke(Color.red.opacity(0.4), lineWidth: 1)
                 )
-                .onTapGesture {
-                    viewModel.selectDeleteRange(id: range.id)
+                .overlay(alignment: .center) {
+                    if metrics.width > 120 {
+                        Text("\(startText) - \(endText)  ·  \(durationText)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(Color.white.opacity(0.95))
+                            .lineLimit(1)
+                            .padding(.horizontal, 8)
+                    }
                 }
 
-            handleView(systemName: "chevron.right.2", trackWidth: trackWidth) { delta in
-                let nextEnd = end + delta * duration
-                viewModel.updateDeleteRange(id: range.id, end: nextEnd)
-            }
+            deleteTrackHandle(systemName: "line.3.horizontal")
         }
-        .frame(width: width, height: 30)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .frame(width: metrics.width, height: trackHeight)
+        .background(Color.red.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(isSelected ? Color.cyan.opacity(0.9) : Color.white.opacity(0.18), lineWidth: isSelected ? 2 : 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.red.opacity(0.95), lineWidth: 2)
         )
-        .help(deleteTip)
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contextMenu {
-            Button(L10n.tr("legacy.key_35")) {
-                viewModel.selectDeleteRange(id: range.id)
-                viewModel.removeDeleteRange(id: range.id)
+            Button(L10n.tr("video.delete.action.delete_current")) {
+                viewModel.deleteActiveRangeAndReload()
             }
         }
-        .position(x: x + width / 2, y: 21)
+        .offset(x: metrics.originX)
     }
 
-    private func handleView(systemName: String, trackWidth: CGFloat, onDragDeltaRatio: @escaping (Double) -> Void) -> some View {
-        Image(systemName: systemName)
-            .font(.caption.weight(.bold))
-            .foregroundStyle(Color.white.opacity(0.9))
-            .frame(width: 14, height: 30)
-            .background(Color.black.opacity(0.22))
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let deltaRatio = value.translation.width / max(trackWidth, 1)
-                        onDragDeltaRatio(Double(deltaRatio))
-                    }
+    private func deleteTrackHandle(systemName: String) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.28))
+            Image(systemName: systemName)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(Color.white.opacity(0.88))
+                .rotationEffect(.degrees(90))
+        }
+        .frame(width: 14)
+    }
+
+    private func deleteSelectionMetrics(for range: CutRange, trackWidth: CGFloat) -> (originX: CGFloat, width: CGFloat) {
+        let duration = max(viewModel.sourceDuration, 0.001)
+        let startRatio = min(max(range.start.seconds / duration, 0), 1)
+        let endRatio = min(max(range.end.seconds / duration, 0), 1)
+        let startX = trackWidth * startRatio
+        let endX = trackWidth * endRatio
+        let actualWidth = max(endX - startX, 1)
+        let visualWidth = max(actualWidth, deleteTrackMinimumSelectionWidth)
+        let centeredOrigin = ((startX + endX) / 2) - (visualWidth / 2)
+        let originX = max(0, min(trackWidth - visualWidth, centeredOrigin))
+        return (originX, visualWidth)
+    }
+
+    private func deleteTrackDragGesture(trackWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let context = deleteTrackDragContext
+                    ?? resolveDeleteTrackDragContext(
+                        at: value.startLocation.x,
+                        trackWidth: trackWidth
+                    )
+                deleteTrackDragContext = context
+                updateDeleteTrackSelection(
+                    with: context,
+                    currentLocationX: value.location.x,
+                    trackWidth: trackWidth
+                )
+            }
+            .onEnded { value in
+                defer { deleteTrackDragContext = nil }
+                guard let context = deleteTrackDragContext else { return }
+                let currentSeconds = deleteTrackSeconds(at: value.location.x, trackWidth: trackWidth)
+                let minimumDuration = max(viewModel.frameDurationSeconds, 0.05)
+
+                if context.mode == .create,
+                   abs(currentSeconds - context.gestureStartSeconds) < minimumDuration {
+                    viewModel.clearActiveDeleteRange()
+                }
+            }
+    }
+
+    private func resolveDeleteTrackDragContext(
+        at locationX: CGFloat,
+        trackWidth: CGFloat
+    ) -> DeleteTrackDragContext {
+        let gestureStartSeconds = deleteTrackSeconds(at: locationX, trackWidth: trackWidth)
+
+        guard let activeRange = viewModel.activeDeleteRange else {
+            return DeleteTrackDragContext(
+                mode: .create,
+                gestureStartSeconds: gestureStartSeconds,
+                initialRangeStart: gestureStartSeconds,
+                initialRangeEnd: gestureStartSeconds
             )
+        }
+
+        let metrics = deleteSelectionMetrics(for: activeRange, trackWidth: trackWidth)
+        let rangeEndX = metrics.originX + metrics.width
+
+        let mode: DeleteTrackDragMode
+        if abs(locationX - metrics.originX) <= deleteTrackHandleHitWidth {
+            mode = .trimStart
+        } else if abs(locationX - rangeEndX) <= deleteTrackHandleHitWidth {
+            mode = .trimEnd
+        } else if locationX >= metrics.originX && locationX <= rangeEndX {
+            mode = .move
+        } else {
+            mode = .create
+        }
+
+        return DeleteTrackDragContext(
+            mode: mode,
+            gestureStartSeconds: gestureStartSeconds,
+            initialRangeStart: activeRange.start.seconds,
+            initialRangeEnd: activeRange.end.seconds
+        )
+    }
+
+    private func updateDeleteTrackSelection(
+        with context: DeleteTrackDragContext,
+        currentLocationX: CGFloat,
+        trackWidth: CGFloat
+    ) {
+        let currentSeconds = deleteTrackSeconds(at: currentLocationX, trackWidth: trackWidth)
+        let minimumDuration = max(viewModel.frameDurationSeconds, 0.05)
+
+        switch context.mode {
+        case .create:
+            viewModel.setActiveDeleteRange(start: context.gestureStartSeconds, end: currentSeconds)
+        case .move:
+            let duration = max(context.initialRangeEnd - context.initialRangeStart, minimumDuration)
+            let delta = currentSeconds - context.gestureStartSeconds
+            let nextStart = max(0, min(context.initialRangeStart + delta, viewModel.sourceDuration - duration))
+            viewModel.setActiveDeleteRange(start: nextStart, end: nextStart + duration)
+        case .trimStart:
+            let maxStart = context.initialRangeEnd - minimumDuration
+            let nextStart = min(max(currentSeconds, 0), maxStart)
+            viewModel.updateActiveDeleteRange(start: nextStart, end: context.initialRangeEnd)
+        case .trimEnd:
+            let minEnd = context.initialRangeStart + minimumDuration
+            let nextEnd = max(min(currentSeconds, viewModel.sourceDuration), minEnd)
+            viewModel.updateActiveDeleteRange(start: context.initialRangeStart, end: nextEnd)
+        }
+    }
+
+    private func deleteTrackSeconds(at locationX: CGFloat, trackWidth: CGFloat) -> Double {
+        guard viewModel.sourceDuration > 0 else { return 0 }
+        let ratio = min(max(locationX / max(trackWidth, 1), 0), 1)
+        return Double(ratio) * viewModel.sourceDuration
+    }
+
+    private func formatSeconds(_ seconds: Double) -> String {
+        let safe = max(0, Int(seconds.rounded(.down)))
+        let hours = safe / 3600
+        let minutes = (safe % 3600) / 60
+        let secs = safe % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%02d:%02d", minutes, secs)
     }
 
     private var sidePanel: some View {
@@ -797,10 +828,6 @@ struct VideoCuttingModalView: View {
                         .font(.caption)
                         .foregroundStyle(Color.white.opacity(0.5))
                 }
-            }
-
-            if viewModel.hasSource {
-                exportSizeControls
             }
 
             Divider().overlay(Color.white.opacity(0.08))
@@ -846,15 +873,24 @@ struct VideoCuttingModalView: View {
                 Text(L10n.tr("video.cut.export_size.title"))
                     .font(.body.weight(.semibold))
                     .foregroundStyle(Color.white.opacity(0.9))
+                    .lineLimit(1)
 
                 exportSizeModeButton(.source, titleKey: "video.cut.export_size.mode.default")
                 exportSizeModeButton(.custom, titleKey: "video.cut.export_size.mode.custom")
 
-                Spacer(minLength: 0)
+                if appCoordinator.resolvedLanguage == .zhHans {
+                    Text(L10n.tr("video.cut.export_size.video_size"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.white.opacity(0.62))
+                        .lineLimit(1)
+                }
 
                 Text(viewModel.currentRealSizeText)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(Color.white.opacity(0.58))
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
             }
 
             if viewModel.isUsingCustomExportSize {
@@ -881,13 +917,11 @@ struct VideoCuttingModalView: View {
                 }
             }
 
-            Text(viewModel.exportSizeHelperText)
-                .font(.caption)
-                .foregroundStyle(
-                    viewModel.exportSizeValidationMessage == nil
-                        ? Color.white.opacity(0.58)
-                        : Color.orange.opacity(0.9)
-                )
+            if let validationMessage = viewModel.exportSizeValidationMessage {
+                Text(validationMessage)
+                    .font(.caption)
+                    .foregroundStyle(Color.orange.opacity(0.9))
+            }
         }
     }
 
@@ -905,6 +939,7 @@ struct VideoCuttingModalView: View {
                 Text(L10n.tr(titleKey))
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Color.white.opacity(0.88))
+                    .lineLimit(1)
             }
         }
         .buttonStyle(.plain)
@@ -972,6 +1007,10 @@ struct VideoCuttingModalView: View {
                 .pickerStyle(.menu)
                 .disabled(!viewModel.hasAudioTrack)
                 .frame(width: 170)
+            }
+
+            if viewModel.hasSource {
+                exportSizeControls
             }
 
             if !viewModel.hasAudioTrack {

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXFileReference section */
+		7D8C2A202FCCB00000A7D020 /* DemoFlow.storekit */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = com.apple.dt.storekit; path = DemoFlow/StoreKit/DemoFlow.storekit; sourceTree = "<group>"; };
 		7DA5EA7F2FBC5898000B44BD /* DemoFlow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DemoFlow.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -32,6 +33,7 @@
 		7DA5EA762FBC5898000B44BD = {
 			isa = PBXGroup;
 			children = (
+				7D8C2A202FCCB00000A7D020 /* DemoFlow.storekit */,
 				7DA5EA812FBC5898000B44BD /* DemoFlow */,
 				7DA5EA802FBC5898000B44BD /* Products */,
 			);

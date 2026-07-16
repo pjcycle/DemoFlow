@@ -28,8 +28,7 @@ private enum RecordingSessionStopIntent {
 final class AppCoordinator: ObservableObject {
     private static let languageOptionDefaultsKey = "demoflow.appLanguage.option"
     private static let privacyNoticePresentedDefaultsKey = "demoflow.privacy.notice.presented"
-    // TODO: replace with production GitHub Pages base URL.
-    private static let privacyPolicyBaseURL = "https://pjcycle.github.io/pjln"
+    private static let supportEmailAddress = "pjln.top@gmail.com"
     private static let drawDismissalAnimationModeDefaultsKey = "demoflow.draw.dismissal.animation.mode"
     private static let drawDismissalAnimationFixedStyleDefaultsKey = "demoflow.draw.dismissal.animation.fixedStyle"
     private static let drawAutoCaptureOnCloseEnabledDefaultsKey = "demoflow.draw.autoCaptureOnClose.enabled"
@@ -160,7 +159,10 @@ final class AppCoordinator: ObservableObject {
     @Published private(set) var isRecordingPermissionRequestInFlight = false
     @Published private(set) var isRecordingRegionSelecting = false
     @Published private(set) var recordingRegionSelectionSizeText = "400 x 400"
+    @Published private(set) var recordingMenuBarElapsedDisplay = "00:00"
+    @Published private(set) var recordingMenuBarMode: RecordingControlMode = .ready
     @Published private(set) var isPrivacyNoticePresented = false
+    @Published private(set) var isPrivacyPolicySheetPresented = false
     @Published private(set) var privacyPolicyOpenErrorMessage: String?
     @Published private(set) var isReviewPromptVisible = false
 
@@ -181,7 +183,10 @@ final class AppCoordinator: ObservableObject {
     private let screenDrawAutoCaptureService = ScreenDrawAutoCaptureService()
     private let compositionEngine = CompositionExportEngine()
     private let reviewPromptController = ReviewPromptWindowController()
+    private let subscriptionWindowController = SubscriptionWindowController()
+    let subscriptionViewModel = SubscriptionViewModel()
     private var cancellables: Set<AnyCancellable> = []
+    private var pipRecordingsAccessToken: OutputLocationAccessToken?
     private var shouldRestoreMainWindowAfterRecording = false
     private var drawSystemDefinedMonitor: Any?
     private var pendingDrawCaptureRefreshTask: Task<Void, Never>?
@@ -419,12 +424,27 @@ final class AppCoordinator: ObservableObject {
             && DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured()
     }
 
+    var canPresentRecordingControl: Bool {
+        !recorderState.isBusy
+            && !recorderState.isRecording
+            && !isRecordingPermissionRequestInFlight
+            && !isRecordingRegionSelecting
+    }
+
     var isRecordingsOutputDirectoryConfigured: Bool {
         DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured()
     }
 
+    var isOutputWorkspaceConfigured: Bool {
+        DemoFlowOutputDirectoryPolicy.outputWorkspaceConfigured()
+    }
+
     var recordingsOutputDirectoryPath: String? {
         DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory()?.path
+    }
+
+    var outputWorkspaceRootDirectoryPath: String? {
+        DemoFlowOutputDirectoryPolicy.outputWorkspaceRootDirectory()?.path
     }
 
     var canStopRecording: Bool {
@@ -525,17 +545,6 @@ final class AppCoordinator: ObservableObject {
         return L10n.f("recording.quality.file_size.mb", sizeMB)
     }
 
-    var resolvedPrivacyPolicyURL: URL? {
-        let base = Self.privacyPolicyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !base.isEmpty, let baseURL = URL(string: base) else {
-            return nil
-        }
-        guard let scheme = baseURL.scheme?.lowercased(), scheme == "https" || scheme == "http" else {
-            return nil
-        }
-        return baseURL.appendingPathComponent(privacyPolicyPathSuffix)
-    }
-
     func bootstrap() {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
@@ -552,6 +561,9 @@ final class AppCoordinator: ObservableObject {
         configurePiPHotkeysIfNeeded()
         configureQuickActionHotkeysIfNeeded()
         refreshLanguageIfNeeded()
+        Task { @MainActor in
+            await subscriptionViewModel.bootstrap()
+        }
     }
 
     func evaluatePrivacyNoticeIfNeeded() {
@@ -571,16 +583,77 @@ final class AppCoordinator: ObservableObject {
     }
 
     func openPrivacyPolicyURL() {
-        guard let url = resolvedPrivacyPolicyURL else {
-            privacyPolicyOpenErrorMessage = L10n.tr("privacy.notice.url_invalid")
+        privacyPolicyOpenErrorMessage = nil
+        isPrivacyPolicySheetPresented = true
+    }
+
+    func dismissPrivacyPolicySheet() {
+        isPrivacyPolicySheetPresented = false
+    }
+
+    func openSubscriptionWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        let targetScreen = NSApp.keyWindow?.screen
+            ?? NSApp.mainWindow?.screen
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        subscriptionWindowController.show(
+            subscriptionViewModel: subscriptionViewModel,
+            onClose: { [weak self] in
+                self?.dismissSubscriptionWindow()
+            },
+            on: targetScreen
+        )
+        Task { @MainActor in
+            await subscriptionViewModel.bootstrap()
+        }
+    }
+
+    func requestSubscriptionUnlock(
+        for feature: SubscriptionLockedFeature,
+        statusChannel: SubscriptionStatusChannel = .recording
+    ) {
+        let message = L10n.tr(feature.statusMessageKey)
+        switch statusChannel {
+        case .recording:
+            statusMessage = message
+        case .pip:
+            pipStatusMessage = message
+        }
+        openSubscriptionWindow()
+    }
+
+    func dismissSubscriptionWindow() {
+        subscriptionWindowController.hide()
+    }
+
+    func openSubscriptionTeaser() {
+        openSubscriptionWindow()
+    }
+
+    func dismissSubscriptionTeaser() {
+        dismissSubscriptionWindow()
+    }
+
+    func openSubscriptionPaywall() {
+        openSubscriptionWindow()
+    }
+
+    func openSubscriptionPaywallFromTeaser() {
+        openSubscriptionWindow()
+    }
+
+    func dismissSubscriptionPaywall() {
+        dismissSubscriptionWindow()
+    }
+
+    func openSupportEmail() {
+        privacyPolicyOpenErrorMessage = nil
+        guard let encodedSubject = "DemoFlow Support".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "mailto:\(Self.supportEmailAddress)?subject=\(encodedSubject)") else {
             return
         }
-        let didOpen = NSWorkspace.shared.open(url)
-        if didOpen {
-            privacyPolicyOpenErrorMessage = nil
-        } else {
-            privacyPolicyOpenErrorMessage = L10n.tr("privacy.notice.open_failed")
-        }
+        _ = NSWorkspace.shared.open(url)
     }
 
     func refreshLanguageIfNeeded() {
@@ -713,6 +786,10 @@ final class AppCoordinator: ObservableObject {
 
     func startPiPFilmRecording() {
         guard canStartPiPFilmRecording else { return }
+        guard subscriptionViewModel.isProUnlocked || !pipRecordingQualityConfig.preset.requiresSubscription else {
+            requestSubscriptionUnlock(for: .pipQuality, statusChannel: .pip)
+            return
+        }
         guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else {
             pipStatusMessage = L10n.tr("output.recording.unset_toast")
             selectedSettingsSection = .appSettings
@@ -739,10 +816,12 @@ final class AppCoordinator: ObservableObject {
                     }
                     return
                 }
+                guard let accessToken = DemoFlowOutputDirectoryPolicy.makeRecordingsAccessToken() else {
+                    throw PiPFilmRecorderServiceError.outputDirectoryAccessFailed
+                }
+                pipRecordingsAccessToken = accessToken
                 guard let outputDirectory = DemoFlowOutputDirectoryPolicy.pipRecordingsBookmarkedDirectory() else {
-                    throw PiPFilmRecorderServiceError.runtimeStartFailed(
-                        L10n.tr("output.recording.unset_toast")
-                    )
+                    throw PiPFilmRecorderServiceError.outputDirectoryAccessFailed
                 }
                 pipStatusMessage = L10n.tr("pip.film.status.preparing")
                 try await pipFilmRecorder.startRecording(
@@ -768,6 +847,7 @@ final class AppCoordinator: ObservableObject {
                 }
                 pipFilmState = pipFilmRecorder.state
                 pipController.applyRuntimeWindowTitleSuffix(nil)
+                releasePiPRecordingsAccessToken()
                 pipStatusMessage = L10n.f("pip.film.status.failed", readablePiPFilmMessage(error))
             }
         }
@@ -797,6 +877,7 @@ final class AppCoordinator: ObservableObject {
                 self.lastPiPFilmOutputURL = outputURL
                 self.pipFilmState = self.pipFilmRecorder.state
                 self.pipController.applyRuntimeWindowTitleSuffix(nil)
+                self.releasePiPRecordingsAccessToken()
                 if trigger == .manual {
                     self.pipStatusMessage = L10n.f("pip.film.status.saved", outputURL.lastPathComponent)
                 } else {
@@ -806,6 +887,7 @@ final class AppCoordinator: ObservableObject {
             } catch {
                 self.pipFilmState = self.pipFilmRecorder.state
                 self.pipController.applyRuntimeWindowTitleSuffix(nil)
+                self.releasePiPRecordingsAccessToken()
                 self.pipStatusMessage = L10n.f("pip.film.status.failed", self.readablePiPFilmMessage(error))
                 if trigger != .manual {
                     self.performPiPHideAfterFilmStop()
@@ -830,7 +912,7 @@ final class AppCoordinator: ObservableObject {
     func openRecordingOutputDirectory() {
         guard let directory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
             statusMessage = L10n.tr("output.recording.unset_toast")
-            selectedSettingsSection = .appSettings
+            showRecordingOutputLocationSettings()
             return
         }
         if let outputURL = recorder.lastOutputURL {
@@ -838,6 +920,15 @@ final class AppCoordinator: ObservableObject {
         } else {
             NSWorkspace.shared.activateFileViewerSelecting([directory])
         }
+    }
+
+    func openOutputWorkspaceDirectory() {
+        guard let directory = DemoFlowOutputDirectoryPolicy.outputWorkspaceRootDirectory() else {
+            statusMessage = L10n.tr("output.recording.unset_toast")
+            showRecordingOutputLocationSettings()
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([directory])
     }
 
     func showScreenDrawOverlay() {
@@ -931,13 +1022,13 @@ final class AppCoordinator: ObservableObject {
         guard let url = DemoFlowOutputDirectoryPolicy.requestRecordingsDirectoryPicker() else {
             return false
         }
-        statusMessage = L10n.f("output.location.recordings.chosen", url.path)
+        statusMessage = L10n.f("output.location.workspace.chosen", url.path)
         return true
     }
 
     func clearRecordingsDirectorySelection() {
         DemoFlowOutputDirectoryPolicy.clearRecordingsDirectorySelection()
-        statusMessage = L10n.tr("output.location.recordings.cleared")
+        statusMessage = L10n.tr("output.location.workspace.cleared")
     }
 
     // Compatibility wrappers for existing callers.
@@ -956,16 +1047,20 @@ final class AppCoordinator: ObservableObject {
     }
 
     func startRecordingFromCurrentConfig(preferredScreen: NSScreen? = nil) {
-        guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else {
-            statusMessage = L10n.tr("output.recording.unset_toast")
-            selectedSettingsSection = .appSettings
-            return
-        }
-        guard canStartRecording else {
+        guard canPresentRecordingControl else {
             statusMessage = unavailableReason()
             return
         }
+        if isRecordingArmed || recordingControlController.isVisible {
+            focusRecordingStartControl(preferredScreen: preferredScreen)
+            return
+        }
         runRecordingPermissionRequest {
+            guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else {
+                self.statusMessage = L10n.tr("output.recording.unset_toast")
+                self.showRecordingOutputLocationSettings()
+                return
+            }
             self.presentRecordingStartControl(
                 preferredScreen: preferredScreen,
                 captureMode: self.effectiveRecordingCaptureMode
@@ -976,7 +1071,11 @@ final class AppCoordinator: ObservableObject {
     func startRecordingImmediatelyFromMenuBar(preferredScreen: NSScreen? = nil) {
         guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else {
             statusMessage = L10n.tr("output.recording.unset_toast")
-            selectedSettingsSection = .appSettings
+            showRecordingOutputLocationSettings()
+            return
+        }
+        guard subscriptionViewModel.isProUnlocked || !recordingQualityConfig.preset.requiresSubscription else {
+            requestSubscriptionUnlock(for: .recordingQuality)
             return
         }
         guard canStartRecording else {
@@ -1026,6 +1125,28 @@ final class AppCoordinator: ObservableObject {
         } else {
             dismissRegionSelectionOverlay()
             refreshRecordingControlSizeDisplayForCurrentMode()
+            statusMessage = L10n.tr("legacy.key_176")
+        }
+    }
+
+    private func focusRecordingStartControl(preferredScreen: NSScreen?) {
+        guard let screen = preferredScreen
+            ?? activeScreenByPointer()
+            ?? NSScreen.main
+            ?? NSScreen.screens.first else {
+            statusMessage = L10n.tr("recording.region.error.display_unavailable")
+            return
+        }
+        recordingControlController.show(on: screen)
+        startRecordingControlSizeRefreshTimerIfNeeded()
+        refreshRecordingControlSizeDisplayForCurrentMode()
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+        if recordingCaptureMode == .region,
+           pendingRegionSelection == nil,
+           activeRecordingRegionSelection == nil {
+            statusMessage = L10n.tr("recording.region.status.selecting")
+        } else {
             statusMessage = L10n.tr("legacy.key_176")
         }
     }
@@ -1440,7 +1561,19 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func unavailableReason() -> String {
-        L10n.tr("legacy.key_107")
+        if !DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() {
+            return L10n.tr("output.recording.unset_toast")
+        }
+        if isRecordingPermissionRequestInFlight || recorderState.isBusy {
+            return L10n.tr("legacy.key_21")
+        }
+        if isRecordingRegionSelecting {
+            return L10n.tr("recording.region.status.selecting")
+        }
+        if isRecordingArmed || recordingControlController.isVisible {
+            return L10n.tr("legacy.key_176")
+        }
+        return L10n.tr("legacy.key_107")
     }
 
     private func readablePiPFilmMessage(_ error: Error) -> String {
@@ -1455,6 +1588,7 @@ final class AppCoordinator: ObservableObject {
         pipFilmRecorder.handleRuntimeFailure(error)
         pendingPiPFilmStopTrigger = nil
         pipController.applyRuntimeWindowTitleSuffix(nil)
+        releasePiPRecordingsAccessToken()
         pipStatusMessage = L10n.f("pip.film.status.failed", readablePiPFilmMessage(error))
     }
 
@@ -1513,12 +1647,45 @@ final class AppCoordinator: ObservableObject {
         showMainWindow()
     }
 
+    private func showRecordingOutputLocationSettings() {
+        selectedSettingsSection = .appSettings
+        showMainWindow()
+    }
+
+    private func releasePiPRecordingsAccessToken() {
+        pipRecordingsAccessToken?.stop()
+        pipRecordingsAccessToken = nil
+    }
+
     func toggleRecordingFromMenuBar() {
         if canStopRecording {
             stopRecordingAndRestoreMonitoring()
         } else if canStartRecording {
             startRecordingImmediatelyFromMenuBar()
         }
+    }
+
+    func toggleRecordingPauseFromMenuBar() {
+        switch recordingControlMode {
+        case .recording, .paused:
+            handleRecordingControlPauseToggle()
+        case .ready, .stopping:
+            break
+        }
+    }
+
+    func autoPresentRecordingControlIfEligible() {
+        guard selectedSettingsSection == .recording else { return }
+        guard DemoFlowOutputDirectoryPolicy.recordingsDirectoryConfigured() else { return }
+        guard canPresentRecordingControl else { return }
+        guard !isRecordingArmed, !recordingControlController.isVisible else { return }
+        if #available(macOS 11.0, *), !CGPreflightScreenCaptureAccess() {
+            return
+        }
+        presentRecordingStartControl(
+            preferredScreen: activeScreenByPointer() ?? NSScreen.main ?? NSScreen.screens.first,
+            captureMode: effectiveRecordingCaptureMode
+        )
     }
 
     func togglePiPPreviewFromMenuBar() {
@@ -1761,6 +1928,10 @@ final class AppCoordinator: ObservableObject {
             statusMessage = unavailableReason()
             return
         }
+        guard subscriptionViewModel.isProUnlocked || !recordingQualityConfig.preset.requiresSubscription else {
+            requestSubscriptionUnlock(for: .recordingQuality)
+            return
+        }
 
         let captureMode = armedRecordingCaptureMode
         let regionSelection: RecordingRegionSelection? = {
@@ -1795,9 +1966,10 @@ final class AppCoordinator: ObservableObject {
         if !isAllRecordingEnabled {
             hideMainWindowForRecording()
         }
-        recordingControlMode = .recording
+        recordingControlMode = .stopping
         updateRecordingControlDisplayModel()
         updateRecordingControlSurface()
+        statusMessage = L10n.tr("legacy.key_190")
 
         let request = buildRecordingRequest(
             captureMode: captureMode,
@@ -1818,6 +1990,7 @@ final class AppCoordinator: ObservableObject {
             refreshRecordingWindowCaptureIfNeeded()
         } else {
             recordingControlMode = .ready
+            isRecordingArmed = false
             updateRecordingControlDisplayModel()
             updateRecordingControlSurface()
             if case .failed = recorder.state,
@@ -1884,6 +2057,18 @@ final class AppCoordinator: ObservableObject {
 
     private func stopRecordingSessionAndFinalize(closeControlAfterStop: Bool) async {
         guard recordingControlMode != .stopping else { return }
+        guard recorderState.isRecording || !recordingSessionSegmentURLs.isEmpty || recorder.lastOutputURL != nil else {
+            statusMessage = L10n.tr("legacy.key_192")
+            recordingControlMode = .ready
+            isRecordingArmed = false
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            if isAudioAuthorized {
+                audioEngine.startMonitoringIfNeeded()
+            }
+            restoreMainWindowAfterRecording()
+            return
+        }
         recordingSessionStopIntent = .finalize
         recordingControlMode = .stopping
         updateRecordingControlDisplayModel()
@@ -2040,6 +2225,7 @@ final class AppCoordinator: ObservableObject {
         recordingControlDisplayModel.canPauseToggle = (recordingControlMode == .recording || recordingControlMode == .paused)
             && recordingControlMode != .stopping
         recordingControlDisplayModel.canClose = recordingControlMode != .stopping
+        syncRecordingMenuBarPresentation(with: elapsed)
     }
 
     private func updateRecordingControlSurface() {
@@ -2094,7 +2280,20 @@ final class AppCoordinator: ObservableObject {
         let hh = total / 3600
         let mm = (total % 3600) / 60
         let ss = total % 60
-        return String(format: "%02d:%02d:%02d", hh, mm, ss)
+        if hh > 0 {
+            return "\(hh):" + String(format: "%02d:%02d", mm, ss)
+        }
+        return String(format: "%02d:%02d", mm, ss)
+    }
+
+    private func syncRecordingMenuBarPresentation(with elapsedDisplay: String? = nil) {
+        let nextElapsed = elapsedDisplay ?? formatElapsedDisplay(currentRecordingElapsedSeconds())
+        if recordingMenuBarElapsedDisplay != nextElapsed {
+            recordingMenuBarElapsedDisplay = nextElapsed
+        }
+        if recordingMenuBarMode != recordingControlMode {
+            recordingMenuBarMode = recordingControlMode
+        }
     }
 
     private func formatSizeDisplay(for size: CGSize) -> String {
@@ -2682,6 +2881,11 @@ final class AppCoordinator: ObservableObject {
         )
     }
 
+    enum SubscriptionStatusChannel {
+        case recording
+        case pip
+    }
+
     private func captureScreenDrawCompositeIfNeeded(screen: NSScreen?, canvasImage: NSImage?) {
         guard let canvasImage else {
             drawStatusMessage = L10n.tr("draw.capture.error.canvas_unavailable")
@@ -2721,14 +2925,6 @@ final class AppCoordinator: ObservableObject {
         L10n.setLanguage(next)
     }
 
-    private var privacyPolicyPathSuffix: String {
-        switch resolvedLanguage {
-        case .zhHans:
-            return "zh-hans.html"
-        case .en:
-            return "en.html"
-        }
-    }
 }
 
 extension Notification.Name {
@@ -2746,9 +2942,11 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
     private let pipRecordingToggleItem = NSMenuItem()
     private let screenDrawToggleItem = NSMenuItem()
     private let recordingSettingsItem = NSMenuItem()
+    private let recordingStatusView = MenuBarRecordingStatusView()
     private weak var appCoordinator: AppCoordinator?
     private var isInstalled = false
     private var coordinatorObserver: NSObjectProtocol?
+    private var cancellables: Set<AnyCancellable> = []
 
     override init() {
         super.init()
@@ -2767,6 +2965,7 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
 
     func configure(appCoordinator: AppCoordinator) {
         self.appCoordinator = appCoordinator
+        bindCoordinatorState()
         install()
         refreshMenuItems()
     }
@@ -2788,17 +2987,7 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
 
     private func configureStatusButton() {
         guard let button = statusItem?.button else { return }
-        if let image = NSImage(named: "MenuIcon") {
-            let menuIcon = (image.copy() as? NSImage) ?? image
-            menuIcon.isTemplate = false
-            menuIcon.size = NSSize(width: 18, height: 18)
-            button.image = menuIcon
-            button.imageScaling = .scaleProportionallyUpOrDown
-            button.imagePosition = .imageOnly
-        } else {
-            button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "DemoFlow")
-            button.imagePosition = .imageOnly
-        }
+        applyStatusButtonAppearance()
         button.title = ""
         button.toolTip = "DemoFlow"
         button.setButtonType(.momentaryPushIn)
@@ -2847,6 +3036,8 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
     }
 
     private func refreshMenuItems() {
+        applyStatusButtonAppearance()
+        statusItem?.menu = isRecordingStatusControlsVisible ? nil : menu
         recordingToggleItem.title = L10n.tr("menu.recording_toggle")
         recordingToggleItem.isEnabled = (appCoordinator?.canStartRecording ?? false) || (appCoordinator?.canStopRecording ?? false)
 
@@ -2863,6 +3054,99 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
 
         recordingSettingsItem.title = L10n.tr("menu.recording_settings")
         recordingSettingsItem.isEnabled = true
+    }
+
+    private func bindCoordinatorState() {
+        cancellables.removeAll()
+
+        appCoordinator?.$recordingMenuBarMode
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenuItems()
+            }
+            .store(in: &cancellables)
+
+        appCoordinator?.$recordingMenuBarElapsedDisplay
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenuItems()
+            }
+            .store(in: &cancellables)
+
+        appCoordinator?.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenuItems()
+            }
+            .store(in: &cancellables)
+    }
+
+    private var isRecordingStatusControlsVisible: Bool {
+        guard let mode = appCoordinator?.recordingMenuBarMode else { return false }
+        return mode == .recording || mode == .paused
+    }
+
+    private func installRecordingStatusViewIfNeeded(in button: NSStatusBarButton) {
+        guard recordingStatusView.superview == nil else { return }
+        recordingStatusView.translatesAutoresizingMaskIntoConstraints = false
+        recordingStatusView.onPauseToggle = { [weak self] in
+            self?.appCoordinator?.toggleRecordingPauseFromMenuBar()
+        }
+        recordingStatusView.onStop = { [weak self] in
+            self?.appCoordinator?.stopRecordingAndRestoreMonitoring()
+        }
+        button.addSubview(recordingStatusView)
+        NSLayoutConstraint.activate([
+            recordingStatusView.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
+            recordingStatusView.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -4),
+            recordingStatusView.topAnchor.constraint(equalTo: button.topAnchor, constant: 1),
+            recordingStatusView.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -1)
+        ])
+    }
+
+    private func uninstallRecordingStatusViewIfNeeded() {
+        guard recordingStatusView.superview != nil else { return }
+        recordingStatusView.removeFromSuperview()
+    }
+
+    private func applyStatusButtonAppearance() {
+        guard let button = statusItem?.button else { return }
+
+        if isRecordingStatusControlsVisible {
+            let elapsedDisplay = appCoordinator?.recordingMenuBarElapsedDisplay ?? "00:00"
+            let isPaused = appCoordinator?.recordingMenuBarMode == .paused
+            installRecordingStatusViewIfNeeded(in: button)
+            statusItem?.length = MenuBarRecordingStatusView.preferredLength(for: elapsedDisplay)
+            recordingStatusView.render(
+                elapsedDisplay: elapsedDisplay,
+                isPaused: isPaused
+            )
+            button.image = nil
+            button.contentTintColor = nil
+            button.imagePosition = .noImage
+        } else if let image = NSImage(named: "MenuIcon") {
+            uninstallRecordingStatusViewIfNeeded()
+            statusItem?.length = NSStatusItem.squareLength
+            let menuIcon = (image.copy() as? NSImage) ?? image
+            menuIcon.isTemplate = false
+            menuIcon.size = NSSize(width: 18, height: 18)
+            button.image = menuIcon
+            button.contentTintColor = nil
+        } else {
+            uninstallRecordingStatusViewIfNeeded()
+            statusItem?.length = NSStatusItem.squareLength
+            let image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "DemoFlow")
+            image?.isTemplate = false
+            image?.size = NSSize(width: 18, height: 18)
+            button.image = image
+            button.contentTintColor = .labelColor
+            button.imagePosition = .imageOnly
+        }
+
+        if !isRecordingStatusControlsVisible {
+            button.imageScaling = .scaleProportionallyUpOrDown
+            button.imagePosition = .imageOnly
+        }
     }
 
     @objc private func toggleRecordingFromMenu() {
@@ -2897,6 +3181,144 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
+    }
+}
+
+private final class MenuBarRecordingStatusView: NSView {
+    static func preferredLength(for elapsedDisplay: String) -> CGFloat {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        let textWidth = ceil((elapsedDisplay as NSString).size(withAttributes: [.font: font]).width)
+        return max(NSStatusItem.squareLength, textWidth + 48)
+    }
+
+    var onPauseToggle: (() -> Void)?
+    var onStop: (() -> Void)?
+
+    private let stackView = NSStackView()
+    private let pauseButton = NSButton(title: "", target: nil, action: nil)
+    private let elapsedLabel = NSTextField(labelWithString: "00:00")
+    private let stopButton = NSButton(title: "", target: nil, action: nil)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configure()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func render(elapsedDisplay: String, isPaused: Bool) {
+        elapsedLabel.stringValue = elapsedDisplay
+        pauseButton.image = makeTintedSymbolImage(
+            symbolName: isPaused ? "play.fill" : "pause.fill",
+            tintColor: .white,
+            pointSize: 10,
+            accessibilityDescription: isPaused ? "Resume Recording" : "Pause Recording"
+        )
+        stopButton.image = makeTintedSymbolImage(
+            symbolName: "stop.fill",
+            tintColor: .systemRed,
+            pointSize: 10,
+            accessibilityDescription: "Stop Recording"
+        )
+    }
+
+    private func configure() {
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+
+        configureButton(
+            pauseButton,
+            symbolName: "pause.fill",
+            tintColor: .white,
+            action: #selector(handlePauseButtonTapped)
+        )
+        configureButton(
+            stopButton,
+            symbolName: "stop.fill",
+            tintColor: .systemRed,
+            action: #selector(handleStopButtonTapped)
+        )
+
+        elapsedLabel.translatesAutoresizingMaskIntoConstraints = false
+        elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        elapsedLabel.textColor = .labelColor
+        elapsedLabel.alignment = .center
+        elapsedLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.spacing = 3
+        stackView.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        stackView.addArrangedSubview(pauseButton)
+        stackView.addArrangedSubview(elapsedLabel)
+        stackView.addArrangedSubview(stopButton)
+
+        addSubview(stackView)
+        NSLayoutConstraint.activate([
+            stackView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stackView.topAnchor.constraint(equalTo: topAnchor),
+            stackView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            pauseButton.widthAnchor.constraint(equalToConstant: 14),
+            stopButton.widthAnchor.constraint(equalToConstant: 14)
+        ])
+    }
+
+    private func configureButton(
+        _ button: NSButton,
+        symbolName: String,
+        tintColor: NSColor,
+        action: Selector
+    ) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.controlSize = .small
+        button.image = makeTintedSymbolImage(
+            symbolName: symbolName,
+            tintColor: tintColor,
+            pointSize: 10,
+            accessibilityDescription: nil
+        )
+        button.imagePosition = .imageOnly
+        button.target = self
+        button.action = action
+        button.focusRingType = .none
+        button.setButtonType(.momentaryPushIn)
+    }
+
+    private func makeTintedSymbolImage(
+        symbolName: String,
+        tintColor: NSColor,
+        pointSize: CGFloat,
+        accessibilityDescription: String?
+    ) -> NSImage? {
+        guard let sourceImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription)?
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: .semibold)) else {
+            return nil
+        }
+        let size = NSSize(width: ceil(max(sourceImage.size.width, pointSize + 2)), height: ceil(max(sourceImage.size.height, pointSize + 2)))
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let rect = NSRect(origin: .zero, size: size)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        tintColor.setFill()
+        NSBezierPath(rect: rect).fill()
+        sourceImage.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1.0)
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
+
+    @objc private func handlePauseButtonTapped() {
+        onPauseToggle?()
+    }
+
+    @objc private func handleStopButtonTapped() {
+        onStop?()
     }
 }
 

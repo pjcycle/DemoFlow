@@ -21,6 +21,8 @@ final class AudioTranscodeViewModel: ObservableObject {
     private let importService = AudioImportService()
     private let service = AudioTranscodeService()
     private var conversionTask: Task<Void, Never>?
+    private weak var subscriptionViewModel: SubscriptionViewModel?
+    private var onRequireSubscription: (() -> Void)?
 
     var supportedTypes: [UTType] {
         importService.supportedTypes
@@ -64,6 +66,14 @@ final class AudioTranscodeViewModel: ObservableObject {
 
     var hasSuccessfulOutput: Bool {
         jobs.contains(where: { $0.result != nil })
+    }
+
+    func configureSubscriptionAccess(
+        subscriptionViewModel: SubscriptionViewModel,
+        onRequireSubscription: @escaping () -> Void
+    ) {
+        self.subscriptionViewModel = subscriptionViewModel
+        self.onRequireSubscription = onRequireSubscription
     }
 
     func presentImporter() {
@@ -188,6 +198,7 @@ final class AudioTranscodeViewModel: ObservableObject {
 
     private func convert(jobIDs: [UUID]) {
         guard !jobIDs.isEmpty else { return }
+        guard requireSubscriptionAccess(for: .audioTranscode) else { return }
 
         let lockedDraft = draft
         isConverting = true
@@ -269,5 +280,15 @@ final class AudioTranscodeViewModel: ObservableObject {
         let response = panel.runModal()
         guard response == .OK, let url = panel.url else { return nil }
         return url
+    }
+
+    @discardableResult
+    private func requireSubscriptionAccess(for feature: SubscriptionLockedFeature) -> Bool {
+        guard subscriptionViewModel?.isProUnlocked == true else {
+            statusMessage = L10n.tr(feature.statusMessageKey)
+            onRequireSubscription?()
+            return false
+        }
+        return true
     }
 }

@@ -69,6 +69,15 @@ enum PiPRecordingQualityPreset: String, CaseIterable, Identifiable, Codable {
             return "pip.quality.preset.custom.description"
         }
     }
+
+    var requiresSubscription: Bool {
+        switch self {
+        case .small, .balanced:
+            return false
+        case .highQuality, .proEditing, .custom:
+            return true
+        }
+    }
 }
 
 enum PiPRecordingQualityWarningLevel {

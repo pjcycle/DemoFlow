@@ -24,6 +24,8 @@ final class AudioTrimViewModel: ObservableObject {
     private var previewAnchor: TimeInterval = 0
     private var isPreviewingSelection = false
     private var exportSucceeded = false
+    private weak var subscriptionViewModel: SubscriptionViewModel?
+    private var onRequireSubscription: (() -> Void)?
 
     var supportedTypes: [UTType] {
         importService.supportedTypes
@@ -64,6 +66,14 @@ final class AudioTrimViewModel: ObservableObject {
 
     var totalOutputDurationText: String {
         draft.selectedPreparedAsset?.durationText ?? "00:00"
+    }
+
+    func configureSubscriptionAccess(
+        subscriptionViewModel: SubscriptionViewModel,
+        onRequireSubscription: @escaping () -> Void
+    ) {
+        self.subscriptionViewModel = subscriptionViewModel
+        self.onRequireSubscription = onRequireSubscription
     }
 
     func presentImporter() {
@@ -217,6 +227,7 @@ final class AudioTrimViewModel: ObservableObject {
             statusMessage = AudioTrimError.noSource.localizedDescription
             return
         }
+        guard requireSubscriptionAccess(for: .audioTrimExport) else { return }
         guard let outputURL = requestOutputURL(baseName: draft.exportFileName, format: outputFormat) else {
             statusMessage = L10n.tr("audio.trim.error.save_cancelled")
             return
@@ -368,6 +379,16 @@ final class AudioTrimViewModel: ObservableObject {
         let response = panel.runModal()
         guard response == .OK, let url = panel.url else { return nil }
         return url
+    }
+
+    @discardableResult
+    private func requireSubscriptionAccess(for feature: SubscriptionLockedFeature) -> Bool {
+        guard subscriptionViewModel?.isProUnlocked == true else {
+            statusMessage = L10n.tr(feature.statusMessageKey)
+            onRequireSubscription?()
+            return false
+        }
+        return true
     }
 
     private func formatTime(_ interval: TimeInterval) -> String {

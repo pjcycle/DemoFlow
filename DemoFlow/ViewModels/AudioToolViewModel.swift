@@ -65,4 +65,22 @@ final class AudioToolViewModel: ObservableObject {
             }
         }
     }
+
+    func configureSubscriptionAccess(
+        subscriptionViewModel: SubscriptionViewModel,
+        onRequireSubscription: @escaping () -> Void
+    ) {
+        extractViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: subscriptionViewModel,
+            onRequireSubscription: onRequireSubscription
+        )
+        transcodeViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: subscriptionViewModel,
+            onRequireSubscription: onRequireSubscription
+        )
+        trimViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: subscriptionViewModel,
+            onRequireSubscription: onRequireSubscription
+        )
+    }
 }

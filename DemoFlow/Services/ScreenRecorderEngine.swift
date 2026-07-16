@@ -38,6 +38,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     private var recordingStartContinuation: CheckedContinuation<Void, Error>?
     private var hasWrittenFirstScreenFrame = false
     private var stopScreenCaptureTimedOut = false
+    private var recordingsAccessToken: OutputLocationAccessToken?
     nonisolated(unsafe) private var screenFileWriter: ScreenCaptureFileWriter?
 
     enum RecordingStopReason {
@@ -68,6 +69,10 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         lastArtifact = nil
 
         do {
+            guard let accessToken = DemoFlowOutputDirectoryPolicy.makeRecordingsAccessToken() else {
+                throw RecorderError.outputDirectoryAccessFailed
+            }
+            recordingsAccessToken = accessToken
             let outputContext = try makeOutputContext(for: request)
             screenRawURL = outputContext.screenRawURL
             cameraRawURL = outputContext.cameraRawURL
@@ -608,6 +613,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         hasWrittenFirstScreenFrame = false
         stopScreenCaptureTimedOut = false
         recordingStartContinuation = nil
+        recordingsAccessToken?.stop()
+        recordingsAccessToken = nil
         stream = nil
         activeCaptureDisplayID = nil
         includesPiPWindowInScreenCapture = false
@@ -819,6 +826,7 @@ extension ScreenRecorderEngine {
         case invalidRegion
         case missingIntermediate(String)
         case emptyIntermediate(String)
+        case outputDirectoryAccessFailed
         case startTimedOut
         case stopTimedOut
         case outputDirectoryNotConfigured
@@ -836,6 +844,8 @@ extension ScreenRecorderEngine {
                 return L10n.f("fmt.recording.missing_intermediate", name)
             case let .emptyIntermediate(name):
                 return L10n.f("fmt.recording.missing_intermediate", name)
+            case .outputDirectoryAccessFailed:
+                return L10n.tr("output.recording.unset_toast")
             case .startTimedOut:
                 return L10n.tr("legacy.key_192")
             case .stopTimedOut:
