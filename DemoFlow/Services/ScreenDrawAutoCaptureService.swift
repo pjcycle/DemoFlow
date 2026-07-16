@@ -14,6 +14,7 @@ enum ScreenDrawAutoCaptureError: LocalizedError {
     case screenCapturePermissionDenied
     case screenCaptureFailed
     case canvasUnavailable
+    case outputDirectoryAccessFailed
     case bitmapInitFailed
     case pngEncodingFailed
 
@@ -27,6 +28,8 @@ enum ScreenDrawAutoCaptureError: LocalizedError {
             return L10n.tr("draw.capture.error.capture_failed")
         case .canvasUnavailable:
             return L10n.tr("draw.capture.error.canvas_unavailable")
+        case .outputDirectoryAccessFailed:
+            return L10n.tr("output.location.workspace.access_failed")
         case .bitmapInitFailed:
             return L10n.tr("draw.capture.error.bitmap_failed")
         case .pngEncodingFailed:
@@ -52,9 +55,13 @@ struct ScreenDrawAutoCaptureService {
         guard let composed = compose(screenImage: screenImage, canvasImage: canvasImage) else {
             throw ScreenDrawAutoCaptureError.canvasUnavailable
         }
+        guard let accessToken = DemoFlowOutputDirectoryPolicy.makeRecordingsAccessToken() else {
+            throw ScreenDrawAutoCaptureError.outputDirectoryAccessFailed
+        }
+        defer { accessToken.stop() }
 
         guard let directory = DemoFlowOutputDirectoryPolicy.screenDrawAutoCaptureBookmarkedDirectory() else {
-            throw ScreenDrawAutoCaptureError.canvasUnavailable
+            throw ScreenDrawAutoCaptureError.outputDirectoryAccessFailed
         }
         let outputURL = directory.appendingPathComponent(fileName(), isDirectory: false)
         try writePNG(from: composed, to: outputURL)

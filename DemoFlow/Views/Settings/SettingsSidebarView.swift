@@ -11,6 +11,7 @@ import SwiftUI
 struct SettingsSidebarView: View {
     @Binding var selectedSection: SettingsSection
     @Binding var isCollapsed: Bool
+    @ObservedObject var subscriptionViewModel: SubscriptionViewModel
     var onSectionSelected: ((SettingsSection) -> Void)?
 
     var body: some View {
@@ -40,9 +41,7 @@ struct SettingsSidebarView: View {
                 )
 
             if !isCollapsed {
-                Text(productDisplayName)
-                        .font(.headline)
-                    .lineLimit(1)
+                brandTitle
             }
 
             Spacer(minLength: 0)
@@ -56,6 +55,31 @@ struct SettingsSidebarView: View {
             }
             .buttonStyle(.plain)
             .help(isCollapsed ? L10n.tr("sidebar.expand") : L10n.tr("sidebar.collapse"))
+        }
+    }
+
+    @ViewBuilder
+    private var brandTitle: some View {
+        if let badgeText = subscriptionViewModel.membershipBadgeText {
+            HStack(spacing: 8) {
+                Image(systemName: "crown.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(red: 0.88, green: 0.63, blue: 0.14))
+
+                Text(badgeText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.black.opacity(0.08))
+                    )
+            }
+        } else {
+            Text(productDisplayName)
+                .font(.headline)
+                .lineLimit(1)
         }
     }
 

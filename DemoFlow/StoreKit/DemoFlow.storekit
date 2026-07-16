@@ -1,0 +1,100 @@
+{
+  "identifier" : "DemoFlow StoreKit Configuration",
+  "appName" : "DemoFlow",
+  "settings" : {
+    "askToBuyEnabled" : false,
+    "billingGracePeriodEnabled" : false,
+    "locale" : "en_US",
+    "storefront" : "USA",
+    "timeRate" : "realTime"
+  },
+  "subscriptionGroups" : [
+    {
+      "groupID" : "pjln.top.demoflow.pro.group",
+      "localizations" : [
+        {
+          "displayName" : "DemoFlow Pro",
+          "locale" : "zh-Hans"
+        },
+        {
+          "displayName" : "DemoFlow Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "referenceName" : "DemoFlow Pro"
+    }
+  ],
+  "products" : [
+    {
+      "familyShareable" : false,
+      "id" : "E5BFAF62-6C2D-47F1-9432-C8A55DA7E6F3",
+      "localizations" : [
+        {
+          "description" : "适合轻量体验与短期使用。",
+          "displayName" : "月付",
+          "locale" : "zh-Hans"
+        },
+        {
+          "description" : "Best for a quick trial or short-term use.",
+          "displayName" : "Monthly",
+          "locale" : "en_US"
+        }
+      ],
+      "price" : "1.99",
+      "productID" : "pjln.top.demoflow.pro.monthly",
+      "referenceName" : "Monthly",
+      "subscriptionGroupID" : "pjln.top.demoflow.pro.group",
+      "subscriptionPeriod" : {
+        "unit" : "month",
+        "value" : 1
+      },
+      "type" : "auto-renewable-subscription"
+    },
+    {
+      "familyShareable" : false,
+      "id" : "A8C3D1BE-9F4D-42E8-B9E2-16D7F8A2C6B0",
+      "localizations" : [
+        {
+          "description" : "长期使用最划算，功能全开。",
+          "displayName" : "年付",
+          "locale" : "zh-Hans"
+        },
+        {
+          "description" : "Best value if you use DemoFlow regularly.",
+          "displayName" : "Yearly",
+          "locale" : "en_US"
+        }
+      ],
+      "price" : "19.99",
+      "productID" : "pjln.top.demoflow.pro.yearly",
+      "referenceName" : "Yearly",
+      "subscriptionGroupID" : "pjln.top.demoflow.pro.group",
+      "subscriptionPeriod" : {
+        "unit" : "year",
+        "value" : 1
+      },
+      "type" : "auto-renewable-subscription"
+    },
+    {
+      "familyShareable" : false,
+      "id" : "D7E3291C-565A-4B37-82A1-9B3F4C7D8A00",
+      "localizations" : [
+        {
+          "description" : "一次买断，长期使用更省心。",
+          "displayName" : "买断",
+          "locale" : "zh-Hans"
+        },
+        {
+          "description" : "One payment for lasting access to Pro tools.",
+          "displayName" : "Lifetime",
+          "locale" : "en_US"
+        }
+      ],
+      "price" : "49.99",
+      "productID" : "pjln.top.demoflow.pro.lifetime",
+      "referenceName" : "Lifetime",
+      "type" : "non-consumable"
+    }
+  ],
+  "nonRenewingSubscriptions" : []
+}

@@ -19,6 +19,7 @@ enum PiPFilmRecorderServiceError: LocalizedError {
     case outputMissing
     case outputEmpty
     case fileNameExhausted
+    case outputDirectoryAccessFailed
     case runtimeStartFailed(String)
     case runtimeStopFailed(String)
 
@@ -42,6 +43,8 @@ enum PiPFilmRecorderServiceError: LocalizedError {
             return L10n.tr("pip.film.error.output_empty")
         case .fileNameExhausted:
             return L10n.tr("pip.film.error.file_name_exhausted")
+        case .outputDirectoryAccessFailed:
+            return L10n.tr("output.location.workspace.access_failed")
         case let .runtimeStartFailed(message):
             return L10n.f("pip.film.error.runtime_start", message)
         case let .runtimeStopFailed(message):

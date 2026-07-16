@@ -29,11 +29,13 @@ struct DemoFlowApp: App {
             .environment(\.locale, appCoordinator.appLocale)
             .onAppear {
                 appDelegate.configure(appCoordinator: appCoordinator)
+                configureSubscriptionGatesIfNeeded()
             }
             .onChange(of: scenePhase) { _, newPhase in
                 guard newPhase == .active else { return }
                 appDelegate.configure(appCoordinator: appCoordinator)
                 appCoordinator.refreshLanguageIfNeeded()
+                configureSubscriptionGatesIfNeeded()
             }
         }
 
@@ -49,6 +51,23 @@ struct DemoFlowApp: App {
         .defaultSize(width: 1180, height: 760)
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
+    }
+
+    private func configureSubscriptionGatesIfNeeded() {
+        let coordinator = appCoordinator
+        let openPaywall = { [weak coordinator] in
+            if let coordinator {
+                coordinator.openSubscriptionWindow()
+            }
+        }
+        videoCuttingViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: coordinator.subscriptionViewModel,
+            onRequireSubscription: openPaywall
+        )
+        audioToolViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: coordinator.subscriptionViewModel,
+            onRequireSubscription: openPaywall
+        )
     }
 }
 

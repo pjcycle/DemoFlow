@@ -46,6 +46,15 @@ enum RecordingQualityPreset: String, CaseIterable, Identifiable, Codable {
             return "recording.quality.preset.custom.description"
         }
     }
+
+    var requiresSubscription: Bool {
+        switch self {
+        case .small, .balanced:
+            return false
+        case .highQuality, .proEditing, .custom:
+            return true
+        }
+    }
 }
 
 enum RecordingResolutionPreset: String, CaseIterable, Identifiable, Codable {

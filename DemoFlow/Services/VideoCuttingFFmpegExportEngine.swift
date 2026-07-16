@@ -163,6 +163,14 @@ private extension VideoCuttingFFmpegExportEngine {
             )
         }
 
+        if let trimConcatCommand = buildTrimConcatCommand(
+            tools: tools,
+            context: context,
+            outputURL: outputURL
+        ) {
+            return trimConcatCommand
+        }
+
         if context.isFullKeep && !videoFilters.isEmpty {
             let videoEncode = videoEncodeSettings(for: context.performanceProfile)
             var args: [String] = [
@@ -225,6 +233,87 @@ private extension VideoCuttingFFmpegExportEngine {
         }
 
         return nil
+    }
+
+    func buildTrimConcatCommand(
+        tools: FFmpegToolPaths,
+        context: ExportContext,
+        outputURL: URL
+    ) -> FFmpegCommand? {
+        guard !context.isFullKeep else { return nil }
+        guard context.isFullCrop else { return nil }
+        guard context.targetRenderSize == nil else { return nil }
+        guard context.audioFilterChain == nil else { return nil }
+        guard !context.keepRanges.isEmpty else { return nil }
+
+        let encode = videoEncodeSettings(for: context.performanceProfile)
+        var filterParts: [String] = []
+        var args: [String] = [
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-progress", "pipe:1",
+            "-i", context.sourceURL.path
+        ]
+
+        if context.keepRanges.count == 1, let range = context.keepRanges.first {
+            let start = formatTime(max(0, range.start.seconds))
+            let end = formatTime(max(0, (range.start + range.duration).seconds))
+            filterParts.append("[0:v]trim=start=\(start):end=\(end),setpts=PTS-STARTPTS[vout]")
+            if context.hasAudioTrack {
+                filterParts.append("[0:a]atrim=start=\(start):end=\(end),asetpts=PTS-STARTPTS[aout]")
+            }
+        } else {
+            var concatInputs: [String] = []
+            for (index, range) in context.keepRanges.enumerated() {
+                let start = formatTime(max(0, range.start.seconds))
+                let end = formatTime(max(0, (range.start + range.duration).seconds))
+                filterParts.append("[0:v]trim=start=\(start):end=\(end),setpts=PTS-STARTPTS[v\(index)]")
+                concatInputs.append("[v\(index)]")
+                if context.hasAudioTrack {
+                    filterParts.append("[0:a]atrim=start=\(start):end=\(end),asetpts=PTS-STARTPTS[a\(index)]")
+                    concatInputs.append("[a\(index)]")
+                }
+            }
+            if context.hasAudioTrack {
+                filterParts.append(
+                    "\(concatInputs.joined())concat=n=\(context.keepRanges.count):v=1:a=1[vout][aout]"
+                )
+            } else {
+                filterParts.append(
+                    "\(concatInputs.joined())concat=n=\(context.keepRanges.count):v=1:a=0[vout]"
+                )
+            }
+        }
+
+        args.append(contentsOf: [
+            "-filter_complex", filterParts.joined(separator: ";"),
+            "-map", "[vout]",
+            "-c:v", "libx264",
+            "-preset", encode.preset,
+            "-crf", encode.crf,
+            "-pix_fmt", "yuv420p"
+        ])
+        if let threadLimit = encode.threadLimit {
+            args.append(contentsOf: ["-threads", String(threadLimit)])
+        }
+
+        if context.hasAudioTrack {
+            args.append(contentsOf: [
+                "-map", "[aout]",
+                "-c:a", "aac",
+                "-b:a", "192k"
+            ])
+        } else {
+            args.append("-an")
+        }
+
+        args.append(contentsOf: ["-movflags", "+faststart", outputURL.path])
+        return FFmpegCommand(
+            executableURL: tools.ffmpegURL,
+            arguments: args,
+            expectedDurationSeconds: context.expectedOutputDuration
+        )
     }
 
     func exportUsingSegmentedConcat(

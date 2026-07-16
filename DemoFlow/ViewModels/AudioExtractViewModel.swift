@@ -27,11 +27,12 @@ final class AudioExtractViewModel: ObservableObject {
 
     private let service = AudioExtractService()
     private var extractionTask: Task<Void, Never>?
+    private var outputAccessToken: OutputLocationAccessToken?
+    private weak var subscriptionViewModel: SubscriptionViewModel?
+    private var onRequireSubscription: (() -> Void)?
 
     init() {
-        if let restored = DemoFlowOutputDirectoryPolicy.audioOutputDirectoryBookmarkedURL() {
-            outputMP3URL = restored
-        }
+        syncOutputDirectoryFromPolicy()
     }
 
     var canStart: Bool {
@@ -100,9 +101,21 @@ final class AudioExtractViewModel: ObservableObject {
 
     func clearOutputDirectorySelection() {
         DemoFlowOutputDirectoryPolicy.clearAudioOutputDirectorySelection()
-        outputMP3URL = nil
+        syncOutputDirectoryFromPolicy()
         statusMessage = L10n.tr("output.location.audio.empty")
         appendLog("[output] \(statusMessage)")
+    }
+
+    func configureSubscriptionAccess(
+        subscriptionViewModel: SubscriptionViewModel,
+        onRequireSubscription: @escaping () -> Void
+    ) {
+        self.subscriptionViewModel = subscriptionViewModel
+        self.onRequireSubscription = onRequireSubscription
+    }
+
+    func syncOutputDirectoryFromPolicy() {
+        outputMP3URL = DemoFlowOutputDirectoryPolicy.audioOutputDirectoryBookmarkedURL()
     }
 
     private func suggestedOutputFileName() -> String {
@@ -154,8 +167,16 @@ final class AudioExtractViewModel: ObservableObject {
             appendLog("[error] \(statusMessage)")
             return
         }
+        guard requireSubscriptionAccess(for: .audioExtract) else { return }
+
+        guard let accessToken = DemoFlowOutputDirectoryPolicy.makeAudioExtractOutputAccessToken() else {
+            statusMessage = L10n.tr("output.audio.unset_toast")
+            appendLog("[error] \(statusMessage)")
+            return
+        }
 
         isExtracting = true
+        outputAccessToken = accessToken
         statusMessage = L10n.tr("audio.extract.status.running")
         appendLog("[run] \(statusMessage)")
 
@@ -168,6 +189,12 @@ final class AudioExtractViewModel: ObservableObject {
 
         extractionTask?.cancel()
         extractionTask = Task {
+            defer {
+                accessToken.stop()
+                Task { @MainActor in
+                    self.outputAccessToken = nil
+                }
+            }
             do {
                 let result = try await service.extract(
                     sourceType: sourceType,
@@ -206,6 +233,8 @@ final class AudioExtractViewModel: ObservableObject {
         extractionTask?.cancel()
         extractionTask = nil
         service.stopCurrentTask()
+        outputAccessToken?.stop()
+        outputAccessToken = nil
         isExtracting = false
         statusMessage = L10n.tr("audio.extract.status.cancelled")
         appendLog("[stop] \(statusMessage)")
@@ -240,6 +269,17 @@ final class AudioExtractViewModel: ObservableObject {
 
     func clearLogs() {
         logs.removeAll()
+    }
+
+    @discardableResult
+    private func requireSubscriptionAccess(for feature: SubscriptionLockedFeature) -> Bool {
+        guard subscriptionViewModel?.isProUnlocked == true else {
+            statusMessage = L10n.tr(feature.statusMessageKey)
+            appendLog("[subscription] \(statusMessage)")
+            onRequireSubscription?()
+            return false
+        }
+        return true
     }
 
     private func appendLog(_ line: String) {

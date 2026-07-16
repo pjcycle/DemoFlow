@@ -6,6 +6,7 @@
 //
 
 import CoreMedia
+import CoreGraphics
 import Foundation
 
 struct CutRange: Identifiable, Equatable {
@@ -25,6 +26,10 @@ struct CutRange: Identifiable, Equatable {
         }
         return self
     }
+
+    var durationSeconds: Double {
+        max(0, normalized.end.seconds - normalized.start.seconds)
+    }
 }
 
 struct TrimProject: Equatable {
@@ -36,4 +41,11 @@ struct TrimExportRequest {
     let sourceURL: URL
     let keepRanges: [CMTimeRange]
     let outputURL: URL
+}
+
+struct VideoTimelineThumbnail: Identifiable, @unchecked Sendable {
+    let seconds: Double
+    let image: CGImage
+
+    var id: Double { seconds }
 }

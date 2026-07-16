@@ -60,6 +60,9 @@ struct LanguageSettingsView: View {
                 }
             }
         }
+        .sheet(isPresented: privacyPolicySheetBinding) {
+            SettingsPrivacyPolicySheet()
+        }
     }
 
     @ViewBuilder
@@ -85,5 +88,16 @@ struct LanguageSettingsView: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(Color.black.opacity(0.06), lineWidth: 1)
             )
+    }
+
+    private var privacyPolicySheetBinding: Binding<Bool> {
+        Binding(
+            get: { appCoordinator.isPrivacyPolicySheetPresented },
+            set: { isPresented in
+                if !isPresented {
+                    appCoordinator.dismissPrivacyPolicySheet()
+                }
+            }
+        )
     }
 }

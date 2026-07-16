@@ -24,7 +24,10 @@ struct RecordingSettingsView: View {
             microphoneCard
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear(perform: syncCustomBitrateText)
+        .onAppear {
+            syncCustomBitrateText()
+            appCoordinator.autoPresentRecordingControlIfEligible()
+        }
         .onChange(of: appCoordinator.recordingQualityConfig.customVideoBitrateMbps) { _, _ in
             syncCustomBitrateText()
         }
@@ -362,7 +365,7 @@ struct RecordingSettingsView: View {
         if appCoordinator.recorderState.isRecording {
             return appCoordinator.recorderState.isBusy
         }
-        return appCoordinator.recorderState.isBusy || !appCoordinator.canStartRecording
+        return appCoordinator.recorderState.isBusy || !appCoordinator.canPresentRecordingControl
     }
 
     private var microphoneCard: some View {
@@ -414,7 +417,6 @@ struct RecordingSettingsView: View {
     private var isQualityEditingDisabled: Bool {
         appCoordinator.recorderState.isRecording
             || appCoordinator.recorderState.isBusy
-            || appCoordinator.isRecordingArmed
     }
 
     private var resolvedQualitySummary: String {
@@ -593,6 +595,10 @@ struct RecordingSettingsView: View {
 
     private func qualityPresetButton(for preset: RecordingQualityPreset) -> some View {
         Button {
+            guard appCoordinator.subscriptionViewModel.isProUnlocked || !preset.requiresSubscription else {
+                appCoordinator.requestSubscriptionUnlock(for: .recordingQuality)
+                return
+            }
             customBitrateRangeMessage = nil
             updateRecordingQualityConfig { $0.preset = preset }
         } label: {
@@ -610,6 +616,10 @@ struct RecordingSettingsView: View {
                 }
 
                 Spacer(minLength: 10)
+
+                if preset.requiresSubscription {
+                    premiumBadge
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -662,5 +672,17 @@ struct RecordingSettingsView: View {
         }
 
         updateRecordingQualityConfig { $0.customVideoBitrateMbps = rawValue }
+    }
+
+    private var premiumBadge: some View {
+        Text(L10n.tr("subscription.membership.vip"))
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(Color.orange)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(Color.orange.opacity(0.12))
+            )
     }
 }

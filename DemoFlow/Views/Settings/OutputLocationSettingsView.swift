@@ -3,7 +3,7 @@
 //  DemoFlow
 //
 //  2026-06-17 新增：苹果审核 Guideline 2.4.5(i) 整改。
-//  2026-07-08 调整：设置页收敛为单模块，并增加音频工具总输出目录。
+//  2026-07-09 调整：设置页收敛为单卡片，并切换到统一 DemoFlow 输出工作区。
 //
 
 import AppKit
@@ -15,28 +15,41 @@ struct OutputLocationSettingsView: View {
 
     var body: some View {
         settingsCard
+            .sheet(isPresented: privacyPolicySheetBinding) {
+                SettingsPrivacyPolicySheet()
+            }
     }
 
     private var settingsCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Image(systemName: "gearshape")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color(red: 0.89, green: 0.40, blue: 0.19))
-
-                Text(L10n.tr("section.settings.title"))
-                    .font(.headline)
+            header
+            languageRow
+            Divider()
+            workspaceSection
+            Divider()
+            actionRow(
+                title: L10n.tr("subscription.entry.title"),
+                subtitle: L10n.tr("subscription.entry.subtitle"),
+                systemImage: "crown.fill"
+            ) {
+                appCoordinator.openSubscriptionWindow()
             }
-
-            languageSection
-
             Divider()
-
-            recordingsSection
-
+            actionRow(
+                title: L10n.tr("privacy.notice.view"),
+                subtitle: L10n.tr("settings.privacy.subtitle"),
+                systemImage: "lock.shield"
+            ) {
+                appCoordinator.openPrivacyPolicyURL()
+            }
             Divider()
-
-            audioSection
+            actionRow(
+                title: L10n.tr("settings.support.title"),
+                subtitle: L10n.tr("settings.support.subtitle"),
+                systemImage: "envelope"
+            ) {
+                appCoordinator.openSupportEmail()
+            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -57,144 +70,151 @@ struct OutputLocationSettingsView: View {
         .shadow(color: Color.black.opacity(0.05), radius: 6, y: 3)
     }
 
-    private var languageSection: some View {
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "gearshape")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color(red: 0.89, green: 0.40, blue: 0.19))
+
+            Text(L10n.tr("section.settings.title"))
+                .font(.headline)
+        }
+    }
+
+    private var languageRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "globe")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color(red: 0.19, green: 0.48, blue: 0.78))
+
+            Picker(
+                "",
+                selection: Binding(
+                    get: { appCoordinator.languageOption },
+                    set: { appCoordinator.languageOption = $0 }
+                )
+            ) {
+                Text(L10n.tr(L10n.optionAuto)).tag(AppLanguageOption.auto)
+                Text(L10n.tr(L10n.optionChinese)).tag(AppLanguageOption.zhHans)
+                Text(L10n.tr(L10n.optionEnglish)).tag(AppLanguageOption.en)
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 220, alignment: .leading)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var workspaceSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionTitle(
-                L10n.tr("language.settings.card.title"),
-                subtitle: L10n.tr("language.settings.card.description")
-            )
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "folder.badge.gearshape")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(red: 0.23, green: 0.58, blue: 0.35))
 
-            HStack(spacing: 14) {
-                Picker(
-                    L10n.tr("language.settings.picker.label"),
-                    selection: Binding(
-                        get: { appCoordinator.languageOption },
-                        set: { appCoordinator.languageOption = $0 }
-                    )
-                ) {
-                    Text(L10n.tr(L10n.optionAuto)).tag(AppLanguageOption.auto)
-                    Text(L10n.tr(L10n.optionChinese)).tag(AppLanguageOption.zhHans)
-                    Text(L10n.tr(L10n.optionEnglish)).tag(AppLanguageOption.en)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.tr("output.location.workspace.title"))
+                        .font(.headline)
+
+                    pathField(workspacePathText, configured: workspaceConfigured)
+
+                    Text(L10n.tr("output.location.workspace.note"))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .pickerStyle(.menu)
-                .frame(width: 220)
-
-                Text(L10n.tr("language.settings.card.note"))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
 
                 Spacer(minLength: 0)
-
-                Button(L10n.tr("privacy.notice.view")) {
-                    appCoordinator.openPrivacyPolicyURL()
-                }
-                .buttonStyle(.bordered)
-            }
-
-            if let errorMessage = appCoordinator.privacyPolicyOpenErrorMessage, !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var recordingsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle(
-                L10n.tr("output.location.recordings.title"),
-                subtitle: L10n.tr("output.location.recordings.note")
-            )
-
-            HStack(spacing: 10) {
-                pathField(recordingsPathText, configured: recordingsConfigured)
-
-                Button(L10n.tr("output.location.recordings.choose")) {
-                    appCoordinator.requestPickRecordingsDirectory()
-                }
-                .buttonStyle(.bordered)
             }
 
             HStack(spacing: 10) {
-                Button(L10n.tr("output.location.recordings.open")) {
-                    appCoordinator.openRecordingOutputDirectory()
+                if workspaceConfigured {
+                    Button(L10n.tr("output.location.workspace.change")) {
+                        if appCoordinator.requestPickRecordingsDirectory() {
+                            audioExtractViewModel.syncOutputDirectoryFromPolicy()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Button(L10n.tr("output.location.workspace.choose")) {
+                        if appCoordinator.requestPickRecordingsDirectory() {
+                            audioExtractViewModel.syncOutputDirectoryFromPolicy()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                Button(L10n.tr("output.location.workspace.open")) {
+                    appCoordinator.openOutputWorkspaceDirectory()
                 }
                 .buttonStyle(.bordered)
-                .disabled(!recordingsConfigured)
+                .disabled(!workspaceConfigured)
 
-                Button(L10n.tr("output.location.recordings.reset")) {
+                Button(L10n.tr("output.location.workspace.reset")) {
                     appCoordinator.clearRecordingsDirectorySelection()
+                    audioExtractViewModel.syncOutputDirectoryFromPolicy()
                 }
                 .buttonStyle(.bordered)
-                .disabled(!recordingsConfigured)
+                .disabled(!workspaceConfigured)
             }
         }
     }
 
-    private var audioSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle(
-                L10n.tr("output.location.audio.title"),
-                subtitle: L10n.tr("output.location.audio.note")
-            )
-
-            HStack(spacing: 10) {
-                pathField(audioExtractPathText, configured: audioExtractConfigured)
-
-                Button(L10n.tr("output.location.audio.choose")) {
-                    audioExtractViewModel.pickOutputDirectory()
-                }
-                .buttonStyle(.bordered)
-            }
-
-            HStack(spacing: 10) {
-                Button(L10n.tr("output.location.audio.open")) {
-                    audioExtractViewModel.openOutputDirectory()
-                }
-                .buttonStyle(.bordered)
-                .disabled(!audioExtractConfigured)
-
-                Button(L10n.tr("output.location.recordings.reset")) {
-                    audioExtractViewModel.clearOutputDirectorySelection()
-                }
-                .buttonStyle(.bordered)
-                .disabled(!audioExtractConfigured)
-            }
-        }
+    private var workspaceConfigured: Bool {
+        appCoordinator.isOutputWorkspaceConfigured
     }
 
-    private var recordingsConfigured: Bool {
-        appCoordinator.isRecordingsOutputDirectoryConfigured
-    }
-
-    private var recordingsPathText: String {
-        if let path = appCoordinator.recordingsOutputDirectoryPath {
+    private var workspacePathText: String {
+        if let path = appCoordinator.outputWorkspaceRootDirectoryPath {
             return path
         }
-        return L10n.tr("output.location.recordings.empty")
+        return L10n.tr("output.location.workspace.empty")
     }
 
-    private var audioExtractConfigured: Bool {
-        audioExtractViewModel.outputMP3URL != nil
-    }
-
-    private var audioExtractPathText: String {
-        if let path = audioExtractViewModel.outputMP3URL?.path {
-            return path
-        }
-        return L10n.tr("output.location.audio.empty")
+    private var privacyPolicySheetBinding: Binding<Bool> {
+        Binding(
+            get: { appCoordinator.isPrivacyPolicySheetPresented },
+            set: { isPresented in
+                if !isPresented {
+                    appCoordinator.dismissPrivacyPolicySheet()
+                }
+            }
+        )
     }
 
     @ViewBuilder
-    private func sectionTitle(_ title: String, subtitle: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.headline)
-            Text(subtitle)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+    private func actionRow(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color(red: 0.54, green: 0.42, blue: 0.17))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(Color.primary)
+
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder

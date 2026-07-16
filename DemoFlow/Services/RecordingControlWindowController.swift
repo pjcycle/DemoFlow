@@ -9,7 +9,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-enum RecordingControlMode {
+enum RecordingControlMode: Equatable {
     case ready
     case recording
     case paused
@@ -29,7 +29,7 @@ struct RecordingControlDisplayModel: Equatable {
     var canClose: Bool
 
     static let `default` = RecordingControlDisplayModel(
-        elapsedDisplay: "00:00:00",
+        elapsedDisplay: "00:00",
         captureSizeDisplay: "-- x --",
         captureMode: .fullScreen,
         selectedFixedCapturePreset: nil,
@@ -307,8 +307,8 @@ final class RecordingControlWindowController: NSObject {
         let visible = screen.visibleFrame
         let size = panel.frame.size
         return CGRect(
-            x: visible.maxX - size.width - 26,
-            y: visible.maxY - size.height - 74,
+            x: visible.midX - (size.width / 2.0),
+            y: visible.maxY - size.height - 10,
             width: size.width,
             height: size.height
         )
@@ -341,7 +341,7 @@ private final class RecordingControlView: NSView {
     var onCloseTapped: (() -> Void)?
 
     private let effectView = NSVisualEffectView()
-    private let elapsedLabel = NSTextField(labelWithString: "00:00:00")
+    private let elapsedLabel = NSTextField(labelWithString: "00:00")
     private let captureSizeButton = NSButton(title: "-- x --", target: nil, action: nil)
     private let regionButton = NSButton(title: "", target: nil, action: nil)
     private let pipButton = NSButton(title: "", target: nil, action: nil)

@@ -7,6 +7,7 @@
 
 import AVFoundation
 import Combine
+import CoreGraphics
 import CoreMedia
 import Foundation
 import UniformTypeIdentifiers
@@ -17,8 +18,7 @@ final class VideoCuttingViewModel: ObservableObject {
     @Published var sourceDuration: Double = 0
     @Published var keepStartText: String = "0"
     @Published var keepEndText: String = "10"
-    @Published var deleteRanges: [CutRange] = []
-    @Published var selectedDeleteRangeID: UUID?
+    @Published var activeDeleteRange: CutRange?
     @Published var statusMessage: String = L10n.tr("legacy.key_202")
     @Published var isExporting = false
     @Published var exportURL: URL?
@@ -44,6 +44,7 @@ final class VideoCuttingViewModel: ObservableObject {
     @Published private(set) var isFFmpegReady = false
     @Published private(set) var isUsingBuiltinComposeFallback = false
     @Published private(set) var ffmpegStatusMessage: String = ""
+    @Published private(set) var timelineThumbnails: [VideoTimelineThumbnail] = []
 
     private let trimEngine: TrimExportEngine
     private let composeExportEngine = VideoCuttingComposeExportEngine()
@@ -55,11 +56,15 @@ final class VideoCuttingViewModel: ObservableObject {
     private let exportService = VideoCuttingExportService()
     private var cancellables: Set<AnyCancellable> = []
     private var timeObserverToken: Any?
+    private var timelineThumbnailGenerationID = UUID()
+    private var pendingReloadPlaybackPosition: Double?
     private let defaultFPS: Double = 30
     private let minimumFrameDuration: Double = 1.0 / 120.0
     private let maximumFrameDuration: Double = 1.0
     private let cropMinPoints = CGSize(width: 120, height: 120)
     private let normalizedAspectMatchTolerance: CGFloat = 0.001
+    private weak var subscriptionViewModel: SubscriptionViewModel?
+    private var onRequireSubscription: (() -> Void)?
     let player = AVPlayer()
     let noiseReductionStep: Double = 10
     var onPrimaryExportCompleted: ((URL) -> Void)?
@@ -76,24 +81,37 @@ final class VideoCuttingViewModel: ObservableObject {
         }
     }
 
+    func configureSubscriptionAccess(
+        subscriptionViewModel: SubscriptionViewModel,
+        onRequireSubscription: @escaping () -> Void
+    ) {
+        self.subscriptionViewModel = subscriptionViewModel
+        self.onRequireSubscription = onRequireSubscription
+    }
+
     var canExport: Bool {
         sourceURL != nil && !isBusy && sourceDuration > 0 && isExportSizeInputValid
     }
 
-    var canDeleteSelectedRangeAndReload: Bool {
-        guard sourceURL != nil, !isBusy, sourceDuration > 0, let selectedDeleteRange else { return false }
-        let normalized = normalizeDeleteRanges([selectedDeleteRange])
+    var canDeleteActiveRangeAndReload: Bool {
+        guard sourceURL != nil, !isBusy, sourceDuration > 0, let activeDeleteRange else { return false }
+        let normalized = normalizeDeleteRanges([activeDeleteRange])
         guard !normalized.isEmpty else { return false }
         let keepRanges = trimEngine.keepRanges(from: normalized, sourceDuration: makeDurationTime())
         return !keepRanges.isEmpty
     }
 
-    var canApplyAllDeleteRangesAndReload: Bool {
-        guard sourceURL != nil, !isBusy, sourceDuration > 0 else { return false }
-        let normalized = normalizeDeleteRanges(deleteRanges)
-        guard !normalized.isEmpty else { return false }
-        let keepRanges = trimEngine.keepRanges(from: normalized, sourceDuration: makeDurationTime())
-        return !keepRanges.isEmpty
+    var activeDeleteRangeSummaryText: String {
+        guard let activeDeleteRange else { return L10n.tr("video.delete.selection.none") }
+        let start = formatTime(activeDeleteRange.start.seconds)
+        let end = formatTime(activeDeleteRange.end.seconds)
+        let duration = formatTime(activeDeleteRange.durationSeconds)
+        return L10n.f("fmt.video.delete.selection.current", start, end, duration)
+    }
+
+    var activeDeleteRangeDurationText: String {
+        guard let activeDeleteRange else { return "--" }
+        return formatTime(activeDeleteRange.durationSeconds)
     }
 
     var canExecuteCrop: Bool {
@@ -131,11 +149,6 @@ final class VideoCuttingViewModel: ObservableObject {
             : L10n.tr("ffmpeg.permission.status.not_ready")
     }
 
-    var selectedDeleteRange: CutRange? {
-        guard let selectedDeleteRangeID else { return nil }
-        return deleteRanges.first { $0.id == selectedDeleteRangeID }
-    }
-
     var allowedImportTypes: [UTType] {
         importService.allowedTypes
     }
@@ -146,7 +159,7 @@ final class VideoCuttingViewModel: ObservableObject {
             abs(crop.minY) <= 0.0005 &&
             abs(crop.width - 1) <= 0.0005 &&
             abs(crop.height - 1) <= 0.0005
-        return full && normalizeDeleteRanges(deleteRanges).isEmpty
+        return full
     }
 
     func importByPanel() {
@@ -171,6 +184,12 @@ final class VideoCuttingViewModel: ObservableObject {
         loadVideo(url: normalizedURL)
     }
 
+    func autoImportLatestRecentRecordingIfNeeded(within seconds: TimeInterval = 600) {
+        guard sourceURL == nil else { return }
+        guard let recentURL = latestRecentRecordingURL(within: seconds) else { return }
+        importFromRecordingOutput(recentURL)
+    }
+
     func clearImportedVideo() {
         guard let currentSourceURL = sourceURL else { return }
         let normalizedSource = currentSourceURL.standardizedFileURL
@@ -185,8 +204,7 @@ final class VideoCuttingViewModel: ObservableObject {
         sourceDuration = 0
         keepStartText = "0"
         keepEndText = "10"
-        deleteRanges = []
-        selectedDeleteRangeID = nil
+        activeDeleteRange = nil
         exportURL = nil
         selectedAspectPreset = .adaptive
         exportSizeMode = .source
@@ -200,10 +218,13 @@ final class VideoCuttingViewModel: ObservableObject {
         sourceVideoSize = .zero
         sourceVideoAspect = 16.0 / 9.0
         cropRectNormalized = .full
+        timelineThumbnails = []
+        timelineThumbnailGenerationID = UUID()
         isNoiseReductionEnabled = false
         noiseReductionPercent = 50
         selectedAudioEQPreset = .balanced
         hasAudioTrack = false
+        pendingReloadPlaybackPosition = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         statusMessage = L10n.tr("video.cut.source.removed")
@@ -259,17 +280,7 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
 
-        var ranges: [CutRange] = []
-        if lower > 0 {
-            ranges.append(makeCutRange(start: 0, end: lower))
-        }
-        if upper < sourceDuration {
-            ranges.append(makeCutRange(start: upper, end: sourceDuration))
-        }
-
-        keepStartText = formatSecondsForInput(lower)
-        keepEndText = formatSecondsForInput(upper)
-        applyDeleteRangeEdit(ranges, preferSelection: nil, editMessage: L10n.tr("legacy.key_87"))
+        setActiveDeleteRange(start: lower, end: upper, editMessage: L10n.tr("legacy.key_87"))
     }
 
     func addDeleteRangeAtPlayhead() {
@@ -284,10 +295,7 @@ final class VideoCuttingViewModel: ObservableObject {
             statusMessage = L10n.tr("legacy.key_150")
             return
         }
-        var updated = deleteRanges
-        let range = makeCutRange(start: start, end: end)
-        updated.append(range)
-        applyDeleteRangeEdit(updated, preferSelection: range.id, editMessage: L10n.tr("legacy.key_91"))
+        setActiveDeleteRange(start: start, end: end, editMessage: L10n.tr("legacy.key_91"))
     }
 
     func suggestedDeleteRangeInput(defaultLength: Double = 5.0) -> (start: String, end: String) {
@@ -334,56 +342,70 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
 
-        let range = makeCutRange(start: lower, end: upper)
-        var updated = deleteRanges
-        updated.append(range)
+        setActiveDeleteRange(start: lower, end: upper, editMessage: L10n.tr("legacy.key_91"))
+    }
+
+    func setActiveDeleteRange(start: Double, end: Double, editMessage: String? = nil) {
+        guard hasSource else { return }
+        let snappedStart = snapToFrame(start)
+        let snappedEnd = snapToFrame(end)
+        let lower = min(snappedStart, snappedEnd)
+        let upper = max(snappedStart, snappedEnd)
+        guard upper > lower else { return }
+
+        let normalized = normalizeDeleteRanges([makeCutRange(start: lower, end: upper)]).first
+        activeDeleteRange = normalized
         keepStartText = formatSecondsForInput(lower)
         keepEndText = formatSecondsForInput(upper)
-        applyDeleteRangeEdit(updated, preferSelection: range.id, editMessage: L10n.tr("legacy.key_91"))
-    }
 
-    func updateDeleteRange(id: UUID, start: Double? = nil, end: Double? = nil) {
-        guard let index = deleteRanges.firstIndex(where: { $0.id == id }) else { return }
-        var range = deleteRanges[index]
-        if let start {
-            range.start = makeTime(snapToFrame(start))
+        if let editMessage {
+            statusMessage = editMessage
         }
-        if let end {
-            range.end = makeTime(snapToFrame(end))
+    }
+
+    func updateActiveDeleteRange(start: Double? = nil, end: Double? = nil) {
+        guard let activeDeleteRange else { return }
+        let nextStart = start ?? activeDeleteRange.start.seconds
+        let nextEnd = end ?? activeDeleteRange.end.seconds
+        setActiveDeleteRange(start: nextStart, end: nextEnd)
+    }
+
+    func moveActiveDeleteRange(by secondsDelta: Double) {
+        guard let activeDeleteRange else { return }
+        let duration = activeDeleteRange.durationSeconds
+        guard duration > 0 else { return }
+
+        let desiredStart = activeDeleteRange.start.seconds + secondsDelta
+        let clampedStart = max(0, min(desiredStart, sourceDuration - duration))
+        setActiveDeleteRange(start: clampedStart, end: clampedStart + duration)
+    }
+
+    func clearActiveDeleteRange(showStatus: Bool = false) {
+        guard activeDeleteRange != nil else { return }
+        activeDeleteRange = nil
+        if showStatus {
+            statusMessage = L10n.tr("video.delete.selection.cleared")
         }
-        var updated = deleteRanges
-        updated[index] = range
-        applyDeleteRangeEdit(updated, preferSelection: id)
     }
 
-    func removeDeleteRange(id: UUID) {
-        let updated = deleteRanges.filter { $0.id != id }
-        applyDeleteRangeEdit(updated, preferSelection: selectedDeleteRangeID, editMessage: L10n.tr("legacy.key_83"))
-    }
-
-    func removeSelectedDeleteRange() {
-        guard let selectedDeleteRangeID else { return }
-        removeDeleteRange(id: selectedDeleteRangeID)
-    }
-
-    func deleteSelectedRangeAndReload() {
+    func deleteActiveRangeAndReload() {
         guard let sourceURL else {
             statusMessage = L10n.tr("legacy.key_26")
             return
         }
-        guard let selectedDeleteRange else {
+        guard let activeDeleteRange else {
             statusMessage = L10n.tr("legacy.key_27")
             return
         }
 
-        let normalized = normalizeDeleteRanges([selectedDeleteRange])
-        guard let selectedRange = normalized.first else {
+        let normalized = normalizeDeleteRanges([activeDeleteRange])
+        guard let activeRange = normalized.first else {
             statusMessage = L10n.tr("legacy.key_28")
             return
         }
 
         let sourceDuration = makeDurationTime()
-        let keepRanges = trimEngine.keepRanges(from: [selectedRange], sourceDuration: sourceDuration)
+        let keepRanges = trimEngine.keepRanges(from: [activeRange], sourceDuration: sourceDuration)
         guard !keepRanges.isEmpty else {
             statusMessage = L10n.tr("legacy.key_29")
             return
@@ -402,6 +424,13 @@ final class VideoCuttingViewModel: ObservableObject {
         Task {
             defer { isExporting = false }
             do {
+                let expectedOutputDuration = keepRanges.reduce(0) { partial, range in
+                    partial + max(0, range.duration.seconds)
+                }
+                pendingReloadPlaybackPosition = preferredReloadPlaybackPositionAfterDeleting(
+                    deletedRange: activeRange,
+                    expectedOutputDuration: expectedOutputDuration
+                )
                 let exported = try await runFFmpegExport(
                     sourceURL: sourceURL,
                     keepRanges: keepRanges,
@@ -414,71 +443,34 @@ final class VideoCuttingViewModel: ObservableObject {
                 cleanupInlineEditArtifacts(previousSourceURL: sourceURL, keeping: exported)
                 statusMessage = L10n.f("fmt.video.delete_selected_reloaded", exported.lastPathComponent)
             } catch {
+                pendingReloadPlaybackPosition = nil
                 statusMessage = L10n.f("fmt.video.delete_failed", error.localizedDescription)
             }
         }
     }
 
-    func applyAllDeleteRangesAndReload() {
-        guard let sourceURL else {
-            statusMessage = L10n.tr("legacy.key_26")
-            return
-        }
-
-        let normalized = normalizeDeleteRanges(deleteRanges)
-        guard !normalized.isEmpty else {
-            statusMessage = L10n.tr("legacy.key_27")
-            return
-        }
-
-        let keepRanges = trimEngine.keepRanges(from: normalized, sourceDuration: makeDurationTime())
-        guard !keepRanges.isEmpty else {
-            statusMessage = L10n.tr("legacy.key_153")
-            return
-        }
-
-        let outputURL: URL
-        do {
-            outputURL = try makeInlineTrimOutputURL(for: sourceURL, suffix: "cutall")
-        } catch {
-            statusMessage = L10n.tr("legacy.key_25")
-            return
-        }
-
-        isExporting = true
-        statusMessage = L10n.tr("legacy.key_170")
-        Task {
-            defer { isExporting = false }
-            do {
-                let exported = try await runFFmpegExport(
-                    sourceURL: sourceURL,
-                    keepRanges: keepRanges,
-                    cropRectNormalized: .full,
-                    outputURL: outputURL,
-                    applyAudioProcessing: false,
-                    performanceProfile: .balanced
-                )
-                loadVideo(url: exported)
-                cleanupInlineEditArtifacts(previousSourceURL: sourceURL, keeping: exported)
-                statusMessage = L10n.f("fmt.video.delete_selected_reloaded", exported.lastPathComponent)
-            } catch {
-                statusMessage = L10n.f("fmt.video.delete_failed", error.localizedDescription)
-            }
-        }
+    func activeDeleteRangeStartSeconds() -> Double? {
+        guard let activeDeleteRange else { return nil }
+        return clampedSeconds(activeDeleteRange.normalized.start.seconds)
     }
 
-    func selectDeleteRange(id: UUID?) {
-        selectedDeleteRangeID = id
+    func activeDeleteRangeEndSeconds() -> Double? {
+        guard let activeDeleteRange else { return nil }
+        return clampedSeconds(activeDeleteRange.normalized.end.seconds)
     }
 
-    func deleteRangeStartSeconds(for id: UUID) -> Double {
-        guard let range = deleteRanges.first(where: { $0.id == id }) else { return 0 }
-        return clampedSeconds(range.normalized.start.seconds)
-    }
+    private func preferredReloadPlaybackPositionAfterDeleting(
+        deletedRange: CutRange,
+        expectedOutputDuration: Double
+    ) -> Double {
+        let frame = max(normalizedFrameDuration, 1.0 / 60.0)
+        let clippedDuration = max(0, expectedOutputDuration)
+        guard clippedDuration > frame else { return 0 }
 
-    func deleteRangeEndSeconds(for id: UUID) -> Double {
-        guard let range = deleteRanges.first(where: { $0.id == id }) else { return 0 }
-        return clampedSeconds(range.normalized.end.seconds)
+        if deletedRange.start.seconds > frame {
+            return min(deletedRange.start.seconds - frame, clippedDuration - frame)
+        }
+        return min(frame, clippedDuration - frame)
     }
 
     func exportTrimmedVideo() {
@@ -500,14 +492,14 @@ final class VideoCuttingViewModel: ObservableObject {
             statusMessage = L10n.tr("video.cut.export_size.upscale_cancelled")
             return
         }
+        guard requireSubscriptionAccess(for: .videoExport) else { return }
 
         guard let outputURL = exportService.pickOutputURL(suggestedName: suggestedOutputName(for: sourceURL)) else {
             statusMessage = L10n.tr("legacy.key_85")
             return
         }
 
-        let normalizedDeleteRanges = normalizeDeleteRanges(deleteRanges)
-        let keepRanges = trimEngine.keepRanges(from: normalizedDeleteRanges, sourceDuration: makeDurationTime())
+        let keepRanges = trimEngine.keepRanges(from: [], sourceDuration: makeDurationTime())
         guard !keepRanges.isEmpty else {
             statusMessage = L10n.tr("legacy.key_153")
             return
@@ -574,6 +566,16 @@ final class VideoCuttingViewModel: ObservableObject {
         applyAudioPreviewProcessing()
     }
 
+    @discardableResult
+    private func requireSubscriptionAccess(for feature: SubscriptionLockedFeature) -> Bool {
+        guard subscriptionViewModel?.isProUnlocked == true else {
+            statusMessage = L10n.tr(feature.statusMessageKey)
+            onRequireSubscription?()
+            return false
+        }
+        return true
+    }
+
     func applyAudioPreviewProcessing() {
         guard hasSource else { return }
         guard hasAudioTrack else { return }
@@ -584,7 +586,7 @@ final class VideoCuttingViewModel: ObservableObject {
 
         Task {
             let asset = AVAssetAsyncLoaders.makeURLAsset(sourceURL)
-            let item = await makePlayerItem(for: asset)
+            let item = await makePlayerItem(for: asset, hasAudioTrack: hasAudioTrack)
             await MainActor.run {
                 self.player.replaceCurrentItem(with: item)
                 let seekTime = self.makeTime(self.playbackPosition)
@@ -616,8 +618,7 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
 
-        let normalizedDeleteRanges = normalizeDeleteRanges(deleteRanges)
-        let keepRanges = trimEngine.keepRanges(from: normalizedDeleteRanges, sourceDuration: makeDurationTime())
+        let keepRanges = trimEngine.keepRanges(from: [], sourceDuration: makeDurationTime())
         guard !keepRanges.isEmpty else {
             statusMessage = L10n.tr("legacy.key_153")
             return
@@ -856,11 +857,45 @@ final class VideoCuttingViewModel: ObservableObject {
         return normalizedAspectRatio
     }
 
+    private func latestRecentRecordingURL(within seconds: TimeInterval) -> URL? {
+        guard seconds > 0 else { return nil }
+        guard let directory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
+            return nil
+        }
+
+        let cutoff = Date().addingTimeInterval(-seconds)
+        let fileManager = FileManager.default
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        let candidates = urls.compactMap { url -> (url: URL, date: Date)? in
+            guard importService.isSupportedVideo(url: url) else { return nil }
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey, .creationDateKey]),
+                  values.isRegularFile == true else {
+                return nil
+            }
+            let date = values.contentModificationDate ?? values.creationDate ?? .distantPast
+            guard date >= cutoff else { return nil }
+            return (url.standardizedFileURL, date)
+        }
+
+        return candidates.max(by: { $0.date < $1.date })?.url
+    }
+
     private func loadVideo(url: URL) {
         guard importService.isSupportedVideo(url: url) else {
             statusMessage = L10n.tr("legacy.mp4_mov")
             return
         }
+        let normalizedURL = url.standardizedFileURL
+        let generationID = UUID()
+        timelineThumbnailGenerationID = generationID
+        timelineThumbnails = []
         Task {
             let asset = AVAssetAsyncLoaders.makeURLAsset(url)
             do {
@@ -873,23 +908,31 @@ final class VideoCuttingViewModel: ObservableObject {
                 }
 
                 let hasAudioTrack = await updateFrameInfo(from: asset)
-                let item = await makePlayerItem(for: asset)
+                let item = await makePlayerItem(for: asset, hasAudioTrack: hasAudioTrack)
+                let initialPlaybackPosition = await MainActor.run { () -> Double in
+                    let pending = self.pendingReloadPlaybackPosition
+                    self.pendingReloadPlaybackPosition = nil
+                    return min(max(pending ?? 0, 0), duration)
+                }
 
                 await MainActor.run {
                     self.sourceURL = url
                     self.sourceDuration = duration
                     self.keepStartText = self.formatSecondsForInput(0)
                     self.keepEndText = self.formatSecondsForInput(duration)
-                    self.deleteRanges = []
-                    self.selectedDeleteRangeID = nil
+                    self.activeDeleteRange = nil
                     self.cropRectNormalized = .full
                     self.exportURL = nil
-                    self.playbackPosition = 0
+                    self.playbackPosition = initialPlaybackPosition
                     self.hasPlaybackReady = true
                     self.hasAudioTrack = hasAudioTrack
                     self.player.pause()
                     self.player.replaceCurrentItem(with: item)
-                    self.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+                    self.player.seek(
+                        to: self.makeTime(initialPlaybackPosition),
+                        toleranceBefore: .zero,
+                        toleranceAfter: .zero
+                    )
                     self.isPlaying = false
                     self.exportSizeMode = .source
                     self.syncCustomExportSizeToCurrentRealSize()
@@ -899,46 +942,18 @@ final class VideoCuttingViewModel: ObservableObject {
                         self.statusMessage = L10n.f("fmt.video.imported_no_audio_track", url.lastPathComponent)
                     }
                 }
+                await loadTimelineThumbnails(
+                    from: normalizedURL,
+                    duration: duration,
+                    generationID: generationID
+                )
             } catch {
                 await MainActor.run {
+                    self.pendingReloadPlaybackPosition = nil
                     self.statusMessage = L10n.f("fmt.video.import_failed", error.localizedDescription)
                 }
             }
         }
-    }
-
-    private func applyDeleteRangeEdit(_ ranges: [CutRange], preferSelection: UUID?, editMessage: String? = nil) {
-        let normalized = normalizeDeleteRanges(ranges)
-        deleteRanges = normalized
-        resolveSelection(preferSelection: preferSelection)
-
-        let keepRanges = trimEngine.keepRanges(from: normalized, sourceDuration: makeDurationTime())
-        if keepRanges.isEmpty {
-            statusMessage = L10n.tr("legacy.key_153")
-            return
-        }
-
-        if normalized.isEmpty {
-            statusMessage = L10n.tr("legacy.key_105")
-            return
-        }
-
-        if let editMessage {
-            statusMessage = L10n.f("fmt.video.edit_message_with_delete_count", editMessage, normalized.count)
-        } else {
-            statusMessage = L10n.f("fmt.video.delete_ranges_updated", normalized.count)
-        }
-    }
-
-    private func resolveSelection(preferSelection: UUID?) {
-        if let preferSelection, deleteRanges.contains(where: { $0.id == preferSelection }) {
-            selectedDeleteRangeID = preferSelection
-            return
-        }
-        if let selectedDeleteRangeID, deleteRanges.contains(where: { $0.id == selectedDeleteRangeID }) {
-            return
-        }
-        selectedDeleteRangeID = deleteRanges.first?.id
     }
 
     private func updateFrameInfo(from asset: AVAsset) async -> Bool {
@@ -1097,7 +1112,23 @@ final class VideoCuttingViewModel: ObservableObject {
         VideoCropGeometry.normalizeMinSize(minPoints: cropMinPoints, videoDisplaySize: displaySize)
     }
 
-    private func makePlayerItem(for asset: AVAsset) async -> AVPlayerItem {
+    private func loadTimelineThumbnails(
+        from sourceURL: URL,
+        duration: Double,
+        generationID: UUID
+    ) async {
+        let thumbnails = await Task.detached(priority: .utility) {
+            try? await VideoTimelineThumbnailService.makeThumbnails(from: sourceURL, duration: duration)
+        }.value ?? []
+
+        await MainActor.run {
+            guard self.timelineThumbnailGenerationID == generationID else { return }
+            guard self.sourceURL?.standardizedFileURL == sourceURL else { return }
+            self.timelineThumbnails = thumbnails
+        }
+    }
+
+    private func makePlayerItem(for asset: AVAsset, hasAudioTrack: Bool) async -> AVPlayerItem {
         let item = AVPlayerItem(asset: asset)
         guard hasAudioTrack else { return item }
         guard let track = try? await AVAssetAsyncLoaders.firstTrack(in: item.asset, mediaType: .audio) else { return item }
@@ -1394,5 +1425,40 @@ final class VideoCuttingViewModel: ObservableObject {
             return String(format: "%d:%02d:%02d", hours, minutes, secs)
         }
         return String(format: "%02d:%02d", minutes, secs)
+    }
+}
+
+private struct VideoTimelineThumbnailService: Sendable {
+    nonisolated private static let maximumThumbnailCount = 14
+    nonisolated private static let maximumThumbnailSize = CGSize(width: 180, height: 102)
+
+    nonisolated static func makeThumbnails(from sourceURL: URL, duration: Double) async throws -> [VideoTimelineThumbnail] {
+        guard duration > 0 else { return [] }
+
+        let asset = AVURLAsset(url: sourceURL)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = maximumThumbnailSize
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.05, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.05, preferredTimescale: 600)
+
+        var thumbnails: [VideoTimelineThumbnail] = []
+        for seconds in sampleTimes(duration: duration) {
+            let time = CMTime(seconds: seconds, preferredTimescale: 600)
+            guard let result = try? await generator.image(at: time) else { continue }
+            thumbnails.append(VideoTimelineThumbnail(seconds: seconds, image: result.image))
+        }
+        return thumbnails
+    }
+
+    nonisolated private static func sampleTimes(duration: Double) -> [Double] {
+        let count = min(maximumThumbnailCount, max(6, Int(duration.rounded(.up))))
+        guard count > 0 else { return [] }
+
+        return (0..<count).map { index in
+            let ratio = (Double(index) + 0.5) / Double(count)
+            let sampled = duration * ratio
+            return min(max(sampled, 0), max(duration - 0.001, 0))
+        }
     }
 }
