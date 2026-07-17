@@ -1,7 +1,8 @@
 # Xcode
 build/
 *.xcodeproj/xcuserdata/
-*.xcodeproj/xcshareddata/xcschemes/DemoFlow.xcscheme
+*.xcodeproj/xcshareddata/xcschemes/*.xcscheme
+!DemoFlow.xcodeproj/xcshareddata/xcschemes/DemoFlow.xcscheme
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcworkspace/xcshareddata/swiftpm/Package.resolved
 *.xcworkspace/xcuserdata/

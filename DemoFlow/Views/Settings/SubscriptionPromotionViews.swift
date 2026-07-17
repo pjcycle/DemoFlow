@@ -6,6 +6,7 @@
 //  2026-07-11 进一步调整：改为系统窗口承载，卡片收敛为更紧凑的竖卡。
 //
 
+import AppKit
 import SwiftUI
 
 enum SubscriptionWindowLayout {
@@ -186,6 +187,28 @@ struct SubscriptionWindowView: View {
             }
 
             #if DEBUG
+            Text(subscriptionViewModel.debugRunMarkerMessage)
+                .font(.caption2.monospaced())
+                .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
+                .lineLimit(2)
+                .truncationMode(.middle)
+
+            HStack(spacing: 8) {
+                Button {
+                    SubscriptionDiagnosticsStore.shared.openLogFile()
+                } label: {
+                    Label(L10n.tr("subscription.debug.open_log"), systemImage: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Text(L10n.f("subscription.debug.log_path", SubscriptionDiagnosticsStore.shared.logFileURL.path))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
             if let debugFallbackExpirationText = subscriptionViewModel.debugFallbackExpirationText {
                 Text(debugFallbackExpirationText)
                     .font(.caption)

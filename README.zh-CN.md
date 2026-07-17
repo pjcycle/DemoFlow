@@ -9,6 +9,7 @@
 [![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
 
 DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄像头、屏幕画笔、视频裁剪，以及通过既有“音频提取（MP3）”入口承载的统一音频工具台。
+同时提供独立的“配音字幕”工作台，包含视频配音、AI口播和字幕同步。
 
 ## 模块
 
