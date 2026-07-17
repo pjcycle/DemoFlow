@@ -212,6 +212,9 @@ enum SubscriptionLockedFeature: String, CaseIterable, Identifiable, Codable {
     case audioExtract
     case audioTranscode
     case audioTrimExport
+    case subDubVideoExport
+    case subDubAI
+    case subDubSubtitle
 
     var id: String { rawValue }
 
@@ -229,6 +232,12 @@ enum SubscriptionLockedFeature: String, CaseIterable, Identifiable, Codable {
             return "subscription.lock.audio_transcode"
         case .audioTrimExport:
             return "subscription.lock.audio_trim_export"
+        case .subDubVideoExport:
+            return "subscription.lock.subdub_video_export"
+        case .subDubAI:
+            return "subscription.lock.subdub_ai"
+        case .subDubSubtitle:
+            return "subscription.lock.subdub_subtitle"
         }
     }
 }

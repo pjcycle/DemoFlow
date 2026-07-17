@@ -30,9 +30,32 @@ final class SubscriptionViewModel: ObservableObject {
     private var transactionObserverTask: Task<Void, Never>?
 #if DEBUG
     private var lastProductLoadDiagnostics: String?
+    private let debugBuildMarker = "SUBSCRIPTION-DIAG-2026-07-17-CANONICAL-STOREKIT"
+
+    var debugRunMarkerMessage: String {
+        let bundlePath = Bundle.main.bundleURL.path
+        let returnedCount = products.count
+        let bundledCount = bundledStoreKitProductCount
+        return "\(debugBuildMarker) | app=\(bundlePath) | bundledConfig=\(bundledCount)/\(SubscriptionPlan.allCases.count) (expected 0; StoreKit is Scheme-mounted) | products=\(returnedCount)/\(SubscriptionPlan.allCases.count) | scheme=DemoFlow.storekit"
+    }
+
+    private var bundledStoreKitProductCount: Int {
+        guard let url = Bundle.main.url(forResource: "DemoFlow", withExtension: "storekit"),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return 0
+        }
+
+        let directProducts = object["products"] as? [[String: Any]] ?? []
+        let groups = object["subscriptionGroups"] as? [[String: Any]] ?? []
+        let subscriptions = groups.reduce(0) { count, group in
+            count + ((group["subscriptions"] as? [[String: Any]])?.count ?? 0)
+        }
+        return directProducts.count + subscriptions
+    }
 
     var productLoadDiagnosticsMessage: String? {
-        guard isUsingDebugFallback,
+        guard !hasLoadedAllProducts,
               let lastProductLoadDiagnostics,
               !lastProductLoadDiagnostics.isEmpty else {
             return nil
@@ -90,12 +113,16 @@ final class SubscriptionViewModel: ObservableObject {
     #endif
 
     func bootstrap() async {
+        diagnosticsLog("bootstrap begin; bundle=\(Bundle.main.bundleURL.path); bundleID=\(Bundle.main.bundleIdentifier ?? "<missing>"); version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "<missing>"); build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "<missing>"); arguments=\(ProcessInfo.processInfo.arguments.joined(separator: " | "))")
+        diagnosticsLogBundledStoreKitResources()
         if !hasBootstrapped {
             hasBootstrapped = true
             startTransactionObserverIfNeeded()
+            diagnosticsLog("transaction observer started")
         }
         await loadProductsIfNeeded()
         await refreshEntitlements()
+        diagnosticsLog("bootstrap end; products=\(products.count)/\(SubscriptionPlan.allCases.count); activePlan=\(activePlan?.rawValue ?? "free"); fallback=\(isUsingDebugFallback)")
     }
 
     func loadProductsIfNeeded(forceReload: Bool = false) async {
@@ -109,7 +136,10 @@ final class SubscriptionViewModel: ObservableObject {
         var nextProducts: [SubscriptionPlan: Product] = [:]
         var lastError: Error?
 
+        diagnosticsLog("product load begin; requested=[\(requestedProductIDs.joined(separator: ", "))]")
+
         for attempt in 0..<3 {
+            diagnosticsLog("product load attempt \(attempt + 1)/3 begin")
             do {
                 let loaded = try await Product.products(for: requestedProductIDs)
                 lastError = nil
@@ -124,7 +154,17 @@ final class SubscriptionViewModel: ObservableObject {
                     .sorted()
                     .joined(separator: ", ")
                 lastProductLoadDiagnostics = "requested=[\(requestedProductIDs.joined(separator: ", "))] returned=[\(returnedIDs)] missing=[\(missingIDs)]"
+                diagnosticsLog("product load attempt \(attempt + 1)/3 result; returned=[\(returnedIDs)]; missing=[\(missingIDs)]; count=\(loaded.count)")
                 NSLog("[Subscription] Product load attempt %d: %@", attempt + 1, lastProductLoadDiagnostics ?? "")
+                NSLog("[Subscription] %@", debugRunMarkerMessage)
+#endif
+
+#if !DEBUG
+                let returnedIDs = loaded.map(\.id).sorted().joined(separator: ", ")
+                let missingIDs = requestedProductIDs.filter { id in !loaded.contains(where: { $0.id == id }) }
+                    .sorted()
+                    .joined(separator: ", ")
+                diagnosticsLog("product load attempt \(attempt + 1)/3 result; returned=[\(returnedIDs)]; missing=[\(missingIDs)]; count=\(loaded.count)")
 #endif
 
                 if nextProducts.count == totalProductCount || !nextProducts.isEmpty {
@@ -133,6 +173,7 @@ final class SubscriptionViewModel: ObservableObject {
             } catch {
                 lastError = error
                 debugLogProductLoadFailure(error)
+                diagnosticsLog("product load attempt \(attempt + 1)/3 error; \(diagnosticErrorDescription(error))")
 #if DEBUG
                 lastProductLoadDiagnostics = "requested=[\(requestedProductIDs.joined(separator: ", "))] error=\(error.localizedDescription)"
 #endif
@@ -143,6 +184,7 @@ final class SubscriptionViewModel: ObservableObject {
         }
 
         products = nextProducts
+        diagnosticsLog("product load end; products=\(nextProducts.count)/\(totalProductCount); lastError=\(lastError.map(diagnosticErrorDescription) ?? "none"); fallbackAllowed=\(diagnosticsFallbackAllowed); fallbackActive=\(isUsingDebugFallback)")
         if nextProducts.count == totalProductCount {
             isUsingDebugFallback = false
             statusMessage = L10n.tr("subscription.status.products_loaded")
@@ -189,6 +231,7 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     func purchase(plan: SubscriptionPlan) async -> SubscriptionPurchaseOutcome {
+        diagnosticsLog("purchase begin; plan=\(plan.rawValue); productID=\(plan.productID); cachedProduct=\(products[plan] != nil)")
         if products[plan] == nil {
             await loadProductsIfNeeded(forceReload: true)
         }
@@ -201,6 +244,7 @@ final class SubscriptionViewModel: ObservableObject {
                 "subscription.status.debug_fallback_purchase",
                 L10n.tr(plan.titleKey)
             )
+            diagnosticsLog("purchase debug fallback success; plan=\(plan.rawValue); expiration=\(persistedDebugFallbackExpirationDate.map(String.init(describing:)) ?? "none")")
             return .success
         }
         #endif
@@ -208,6 +252,7 @@ final class SubscriptionViewModel: ObservableObject {
         guard let product = products[plan] else {
             let message = productsUnavailableMessage(error: nil)
             statusMessage = message
+            diagnosticsLog("purchase unavailable; plan=\(plan.rawValue); products=\(products.keys.map(\.rawValue).sorted().joined(separator: ", "))")
             return .failed(message)
         }
 
@@ -221,6 +266,7 @@ final class SubscriptionViewModel: ObservableObject {
             case .success(let verificationResult):
                 switch verificationResult {
                 case .verified(let transaction):
+                    diagnosticsLog("purchase success verified; plan=\(plan.rawValue); transactionProductID=\(transaction.productID); transactionID=\(transaction.id)")
                     await transaction.finish()
                     await refreshEntitlements()
                     if isProUnlocked {
@@ -231,20 +277,25 @@ final class SubscriptionViewModel: ObservableObject {
                         return .failed(L10n.tr("subscription.status.purchase_verify_failed"))
                     }
                 case .unverified(_, _):
+                    diagnosticsLog("purchase success but unverified; plan=\(plan.rawValue)")
                     statusMessage = L10n.tr("subscription.status.purchase_verify_failed")
                     return .failed(L10n.tr("subscription.status.purchase_verify_failed"))
                 }
             case .pending:
+                diagnosticsLog("purchase pending; plan=\(plan.rawValue)")
                 statusMessage = L10n.tr("subscription.status.purchase_pending")
                 return .pending
             case .userCancelled:
+                diagnosticsLog("purchase cancelled by user; plan=\(plan.rawValue)")
                 statusMessage = L10n.tr("subscription.status.purchase_cancelled")
                 return .cancelled
             @unknown default:
+                diagnosticsLog("purchase returned unknown result; plan=\(plan.rawValue)")
                 statusMessage = L10n.tr("subscription.status.purchase_failed")
                 return .failed(L10n.tr("subscription.status.purchase_failed"))
             }
         } catch {
+            diagnosticsLog("purchase error; plan=\(plan.rawValue); \(diagnosticErrorDescription(error))")
             let message = L10n.tr("subscription.status.purchase_failed")
             statusMessage = message
             return .failed(message)
@@ -252,14 +303,17 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     func restorePurchases() async -> Bool {
-        #if DEBUG
+        diagnosticsLog("restore begin; cachedProducts=\(products.count)/\(SubscriptionPlan.allCases.count)")
+#if DEBUG
         if products.isEmpty, canUseDebugSubscriptionFallback {
             await refreshEntitlements()
             if isProUnlocked {
                 statusMessage = L10n.tr("subscription.status.debug_fallback_restore_success")
+                diagnosticsLog("restore debug fallback success; activePlan=\(activePlan?.rawValue ?? "free")")
                 return true
             } else {
                 statusMessage = L10n.tr("subscription.status.restore_empty")
+                diagnosticsLog("restore debug fallback empty")
                 return false
             }
         }
@@ -271,25 +325,35 @@ final class SubscriptionViewModel: ObservableObject {
             await refreshEntitlements()
             if isProUnlocked {
                 statusMessage = L10n.tr("subscription.status.restore_success")
+                diagnosticsLog("restore success; activePlan=\(activePlan?.rawValue ?? "free")")
                 return true
             } else {
                 statusMessage = L10n.tr("subscription.status.restore_empty")
+                diagnosticsLog("restore completed with no active entitlement")
                 return false
             }
         } catch {
+            diagnosticsLog("restore error; \(diagnosticErrorDescription(error))")
             statusMessage = L10n.tr("subscription.status.restore_failed")
             return false
         }
     }
 
     func refreshEntitlements() async {
+        diagnosticsLog("entitlement refresh begin")
         var activePlan: SubscriptionPlan?
+        var entitlementProductIDs: [String] = []
+        var entitlementResultCount = 0
 
         for await verificationResult in Transaction.currentEntitlements {
+            entitlementResultCount += 1
             guard case .verified(let transaction) = verificationResult,
                   let plan = SubscriptionPlan(productID: transaction.productID) else {
+                diagnosticsLog("entitlement ignored; result=unverified_or_unknown")
                 continue
             }
+            entitlementProductIDs.append(transaction.productID)
+            diagnosticsLog("entitlement verified; productID=\(transaction.productID); transactionID=\(transaction.id)")
             if let currentPlan = activePlan {
                 if plan.sortPriority > currentPlan.sortPriority {
                     activePlan = plan
@@ -306,6 +370,7 @@ final class SubscriptionViewModel: ObservableObject {
         #endif
 
         applyActivePlan(activePlan)
+        diagnosticsLog("entitlement refresh end; results=\(entitlementResultCount); productIDs=[\(entitlementProductIDs.sorted().joined(separator: ", "))]; activePlan=\(activePlan?.rawValue ?? "free"); membership=\(membershipLevel.rawValue); fallback=\(isUsingDebugFallback)")
     }
 
     deinit {
@@ -321,8 +386,10 @@ final class SubscriptionViewModel: ObservableObject {
             for await verificationResult in Transaction.updates {
                 guard !Task.isCancelled else { return }
                 guard case .verified(let transaction) = verificationResult else {
+                    self.diagnosticsLog("transaction update ignored; result=unverified")
                     continue
                 }
+                self.diagnosticsLog("transaction update verified; productID=\(transaction.productID); transactionID=\(transaction.id)")
                 await transaction.finish()
                 await self.refreshEntitlements()
             }
@@ -393,24 +460,86 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     private func debugLogProductLoadFailure(_ error: Error) {
-        #if DEBUG
+#if DEBUG
         NSLog("[Subscription] Product load failed: %@", String(describing: error))
-        #endif
+#endif
+    }
+
+    private func diagnosticsLog(_ message: String) {
+        SubscriptionDiagnosticsStore.shared.append(message)
+    }
+
+    private func diagnosticErrorDescription(_ error: Error) -> String {
+        let nsError = error as NSError
+        return "domain=\(nsError.domain); code=\(nsError.code); description=\(nsError.localizedDescription); userInfo=\(nsError.userInfo)"
+    }
+
+    private var diagnosticsFallbackAllowed: Bool {
+#if DEBUG
+        return canUseDebugSubscriptionFallback
+#else
+        return false
+#endif
+    }
+
+    private func diagnosticsLogBundledStoreKitResources() {
+        let resources = Bundle.main.urls(forResourcesWithExtension: "storekit", subdirectory: nil) ?? []
+        if resources.isEmpty {
+            diagnosticsLog("StoreKit resource scan; resources=[]")
+            return
+        }
+
+        for url in resources.sorted(by: { $0.path < $1.path }) {
+            let data = try? Data(contentsOf: url)
+            let parsed = parseStoreKitResource(data: data)
+            diagnosticsLog("StoreKit resource; path=\(url.path); bytes=\(data?.count ?? 0); version=\(parsed.version); productIDs=[\(parsed.productIDs.joined(separator: ", "))]; count=\(parsed.productIDs.count)")
+        }
+    }
+
+    private func parseStoreKitResource(data: Data?) -> (version: String, productIDs: [String]) {
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (version: "unreadable", productIDs: [])
+        }
+
+        var productIDs: [String] = []
+        let directProducts = object["products"] as? [[String: Any]] ?? []
+        productIDs.append(contentsOf: directProducts.compactMap { $0["productID"] as? String })
+
+        let groups = object["subscriptionGroups"] as? [[String: Any]] ?? []
+        for group in groups {
+            let subscriptions = group["subscriptions"] as? [[String: Any]] ?? []
+            productIDs.append(contentsOf: subscriptions.compactMap { $0["productID"] as? String })
+        }
+
+        let versionObject = object["version"] as? [String: Any]
+        let version: String
+        if let major = versionObject?["major"], let minor = versionObject?["minor"] {
+            version = "\(major).\(minor)"
+        } else if let versionString = object["version"] as? String {
+            version = versionString
+        } else {
+            version = "unknown"
+        }
+
+        return (version: version, productIDs: Array(Set(productIDs)).sorted())
     }
 
     #if DEBUG
     func clearDebugFallback() {
+        diagnosticsLog("debug fallback clear begin")
         UserDefaults.standard.removeObject(forKey: Self.debugFallbackPlanDefaultsKey)
         UserDefaults.standard.removeObject(forKey: Self.debugFallbackExpirationDefaultsKey)
         isUsingDebugFallback = canUseDebugSubscriptionFallback
         statusMessage = L10n.tr("subscription.status.debug_fallback_cleared")
+        diagnosticsLog("debug fallback cleared")
         Task { @MainActor in
             await refreshEntitlements()
         }
     }
 
     private var canUseDebugSubscriptionFallback: Bool {
-        true
+        ProcessInfo.processInfo.arguments.contains("-DemoFlowEnableDebugSubscriptionFallback")
     }
 
     private var persistedDebugFallbackPlan: SubscriptionPlan? {
@@ -439,6 +568,7 @@ final class SubscriptionViewModel: ObservableObject {
         UserDefaults.standard.set(debugFallbackExpirationDate(for: plan).timeIntervalSince1970, forKey: Self.debugFallbackExpirationDefaultsKey)
         isUsingDebugFallback = true
         NSLog("[Subscription] Persisted debug fallback plan: %@", plan.rawValue)
+        diagnosticsLog("debug fallback activated; plan=\(plan.rawValue); expiration=\(debugFallbackExpirationDate(for: plan).description)")
     }
 
     private func debugFallbackExpirationDate(for plan: SubscriptionPlan) -> Date {

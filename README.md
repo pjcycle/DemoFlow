@@ -26,6 +26,7 @@ DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawi
 
 - Independent floating camera preview (always-on-top, works across Spaces)
 - Video/audio device selection including Continuity Camera
+- Video dubbing, AI voiceover, and subtitle synchronization in the `配音字幕` workbench
 - Preview mute and real-time microphone level feedback
 - Aspect ratio: Auto / 16:9 / 4:3
 - Global hotkey: `⌘⌥P`

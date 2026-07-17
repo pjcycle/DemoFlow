@@ -13,6 +13,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case screenDrawing
     case videoCutting
     case audioExtract
+    case subDub
     case appSettings
 
     var id: String { rawValue }
@@ -29,6 +30,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             return L10n.tr("section.videoCutting.title")
         case .audioExtract:
             return L10n.tr("section.audioExtract.title")
+        case .subDub:
+            return L10n.tr("section.subDub.title")
         case .appSettings:
             return L10n.tr("section.settings.title")
         }
@@ -46,6 +49,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             return L10n.tr("section.videoCutting.subtitle")
         case .audioExtract:
             return L10n.tr("section.audioExtract.subtitle")
+        case .subDub:
+            return L10n.tr("section.subDub.subtitle")
         case .appSettings:
             return L10n.tr("section.settings.subtitle")
         }
@@ -55,6 +60,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .audioExtract:
             return L10n.tr("section.audioExtract.sidebar_subtitle")
+        case .subDub:
+            return L10n.tr("section.subDub.sidebar_subtitle")
         default:
             return subtitle
         }
@@ -72,6 +79,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             return "scissors"
         case .audioExtract:
             return "waveform.badge.mic"
+        case .subDub:
+            return "captions.bubble"
         case .appSettings:
             return "gearshape"
         }

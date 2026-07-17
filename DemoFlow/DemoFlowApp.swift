@@ -16,6 +16,7 @@ struct DemoFlowApp: App {
     @StateObject private var appCoordinator = AppCoordinator()
     @StateObject private var videoCuttingViewModel = VideoCuttingViewModel()
     @StateObject private var audioToolViewModel = AudioToolViewModel()
+    @StateObject private var subDubViewModel = SubDubViewModel()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -24,6 +25,7 @@ struct DemoFlowApp: App {
                 appCoordinator: appCoordinator,
                 videoCuttingViewModel: videoCuttingViewModel,
                 audioToolViewModel: audioToolViewModel,
+                subDubViewModel: subDubViewModel,
                 videoCuttingWindowID: Self.videoCuttingWindowID
             )
             .environment(\.locale, appCoordinator.appLocale)
@@ -65,6 +67,10 @@ struct DemoFlowApp: App {
             onRequireSubscription: openPaywall
         )
         audioToolViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: coordinator.subscriptionViewModel,
+            onRequireSubscription: openPaywall
+        )
+        subDubViewModel.configureSubscriptionAccess(
             subscriptionViewModel: coordinator.subscriptionViewModel,
             onRequireSubscription: openPaywall
         )

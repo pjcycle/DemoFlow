@@ -12,6 +12,7 @@ struct ContentView: View {
     @ObservedObject private var appCoordinator: AppCoordinator
     @ObservedObject private var videoCuttingViewModel: VideoCuttingViewModel
     @ObservedObject private var audioToolViewModel: AudioToolViewModel
+    @ObservedObject private var subDubViewModel: SubDubViewModel
     @Environment(\.openWindow) private var openWindow
     private let videoCuttingWindowID: String
 
@@ -27,11 +28,13 @@ struct ContentView: View {
         appCoordinator: AppCoordinator,
         videoCuttingViewModel: VideoCuttingViewModel,
         audioToolViewModel: AudioToolViewModel,
+        subDubViewModel: SubDubViewModel,
         videoCuttingWindowID: String
     ) {
         self._appCoordinator = ObservedObject(wrappedValue: appCoordinator)
         self._videoCuttingViewModel = ObservedObject(wrappedValue: videoCuttingViewModel)
         self._audioToolViewModel = ObservedObject(wrappedValue: audioToolViewModel)
+        self._subDubViewModel = ObservedObject(wrappedValue: subDubViewModel)
         self.videoCuttingWindowID = videoCuttingWindowID
     }
 
@@ -137,6 +140,8 @@ struct ContentView: View {
             videoCuttingEntryView
         case .audioExtract:
             AudioExtractSettingsView(viewModel: audioToolViewModel)
+        case .subDub:
+            SubDubSettingsView(viewModel: subDubViewModel)
         case .appSettings:
             OutputLocationSettingsView(
                 appCoordinator: appCoordinator,

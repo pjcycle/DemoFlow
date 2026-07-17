@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme
+   LastUpgradeVersion = "2640"
+   version = "1.7">
+   <BuildAction
+      parallelizeBuildables = "YES"
+      buildImplicitDependencies = "YES"
+      buildArchitectures = "Automatic">
+      <BuildActionEntries>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "7DA5EA7E2FBC5898000B44BD"
+               BuildableName = "DemoFlow.app"
+               BlueprintName = "DemoFlow"
+               ReferencedContainer = "container:DemoFlow.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      shouldAutocreateTestPlan = "YES">
+   </TestAction>
+   <LaunchAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      launchStyle = "0"
+      useCustomWorkingDirectory = "NO"
+      ignoresPersistentStateOnLaunch = "NO"
+      enableGameKitDebugMode = "YES"
+      debugDocumentVersioning = "YES"
+      debugServiceExtension = "internal"
+      allowLocationSimulation = "YES"
+      queueDebuggingEnableBacktraceRecording = "Yes">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "7DA5EA7E2FBC5898000B44BD"
+            BuildableName = "DemoFlow.app"
+            BlueprintName = "DemoFlow"
+            ReferencedContainer = "container:DemoFlow.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+      <StoreKitConfigurationFileReference
+         identifier = "DemoFlow.storekit">
+      </StoreKitConfigurationFileReference>
+   </LaunchAction>
+   <ProfileAction
+      buildConfiguration = "Release"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      savedToolIdentifier = ""
+      useCustomWorkingDirectory = "NO"
+      debugDocumentVersioning = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "7DA5EA7E2FBC5898000B44BD"
+            BuildableName = "DemoFlow.app"
+            BlueprintName = "DemoFlow"
+            ReferencedContainer = "container:DemoFlow.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+   </ProfileAction>
+   <AnalyzeAction
+      buildConfiguration = "Debug">
+   </AnalyzeAction>
+   <ArchiveAction
+      buildConfiguration = "AppStore"
+      revealArchiveInOrganizer = "YES">
+      <PostActions>
+         <ExecutionAction
+            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
+            <ActionContent
+               title = "Collect Archive dSYMs"
+               scriptText = "set -euo pipefail&#10;if [[ -z &quot;${ARCHIVE_PATH:-}&quot; ]]; then&#10;  echo &quot;[DemoFlow dSYM] ARCHIVE_PATH is empty, skip post-action dSYM collection.&quot;&#10;  exit 0&#10;fi&#10;build_products_dir=&quot;${DWARF_DSYM_FOLDER_PATH:-${CONFIGURATION_BUILD_DIR:-}}&quot;&#10;if [[ -z &quot;${build_products_dir:-}&quot; ]]; then&#10;  echo &quot;[DemoFlow dSYM] build products dir is empty, skip post-action dSYM collection.&quot;&#10;  exit 0&#10;fi&#10;/bin/zsh &quot;${PROJECT_DIR}/Scripts/collect_archive_dsyms.sh&quot; &quot;$ARCHIVE_PATH&quot; &quot;$build_products_dir&quot;">
+               <EnvironmentBuildable>
+                  <BuildableReference
+                     BuildableIdentifier = "primary"
+                     BlueprintIdentifier = "7DA5EA7E2FBC5898000B44BD"
+                     BuildableName = "DemoFlow.app"
+                     BlueprintName = "DemoFlow"
+                     ReferencedContainer = "container:DemoFlow.xcodeproj">
+                  </BuildableReference>
+               </EnvironmentBuildable>
+            </ActionContent>
+         </ExecutionAction>
+      </PostActions>
+   </ArchiveAction>
+</Scheme>
