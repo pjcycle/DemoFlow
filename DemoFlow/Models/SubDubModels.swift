@@ -47,6 +47,45 @@ enum SubDubSessionState: Equatable {
     }
 }
 
+struct VideoDubbingRange: Equatable {
+    let startTime: Double
+    let endTime: Double
+
+    var duration: Double {
+        max(0, endTime - startTime)
+    }
+
+    var isValid: Bool {
+        startTime.isFinite && endTime.isFinite && startTime >= 0 && duration >= 0.1
+    }
+}
+
+struct VideoDubbingSegment: Equatable, Identifiable {
+    let id: UUID
+    let timelineStart: Double
+    let timelineEnd: Double
+    let audioURL: URL
+    let audioStartTime: Double
+
+    var duration: Double {
+        max(0, timelineEnd - timelineStart)
+    }
+
+    init(
+        id: UUID = UUID(),
+        timelineStart: Double,
+        timelineEnd: Double,
+        audioURL: URL,
+        audioStartTime: Double = 0
+    ) {
+        self.id = id
+        self.timelineStart = timelineStart
+        self.timelineEnd = timelineEnd
+        self.audioURL = audioURL
+        self.audioStartTime = max(0, audioStartTime)
+    }
+}
+
 struct SubtitleCue: Equatable, Identifiable {
     let id: UUID
     let start: CMTime

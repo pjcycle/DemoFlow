@@ -9,6 +9,20 @@ import Combine
 import Foundation
 import StoreKit
 
+#if DEBUG
+/// Synthetic product parsed directly from a bundled `.storekit` JSON file.
+/// Used as a fallback when real StoreKit 2 products cannot be loaded
+/// (e.g., when running outside of Xcode IDE's StoreKit Test daemon).
+struct SyntheticStoreKitProduct {
+    let id: String
+    let displayPrice: String
+    let displayName: String
+    let description: String
+    let typeRaw: String
+    let subscriptionPeriod: String?
+}
+#endif
+
 @MainActor
 final class SubscriptionViewModel: ObservableObject {
     #if DEBUG
@@ -23,6 +37,9 @@ final class SubscriptionViewModel: ObservableObject {
     @Published private(set) var activeEntitlement: SubscriptionEntitlementStatus = .free
     @Published private(set) var membershipLevel: SubscriptionMembershipLevel = .free
     @Published private(set) var products: [SubscriptionPlan: Product] = [:]
+    #if DEBUG
+    @Published private(set) var syntheticProducts: [SubscriptionPlan: SyntheticStoreKitProduct] = [:]
+    #endif
     @Published private(set) var isUsingDebugFallback = false
     @Published var selectedPlan: SubscriptionPlan = .yearly
 
@@ -34,9 +51,14 @@ final class SubscriptionViewModel: ObservableObject {
 
     var debugRunMarkerMessage: String {
         let bundlePath = Bundle.main.bundleURL.path
-        let returnedCount = products.count
+        let realCount = products.count
+        #if DEBUG
+        let syntheticCount = syntheticProducts.count
+        #else
+        let syntheticCount = 0
+        #endif
         let bundledCount = bundledStoreKitProductCount
-        return "\(debugBuildMarker) | app=\(bundlePath) | bundledConfig=\(bundledCount)/\(SubscriptionPlan.allCases.count) (expected 0; StoreKit is Scheme-mounted) | products=\(returnedCount)/\(SubscriptionPlan.allCases.count) | scheme=DemoFlow.storekit"
+        return "\(debugBuildMarker) | app=\(bundlePath) | bundledConfig=\(bundledCount)/\(SubscriptionPlan.allCases.count) | realProducts=\(realCount)/\(SubscriptionPlan.allCases.count) | syntheticProducts=\(syntheticCount)/\(SubscriptionPlan.allCases.count) | scheme=DemoFlow.storekit"
     }
 
     private var bundledStoreKitProductCount: Int {
@@ -53,6 +75,64 @@ final class SubscriptionViewModel: ObservableObject {
         }
         return directProducts.count + subscriptions
     }
+
+    #if DEBUG
+    private func parseBundledStoreKitSyntheticProducts() -> [SubscriptionPlan: SyntheticStoreKitProduct] {
+        guard let url = Bundle.main.url(forResource: "DemoFlow", withExtension: "storekit"),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+
+        var result: [SubscriptionPlan: SyntheticStoreKitProduct] = [:]
+
+        for product in object["products"] as? [[String: Any]] ?? [] {
+            guard let id = product["productID"] as? String,
+                  let plan = SubscriptionPlan(productID: id),
+                  let displayPrice = product["displayPrice"] as? String else { continue }
+            let localizations = product["localizations"] as? [[String: Any]] ?? []
+            result[plan] = SyntheticStoreKitProduct(
+                id: id,
+                displayPrice: displayPrice,
+                displayName: pickStoreKitLocalization(localizations: localizations, key: "displayName") ?? "",
+                description: pickStoreKitLocalization(localizations: localizations, key: "description") ?? "",
+                typeRaw: product["type"] as? String ?? "NonConsumable",
+                subscriptionPeriod: nil
+            )
+        }
+
+        for group in object["subscriptionGroups"] as? [[String: Any]] ?? [] {
+            for subscription in group["subscriptions"] as? [[String: Any]] ?? [] {
+                guard let id = subscription["productID"] as? String,
+                      let plan = SubscriptionPlan(productID: id),
+                      let displayPrice = subscription["displayPrice"] as? String else { continue }
+                let localizations = subscription["localizations"] as? [[String: Any]] ?? []
+                result[plan] = SyntheticStoreKitProduct(
+                    id: id,
+                    displayPrice: displayPrice,
+                    displayName: pickStoreKitLocalization(localizations: localizations, key: "displayName") ?? "",
+                    description: pickStoreKitLocalization(localizations: localizations, key: "description") ?? "",
+                    typeRaw: subscription["type"] as? String ?? "RecurringSubscription",
+                    subscriptionPeriod: subscription["recurringSubscriptionPeriod"] as? String
+                )
+            }
+        }
+
+        return result
+    }
+
+    private func pickStoreKitLocalization(localizations: [[String: Any]], key: String) -> String? {
+        // Prefer zh-Hans (matches project convention), then en_US, then first available.
+        let preferredLocales = ["zh-Hans", "en_US"]
+        for locale in preferredLocales {
+            if let entry = localizations.first(where: { ($0["locale"] as? String) == locale }),
+               let value = entry[key] as? String {
+                return value
+            }
+        }
+        return localizations.first?[key] as? String
+    }
+    #endif
 
     var productLoadDiagnosticsMessage: String? {
         guard !hasLoadedAllProducts,
@@ -97,7 +177,11 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     var hasLoadedAllProducts: Bool {
-        products.count == SubscriptionPlan.allCases.count
+        var loaded = products.count
+        #if DEBUG
+        loaded += syntheticProducts.count
+        #endif
+        return loaded == SubscriptionPlan.allCases.count
     }
 
     #if DEBUG
@@ -122,7 +206,13 @@ final class SubscriptionViewModel: ObservableObject {
         }
         await loadProductsIfNeeded()
         await refreshEntitlements()
+        #if DEBUG
+        let bootstrapRealCount = products.count
+        let bootstrapSyntheticCount = syntheticProducts.count
+        diagnosticsLog("bootstrap end; realProducts=\(bootstrapRealCount)/\(SubscriptionPlan.allCases.count); syntheticProducts=\(bootstrapSyntheticCount)/\(SubscriptionPlan.allCases.count); activePlan=\(activePlan?.rawValue ?? "free"); fallback=\(isUsingDebugFallback)")
+        #else
         diagnosticsLog("bootstrap end; products=\(products.count)/\(SubscriptionPlan.allCases.count); activePlan=\(activePlan?.rawValue ?? "free"); fallback=\(isUsingDebugFallback)")
+        #endif
     }
 
     func loadProductsIfNeeded(forceReload: Bool = false) async {
@@ -184,6 +274,26 @@ final class SubscriptionViewModel: ObservableObject {
         }
 
         products = nextProducts
+        #if DEBUG
+        // Fill synthetic products (parsed directly from bundled .storekit JSON)
+        // for any plans where the real StoreKit product is missing. This lets the
+        // app surface prices and trigger the existing debug fallback purchase
+        // path even when launched outside Xcode's StoreKit Test daemon.
+        let parsedSynthetic = parseBundledStoreKitSyntheticProducts()
+        var addedSyntheticCount = 0
+        for plan in SubscriptionPlan.allCases where products[plan] == nil {
+            guard syntheticProducts[plan] == nil, let synthetic = parsedSynthetic[plan] else { continue }
+            syntheticProducts[plan] = synthetic
+            addedSyntheticCount += 1
+        }
+        let syntheticCount = syntheticProducts.count
+        let missingPlans = SubscriptionPlan.allCases
+            .filter { products[$0] == nil && syntheticProducts[$0] == nil }
+            .map(\.rawValue)
+            .sorted()
+            .joined(separator: ", ")
+        diagnosticsLog("synthetic product fill; parsed=\(parsedSynthetic.count); added=\(addedSyntheticCount); total=\(syntheticCount)/\(totalProductCount); missingPlans=[\(missingPlans)]")
+        #endif
         diagnosticsLog("product load end; products=\(nextProducts.count)/\(totalProductCount); lastError=\(lastError.map(diagnosticErrorDescription) ?? "none"); fallbackAllowed=\(diagnosticsFallbackAllowed); fallbackActive=\(isUsingDebugFallback)")
         if nextProducts.count == totalProductCount {
             isUsingDebugFallback = false
@@ -207,7 +317,15 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     func displayPriceText(for plan: SubscriptionPlan) -> String {
-        products[plan]?.displayPrice ?? plan.priceText
+        if let product = products[plan] {
+            return product.displayPrice
+        }
+        #if DEBUG
+        if let synthetic = syntheticProducts[plan] {
+            return synthetic.displayPrice
+        }
+        #endif
+        return plan.priceText
     }
 
     func selectPlan(_ plan: SubscriptionPlan) {
@@ -303,7 +421,12 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     func restorePurchases() async -> Bool {
-        diagnosticsLog("restore begin; cachedProducts=\(products.count)/\(SubscriptionPlan.allCases.count)")
+        #if DEBUG
+        let cachedTotal = products.count + syntheticProducts.count
+        #else
+        let cachedTotal = products.count
+        #endif
+        diagnosticsLog("restore begin; cachedProducts=\(cachedTotal)/\(SubscriptionPlan.allCases.count)")
 #if DEBUG
         if products.isEmpty, canUseDebugSubscriptionFallback {
             await refreshEntitlements()
