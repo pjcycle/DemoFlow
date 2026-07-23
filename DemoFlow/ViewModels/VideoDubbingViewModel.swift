@@ -4,7 +4,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 @MainActor
-final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDelegate {
+final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency AVAudioRecorderDelegate {
     @Published private(set) var sourceURL: URL?
     @Published private(set) var sourceDuration: Double = 0
     @Published private(set) var playbackPosition: Double = 0
@@ -15,8 +15,14 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
     @Published private(set) var isPlayerReady = false
     @Published private(set) var isMetering = false
     @Published private(set) var audioLevel: Double = 0
+    @Published private(set) var sourceWaveformSamples: [Double] = []
     @Published private(set) var waveformSamples: [Double] = []
+    @Published private(set) var liveWaveformSamples: [Double] = []
     @Published private(set) var isPreviewPlaying = false
+    @Published private(set) var dubbingSegments: [VideoDubbingSegment] = []
+    @Published private(set) var selectedDubbingRange: VideoDubbingRange?
+    @Published var selectionStartText = ""
+    @Published var selectionEndText = ""
 
     let player = AVPlayer()
 
@@ -24,6 +30,10 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
     private let exportService = SubDubExportService()
     private var recorder: AVAudioRecorder?
     private var sessionDirectory: URL?
+    private var sourceAudioURL: URL?
+    private var activeTakeURL: URL?
+    private var activeRecordingRange: VideoDubbingRange?
+    private var pendingTakeValidation = false
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var meteringTimer: Timer?
@@ -40,6 +50,12 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.playbackPosition = max(0, time.seconds)
+                if let range = self.activeRecordingRange,
+                   self.state == .recording,
+                   self.playbackPosition >= range.endTime - 0.05 {
+                    self.stopRecording()
+                    return
+                }
                 self.isPreviewPlaying = self.state == .finished && self.player.timeControlStatus == .playing
             }
         }
@@ -63,12 +79,19 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
     }
 
     var hasSource: Bool { sourceURL != nil }
-    var hasAudio: Bool { audioURL != nil && state == .finished }
+    var hasAudio: Bool { audioURL != nil && (state == .finished || state == .succeeded) }
     var isRecording: Bool { state == .recording }
     var isPaused: Bool { state == .paused }
 
     var playbackPositionText: String {
         "\(formatTime(playbackPosition)) / \(formatTime(sourceDuration))"
+    }
+
+    var selectionText: String {
+        guard let selectedDubbingRange else {
+            return L10n.tr("subdub.video.selection.none")
+        }
+        return "\(formatTime(selectedDubbingRange.startTime)) - \(formatTime(selectedDubbingRange.endTime))"
     }
 
     func configureSubscriptionAccess(
@@ -104,6 +127,35 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
         }
     }
 
+    func setSelectedDubbingRange(startTime: Double, endTime: Double) {
+        guard sourceDuration > 0 else { return }
+        let start = min(max(startTime, 0), max(sourceDuration - 0.1, 0))
+        let end = min(max(endTime, start + 0.1), sourceDuration)
+        guard end > start else { return }
+        selectedDubbingRange = VideoDubbingRange(startTime: start, endTime: end)
+        selectionStartText = formatTime(start)
+        selectionEndText = formatTime(end)
+    }
+
+    func updateSelectionFromInputs() {
+        guard sourceDuration > 0 else { return }
+        guard let start = parseTime(selectionStartText),
+              let end = parseTime(selectionEndText),
+              end > start,
+              start >= 0,
+              end <= sourceDuration else {
+            statusMessage = L10n.tr("subdub.video.selection.invalid")
+            return
+        }
+        setSelectedDubbingRange(startTime: start, endTime: end)
+    }
+
+    func clearSelectedDubbingRange() {
+        selectedDubbingRange = nil
+        selectionStartText = ""
+        selectionEndText = ""
+    }
+
     func prepareDubbing() {
         guard sourceURL != nil else {
             statusMessage = L10n.tr("subdub.error.input_missing")
@@ -111,7 +163,11 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
         }
         recorder?.stop()
         recorder = nil
+        pendingTakeValidation = false
         removeTemporaryAudio()
+        clearSelectedDubbingRange()
+        activeRecordingRange = nil
+        activeTakeURL = nil
         player.pause()
         player.isMuted = false
         isPreviewPlaying = false
@@ -131,8 +187,16 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
             continueRecording()
             return
         }
-        guard state == .ready || state == .failed else { return }
-        requestMicrophoneAndStart()
+        guard state == .ready || state == .failed || state == .finished || state == .succeeded else { return }
+        let range = selectedDubbingRange ?? VideoDubbingRange(
+            startTime: 0,
+            endTime: sourceDuration
+        )
+        guard range.isValid else {
+            statusMessage = L10n.tr("subdub.video.selection.invalid")
+            return
+        }
+        Task { await seekAndStartRecording(in: range) }
     }
 
     func pauseRecording() {
@@ -161,6 +225,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
 
     func stopRecording() {
         guard state == .recording || state == .paused else { return }
+        pendingTakeValidation = true
         recorder?.stop()
         recorder = nil
         player.pause()
@@ -169,12 +234,12 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
         stopMetering()
         state = .preparing
         statusMessage = L10n.tr("subdub.video.status.validating_audio")
-        Task { await validateRecordedAudio() }
     }
 
     func resetRecording() {
         recorder?.stop()
         recorder = nil
+        pendingTakeValidation = false
         removeTemporaryAudio()
         player.pause()
         player.isMuted = false
@@ -213,7 +278,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
             return
         }
         guard let outputURL = workspace.pickAudioOutputURL(
-            suggestedName: "Audio.aac",
+            suggestedName: "Mixdown.m4a",
             contentType: .mpeg4Audio
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
@@ -286,52 +351,77 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
             sourceURL = persistedURL
             sourceDuration = duration.seconds
             playbackPosition = 0
+            sourceAudioURL = nil
             audioURL = nil
+            dubbingSegments.removeAll(keepingCapacity: true)
+            sourceWaveformSamples.removeAll(keepingCapacity: true)
             waveformSamples.removeAll(keepingCapacity: true)
+            liveWaveformSamples.removeAll(keepingCapacity: true)
+            clearSelectedDubbingRange()
+            activeRecordingRange = nil
+            activeTakeURL = nil
             isPreviewPlaying = false
             exportURL = nil
             isPlayerReady = true
             state = .ready
             statusMessage = L10n.f("subdub.status.imported", persistedURL.lastPathComponent)
+
+            let sourceAudioCandidate = session.appendingPathComponent("SourceAudio.m4a")
+            if (try? await exportService.extractAudioTrack(
+                from: persistedURL,
+                outputURL: sourceAudioCandidate
+            )) == true {
+                sourceAudioURL = sourceAudioCandidate
+                sourceWaveformSamples = (try? await loadWaveformSamples(from: sourceAudioCandidate)) ?? []
+            }
         } catch {
             state = .failed
             statusMessage = L10n.f("subdub.status.import_failed", error.localizedDescription)
         }
     }
 
-    private func requestMicrophoneAndStart() {
+    private func seekAndStartRecording(in range: VideoDubbingRange) async {
+        activeRecordingRange = range
+        player.pause()
+        player.isMuted = true
+        await player.seek(to: CMTime(seconds: range.startTime, preferredTimescale: 600))
+        playbackPosition = range.startTime
+        requestMicrophoneAndStart(in: range)
+    }
+
+    private func requestMicrophoneAndStart(in range: VideoDubbingRange) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            startRecorder()
+            startRecorder(in: range)
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     if granted {
-                        self.startRecorder()
+                        self.startRecorder(in: range)
                     } else {
                         self.state = .failed
+                        self.activeRecordingRange = nil
                         self.statusMessage = L10n.tr("subdub.error.microphone_permission")
                     }
                 }
             }
         default:
             state = .failed
+            activeRecordingRange = nil
             statusMessage = L10n.tr("subdub.error.microphone_permission")
         }
     }
 
-    private func startRecorder() {
+    private func startRecorder(in range: VideoDubbingRange) {
         guard let sessionDirectory else {
             statusMessage = L10n.tr("subdub.error.output_unavailable")
             state = .failed
+            activeRecordingRange = nil
             return
         }
-        let url = sessionDirectory.appendingPathComponent("Audio.aac")
+        let url = sessionDirectory.appendingPathComponent("Take-\(UUID().uuidString).m4a")
         do {
-            if FileManager.default.fileExists(atPath: url.path) {
-                try FileManager.default.removeItem(at: url)
-            }
             let settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: 44_100,
@@ -346,8 +436,8 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
                 throw SubDubError.recordingFailed(L10n.tr("subdub.error.recording_failed_generic"))
             }
             recorder = nextRecorder
-            audioURL = url
-            waveformSamples = Array(repeating: 0, count: waveformSampleCount)
+            activeTakeURL = url
+            liveWaveformSamples = Array(repeating: 0, count: waveformSampleCount)
             isPreviewPlaying = false
             player.isMuted = true
             player.play()
@@ -357,6 +447,8 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
         } catch {
             player.isMuted = false
             state = .failed
+            activeRecordingRange = nil
+            activeTakeURL = nil
             statusMessage = L10n.f("subdub.status.recording_failed", error.localizedDescription)
         }
     }
@@ -366,31 +458,99 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
         stopRecording()
     }
 
-    private func validateRecordedAudio() async {
-        guard let audioURL else {
+    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        guard pendingTakeValidation else { return }
+        pendingTakeValidation = false
+        guard flag else {
+            if let activeTakeURL { try? FileManager.default.removeItem(at: activeTakeURL) }
+            activeTakeURL = nil
+            activeRecordingRange = nil
+            state = .failed
+            statusMessage = L10n.tr("subdub.error.audio_validation")
+            return
+        }
+        Task { await validateRecordedTake() }
+    }
+
+    private func validateRecordedTake() async {
+        guard let takeURL = activeTakeURL,
+              let range = activeRecordingRange else {
+            pendingTakeValidation = false
             state = .failed
             statusMessage = L10n.tr("subdub.error.audio_validation")
             return
         }
         do {
-            try await exportService.validateAudio(audioURL)
-            if let decodedSamples = try? await loadWaveformSamples(from: audioURL) {
-                waveformSamples = decodedSamples
+            try await exportService.validateAudio(takeURL)
+            let takeAsset = AVURLAsset(url: takeURL)
+            let takeDuration = try await takeAsset.load(.duration)
+            let actualEnd = min(range.endTime, range.startTime + max(0, takeDuration.seconds))
+            guard actualEnd - range.startTime >= 0.1 else {
+                throw SubDubError.audioValidationFailed
             }
+
+            let replacement = VideoDubbingSegment(
+                timelineStart: range.startTime,
+                timelineEnd: actualEnd,
+                audioURL: takeURL
+            )
+            let updatedSegments = replacingSegments(
+                overlapping: VideoDubbingRange(
+                    startTime: replacement.timelineStart,
+                    endTime: replacement.timelineEnd
+                ),
+                with: replacement
+            )
+            guard let sessionDirectory else {
+                throw SubDubError.outputUnavailable
+            }
+            let mixdownURL = sessionDirectory.appendingPathComponent("Mixdown-\(UUID().uuidString).m4a")
+            try await exportService.makeDubbingMixdown(
+                sourceAudioURL: sourceAudioURL,
+                segments: updatedSegments,
+                duration: sourceDuration,
+                outputURL: mixdownURL
+            )
+
+            dubbingSegments = updatedSegments
+            if let previousAudioURL = audioURL, previousAudioURL != mixdownURL {
+                try? FileManager.default.removeItem(at: previousAudioURL)
+            }
+            audioURL = mixdownURL
+            waveformSamples = (try? await loadWaveformSamples(from: mixdownURL)) ?? []
+            liveWaveformSamples.removeAll(keepingCapacity: true)
+            activeRecordingRange = nil
+            activeTakeURL = nil
             try? await prepareRecordedPreview()
             state = .finished
             statusMessage = L10n.tr("subdub.video.status.audio_ready")
         } catch {
+            try? FileManager.default.removeItem(at: takeURL)
+            pendingTakeValidation = false
             state = .failed
+            activeRecordingRange = nil
+            activeTakeURL = nil
             statusMessage = L10n.f("subdub.status.audio_invalid", error.localizedDescription)
         }
     }
 
     private func removeTemporaryAudio() {
-        if let audioURL { try? FileManager.default.removeItem(at: audioURL) }
+        var urls = Set<URL>()
+        if let audioURL { urls.insert(audioURL) }
+        if let activeTakeURL { urls.insert(activeTakeURL) }
+        for segment in dubbingSegments {
+            urls.insert(segment.audioURL)
+        }
+        for url in urls {
+            try? FileManager.default.removeItem(at: url)
+        }
         audioURL = nil
         exportURL = nil
+        dubbingSegments.removeAll(keepingCapacity: true)
         waveformSamples.removeAll(keepingCapacity: true)
+        liveWaveformSamples.removeAll(keepingCapacity: true)
+        activeRecordingRange = nil
+        activeTakeURL = nil
     }
 
     private func startMetering() {
@@ -417,17 +577,57 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
 
     private func updateLiveWaveform(_ level: Double) {
         guard sourceDuration > 0 else { return }
-        if waveformSamples.count != waveformSampleCount {
-            waveformSamples = Array(repeating: 0, count: waveformSampleCount)
+        if liveWaveformSamples.count != waveformSampleCount {
+            liveWaveformSamples = Array(repeating: 0, count: waveformSampleCount)
         }
         let progress = min(max(playbackPosition / sourceDuration, 0), 1)
         let index = min(
             waveformSampleCount - 1,
             Int(progress * Double(waveformSampleCount - 1))
         )
-        var updatedSamples = waveformSamples
+        var updatedSamples = liveWaveformSamples
         updatedSamples[index] = max(updatedSamples[index], level)
-        waveformSamples = updatedSamples
+        liveWaveformSamples = updatedSamples
+    }
+
+    private func replacingSegments(
+        overlapping range: VideoDubbingRange,
+        with replacement: VideoDubbingSegment
+    ) -> [VideoDubbingSegment] {
+        var result: [VideoDubbingSegment] = []
+        for segment in dubbingSegments {
+            if segment.timelineEnd <= range.startTime || segment.timelineStart >= range.endTime {
+                result.append(segment)
+                continue
+            }
+
+            if segment.timelineStart < range.startTime {
+                result.append(
+                    VideoDubbingSegment(
+                        timelineStart: segment.timelineStart,
+                        timelineEnd: range.startTime,
+                        audioURL: segment.audioURL,
+                        audioStartTime: segment.audioStartTime
+                    )
+                )
+            }
+
+            if segment.timelineEnd > range.endTime {
+                let rightStart = range.endTime
+                result.append(
+                    VideoDubbingSegment(
+                        timelineStart: rightStart,
+                        timelineEnd: segment.timelineEnd,
+                        audioURL: segment.audioURL,
+                        audioStartTime: segment.audioStartTime + (rightStart - segment.timelineStart)
+                    )
+                )
+            }
+        }
+        result.append(replacement)
+        return result
+            .filter { $0.duration >= 0.05 }
+            .sorted { $0.timelineStart < $1.timelineStart }
     }
 
     private func loadWaveformSamples(from url: URL) async throws -> [Double] {
@@ -565,5 +765,21 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, AVAudioRecorderDe
         guard seconds.isFinite else { return "00:00" }
         let total = max(0, Int(seconds.rounded()))
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private func parseTime(_ value: String) -> Double? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.contains(":") {
+            let parts = trimmed.split(separator: ":")
+            guard parts.count <= 3,
+                  parts.allSatisfy({ Double($0) != nil }) else {
+                return nil
+            }
+            return parts.reduce(0) { partial, part in
+                partial * 60 + (Double(part) ?? 0)
+            }
+        }
+        return Double(trimmed)
     }
 }

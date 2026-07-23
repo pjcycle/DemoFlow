@@ -122,18 +122,9 @@ private struct VideoDubbingPanel: View {
                     .frame(minHeight: 280, maxHeight: 420)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-                SubDubTimelineRuler(
-                    duration: viewModel.sourceDuration,
-                    position: viewModel.playbackPosition
-                )
-                .frame(height: 26)
+                dubbingTimeline
 
-                SubDubWaveformView(
-                    duration: viewModel.sourceDuration,
-                    position: viewModel.playbackPosition,
-                    waveformSamples: viewModel.waveformSamples
-                )
-                .frame(height: 72)
+                selectionControls
 
                 HStack(spacing: 10) {
                     iconButton(
@@ -146,7 +137,19 @@ private struct VideoDubbingPanel: View {
                     if viewModel.state == .ready || viewModel.state == .failed {
                         iconButton(
                             systemName: "record.circle",
-                            help: L10n.tr("subdub.action.start_recording"),
+                            help: viewModel.selectedDubbingRange == nil
+                                ? L10n.tr("subdub.action.start_recording")
+                                : L10n.tr("subdub.action.replace_selection"),
+                            action: viewModel.startRecording
+                        )
+                    }
+
+                    if viewModel.state == .finished || viewModel.state == .succeeded {
+                        iconButton(
+                            systemName: "record.circle",
+                            help: viewModel.selectedDubbingRange == nil
+                                ? L10n.tr("subdub.action.start_recording")
+                                : L10n.tr("subdub.action.replace_selection"),
                             action: viewModel.startRecording
                         )
                     }
@@ -223,6 +226,80 @@ private struct VideoDubbingPanel: View {
         }
         .padding(16)
         .background(cardBackground)
+    }
+
+    private var dubbingTimeline: some View {
+        ZStack(alignment: .topLeading) {
+            SubDubWaveformView(
+                duration: viewModel.sourceDuration,
+                position: viewModel.playbackPosition,
+                sourceWaveformSamples: viewModel.sourceWaveformSamples,
+                dubbingWaveformSamples: viewModel.waveformSamples,
+                liveWaveformSamples: viewModel.liveWaveformSamples,
+                selection: viewModel.selectedDubbingRange,
+                onSelectionChanged: viewModel.setSelectedDubbingRange
+            )
+            .frame(height: 72)
+            .padding(.top, 22)
+
+            SubDubTimelineRuler(
+                duration: viewModel.sourceDuration
+            )
+            .frame(height: 22)
+
+            SubDubTimelinePlayhead(
+                duration: viewModel.sourceDuration,
+                position: viewModel.playbackPosition
+            )
+            .allowsHitTesting(false)
+        }
+        .frame(height: 94)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(red: 0.09, green: 0.10, blue: 0.11))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private var selectionControls: some View {
+        HStack(spacing: 8) {
+            Text(L10n.tr("subdub.video.selection.label"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            TextField("00:00", text: $viewModel.selectionStartText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 72)
+                .onSubmit { viewModel.updateSelectionFromInputs() }
+
+            Text(L10n.tr("subdub.video.selection.to"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextField("00:00", text: $viewModel.selectionEndText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 72)
+                .onSubmit { viewModel.updateSelectionFromInputs() }
+
+            if viewModel.selectedDubbingRange != nil {
+                Text(viewModel.selectionText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    viewModel.clearSelectedDubbingRange()
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.plain)
+                .help(L10n.tr("subdub.video.selection.clear"))
+            }
+
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -444,22 +521,20 @@ private struct SubDubPlayerView: NSViewRepresentable {
 
 private struct SubDubTimelineRuler: View {
     let duration: Double
-    let position: Double
 
-    private var tickStep: Double {
-        switch duration {
-        case ...30: return 5
-        case ...120: return 10
-        case ...300: return 30
-        case ...600: return 60
-        default: return 120
-        }
+    private var majorStep: Double {
+        let candidates = [5.0, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
+        let target = max(duration / 5, 5)
+        return candidates.first(where: { $0 >= target }) ?? 3600
+    }
+
+    private var minorStep: Double {
+        majorStep <= 60 ? majorStep / 5 : majorStep / 10
     }
 
     private var tickValues: [Double] {
         guard duration > 0 else { return [0] }
-        let step = tickStep
-        var values = Array(stride(from: 0, through: duration, by: step))
+        var values = Array(stride(from: 0, through: duration, by: minorStep))
         if let last = values.last, duration - last > 0.5 {
             values.append(duration)
         }
@@ -469,118 +544,186 @@ private struct SubDubTimelineRuler: View {
     var body: some View {
         GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
-            let progress = duration > 0
-                ? min(max(position / duration, 0), 1)
-                : 0
 
             ZStack(alignment: .topLeading) {
-                Rectangle()
-                    .fill(Color(nsColor: .separatorColor))
-                    .frame(height: 1)
-                    .offset(y: 7)
-
                 ForEach(tickValues, id: \.self) { value in
                     let tickProgress = duration > 0 ? value / duration : 0
-                    let x = min(max(tickProgress * width, 18), max(width - 18, 18))
-                    VStack(spacing: 2) {
-                        Rectangle()
-                            .fill(Color.secondary.opacity(value.truncatingRemainder(dividingBy: 60) == 0 ? 0.8 : 0.45))
-                            .frame(width: 1, height: value.truncatingRemainder(dividingBy: 60) == 0 ? 8 : 5)
+                    let x = min(max(tickProgress * width, 0), width)
+                    let isMajor = isMajorTick(value)
+
+                    Rectangle()
+                        .fill(Color.white.opacity(isMajor ? 0.32 : 0.14))
+                        .frame(width: isMajor ? 1.5 : 1, height: isMajor ? 10 : 6)
+                        .position(x: x, y: isMajor ? 5 : 3)
+
+                    if isMajor {
                         Text(formatRulerTime(value))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .fixedSize()
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.62))
+                            .frame(width: 56, alignment: .leading)
+                            .position(
+                                x: min(max(x + 30, 30), max(width - 26, 30)),
+                                y: 6
+                            )
                     }
-                    .position(x: x, y: 16)
                 }
 
-                Rectangle()
-                    .fill(Color.accentColor)
-                    .frame(width: 1.5, height: 12)
-                    .position(x: progress * width, y: 7)
             }
-            .padding(.horizontal, 8)
         }
+    }
+
+    private func isMajorTick(_ value: Double) -> Bool {
+        let remainder = value.truncatingRemainder(dividingBy: majorStep)
+        return remainder < 0.01 || majorStep - remainder < 0.01 || abs(value - duration) < 0.01
     }
 
     private func formatRulerTime(_ seconds: Double) -> String {
         let totalSeconds = max(0, Int(seconds.rounded()))
+        let hours = totalSeconds / 3600
         let minutes = totalSeconds / 60
         let remainingSeconds = totalSeconds % 60
-        if minutes > 0 {
-            return remainingSeconds == 0
-                ? "\(minutes)m"
-                : "\(minutes)m\(remainingSeconds)s"
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes % 60, remainingSeconds)
         }
-        return "\(totalSeconds)s"
+        return String(format: "%02d:%02d", minutes, remainingSeconds)
     }
 }
 
 private struct SubDubWaveformView: View {
     let duration: Double
     let position: Double
-    let waveformSamples: [Double]
+    let sourceWaveformSamples: [Double]
+    let dubbingWaveformSamples: [Double]
+    let liveWaveformSamples: [Double]
+    let selection: VideoDubbingRange?
+    let onSelectionChanged: (Double, Double) -> Void
+
+    @State private var dragAnchorTime: Double?
 
     var body: some View {
-        GeometryReader { _ in
-            Canvas { context, size in
-                let barCount = max(32, Int(size.width / 6))
-                let progress = duration > 0
-                    ? min(max(position / duration, 0), 1)
-                    : 0
-                let activeColor = Color.accentColor.opacity(0.9)
-                let inactiveColor = Color.secondary.opacity(0.28)
-                var baseline = Path()
-                baseline.move(to: CGPoint(x: 8, y: size.height / 2))
-                baseline.addLine(to: CGPoint(x: size.width - 8, y: size.height / 2))
-                context.stroke(
-                    baseline,
-                    with: .color(Color.secondary.opacity(0.42)),
-                    style: StrokeStyle(lineWidth: 0.75, lineCap: .round, dash: [1, 3])
-                )
+        GeometryReader { proxy in
+            ZStack {
+                Canvas { context, size in
+                    let barCount = max(32, Int(size.width / 6))
+                    let progress = duration > 0
+                        ? min(max(position / duration, 0), 1)
+                        : 0
+                    let sourceColor = Color.secondary.opacity(0.48)
+                    let dubbingColor = Color.accentColor.opacity(0.92)
+                    let selectionColor = Color.accentColor.opacity(0.12)
 
-                let peak = waveformSamples.max() ?? 0
-                if peak > 0.02 {
-                    for index in 0..<barCount {
-                        let fraction = Double(index) / Double(max(barCount - 1, 1))
-                        let start = min(
-                            waveformSamples.count - 1,
-                            Int(Double(index) / Double(barCount) * Double(waveformSamples.count))
+                    if let selection, duration > 0 {
+                        let startX = CGFloat(min(max(selection.startTime / duration, 0), 1)) * size.width
+                        let endX = CGFloat(min(max(selection.endTime / duration, 0), 1)) * size.width
+                        let selectionRect = CGRect(
+                            x: min(startX, endX),
+                            y: 0,
+                            width: abs(endX - startX),
+                            height: size.height
                         )
-                        let end = min(
-                            waveformSamples.count,
-                            max(start + 1, Int(Double(index + 1) / Double(barCount) * Double(waveformSamples.count)))
-                        )
-                        let value = waveformSamples[start..<end].max() ?? 0
-                        let barHeight = min(size.height * 0.86, size.height * (0.04 + value * 0.82))
-                        let x = CGFloat(fraction) * size.width
-                        let rect = CGRect(
-                            x: x,
-                            y: (size.height - barHeight) / 2,
-                            width: 2,
-                            height: max(2, barHeight)
-                        )
-                        if value > 0.02 {
+                        context.fill(Path(selectionRect), with: .color(selectionColor))
+                    }
+
+                    var baseline = Path()
+                    baseline.move(to: CGPoint(x: 8, y: size.height / 2))
+                    baseline.addLine(to: CGPoint(x: size.width - 8, y: size.height / 2))
+                    context.stroke(
+                        baseline,
+                        with: .color(Color.secondary.opacity(0.42)),
+                        style: StrokeStyle(lineWidth: 0.75, lineCap: .round, dash: [1, 3])
+                    )
+
+                    func drawBars(_ samples: [Double], color: Color, opacity: Double = 1) {
+                        guard !samples.isEmpty else { return }
+                        for index in 0..<barCount {
+                            let fraction = Double(index) / Double(max(barCount - 1, 1))
+                            let start = min(
+                                samples.count - 1,
+                                Int(Double(index) / Double(barCount) * Double(samples.count))
+                            )
+                            let end = min(
+                                samples.count,
+                                max(start + 1, Int(Double(index + 1) / Double(barCount) * Double(samples.count)))
+                            )
+                            let value = samples[start..<end].max() ?? 0
+                            guard value > 0.02 else { continue }
+                            let barHeight = min(size.height * 0.86, size.height * (0.04 + value * 0.82))
+                            let x = CGFloat(fraction) * size.width
+                            let rect = CGRect(
+                                x: x,
+                                y: (size.height - barHeight) / 2,
+                                width: 2,
+                                height: max(2, barHeight)
+                            )
+                            let barColor = fraction <= progress ? color : color.opacity(0.42 * opacity)
                             context.fill(
                                 Path(roundedRect: rect, cornerRadius: 1),
-                                with: .color(fraction <= progress ? activeColor : inactiveColor)
+                                with: .color(barColor.opacity(opacity))
                             )
                         }
                     }
+
+                    drawBars(sourceWaveformSamples, color: sourceColor)
+                    drawBars(dubbingWaveformSamples, color: dubbingColor)
+                    drawBars(liveWaveformSamples, color: dubbingColor)
                 }
 
-                let playheadX = CGFloat(progress) * size.width
-                var playhead = Path()
-                playhead.move(to: CGPoint(x: playheadX, y: 0))
-                playhead.addLine(to: CGPoint(x: playheadX, y: size.height))
-                context.stroke(playhead, with: .color(Color.accentColor), lineWidth: 1.5)
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 2)
+                            .onChanged { value in
+                                guard duration > 0 else { return }
+                                if dragAnchorTime == nil {
+                                    dragAnchorTime = time(at: value.startLocation.x, width: proxy.size.width)
+                                }
+                                guard let dragAnchorTime else { return }
+                                let current = time(at: value.location.x, width: proxy.size.width)
+                                onSelectionChanged(
+                                    min(dragAnchorTime, current),
+                                    max(dragAnchorTime, current)
+                                )
+                            }
+                            .onEnded { _ in
+                                dragAnchorTime = nil
+                            }
+                    )
             }
-            .padding(.horizontal, 8)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private func time(at x: CGFloat, width: CGFloat) -> Double {
+        let normalized = min(max(x / max(width, 1), 0), 1)
+        return normalized * duration
+    }
+}
+
+private struct SubDubTimelinePlayhead: View {
+    let duration: Double
+    let position: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let progress = duration > 0
+                ? min(max(position / duration, 0), 1)
+                : 0
+            let lineWidth = 1.5
+            let x = lineWidth / 2 + CGFloat(progress) * max(proxy.size.width - lineWidth, 0)
+
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(Color.accentColor)
+                    .frame(width: lineWidth, height: proxy.size.height)
+                    .position(x: x, y: proxy.size.height / 2)
+
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color(red: 0.09, green: 0.10, blue: 0.11))
+                    .frame(width: 10, height: 11)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .stroke(Color.accentColor, lineWidth: 1.5)
+                    }
+                    .position(x: x, y: 5.5)
             }
         }
     }

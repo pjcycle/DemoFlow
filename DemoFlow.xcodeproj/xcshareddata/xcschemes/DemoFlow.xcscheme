@@ -52,6 +52,12 @@
             ReferencedContainer = "container:DemoFlow.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <CommandLineArguments>
+         <CommandLineArgument
+            argument="-DemoFlowEnableDebugSubscriptionFallback"
+            isEnabled="YES">
+         </CommandLineArgument>
+      </CommandLineArguments>
       <StoreKitConfigurationFileReference
          identifier = "DemoFlow.storekit">
       </StoreKitConfigurationFileReference>
