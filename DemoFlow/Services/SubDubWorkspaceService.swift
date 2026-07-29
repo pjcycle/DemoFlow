@@ -8,6 +8,7 @@ struct SubDubWorkspaceService {
     var videoTypes: [UTType] { [.mpeg4Movie, .quickTimeMovie] }
     var audioTypes: [UTType] { [.mp3, .mpeg4Audio, .wav, .aiff, .audio] }
     var subtitleTypes: [UTType] { [.plainText] }
+    var timelineJSONTypes: [UTType] { [.json] }
 
     func makeSessionDirectory() throws -> URL {
         let directory = fileManager.temporaryDirectory
@@ -90,6 +91,27 @@ struct SubDubWorkspaceService {
             types: subtitleTypes,
             directory: FileManager.default.homeDirectoryForCurrentUser
         )
+    }
+
+    @MainActor
+    func pickTimelineJSONURL() -> URL? {
+        pickURL(
+            title: L10n.tr("subdub.action.import_timeline_json"),
+            types: timelineJSONTypes,
+            directory: DemoFlowOutputDirectoryPolicy.outputWorkspaceRootDirectory()
+        )
+    }
+
+    @MainActor
+    func pickTimelineJSONOutputURL(suggestedName: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = L10n.tr("subdub.action.export_timeline_json")
+        panel.allowedContentTypes = timelineJSONTypes
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedName
+        panel.directoryURL = DemoFlowOutputDirectoryPolicy.outputWorkspaceRootDirectory()
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     @MainActor

@@ -1,27 +1,28 @@
 import AVFoundation
 import CoreMedia
+import CoreGraphics
 import Foundation
 
 enum SubDubTab: String, CaseIterable, Identifiable {
     case videoDubbing
-    case aiVoiceover
-    case subtitleSync
+    case subtitleBurning
+    case audioReplacement
 
     var id: String { rawValue }
 
     var titleKey: String {
         switch self {
         case .videoDubbing: return "subdub.tab.video_dubbing"
-        case .aiVoiceover: return "subdub.tab.ai_voiceover"
-        case .subtitleSync: return "subdub.tab.subtitle_sync"
+        case .subtitleBurning: return "subdub.tab.subtitle_burning"
+        case .audioReplacement: return "subdub.tab.audio_replacement"
         }
     }
 
     var iconName: String {
         switch self {
         case .videoDubbing: return "mic.and.signal.meter"
-        case .aiVoiceover: return "sparkles.waveform"
-        case .subtitleSync: return "captions.bubble"
+        case .subtitleBurning: return "captions.bubble"
+        case .audioReplacement: return "waveform.badge.plus"
         }
     }
 }
@@ -40,6 +41,26 @@ enum SubDubSessionState: Equatable {
     var isBusy: Bool {
         switch self {
         case .preparing, .recording, .exporting:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+enum SubtitleBurnState: Equatable {
+    case idle
+    case preparing
+    case ready
+    case extractingAudio
+    case transcribing
+    case exporting
+    case succeeded
+    case failed
+
+    var isBusy: Bool {
+        switch self {
+        case .preparing, .extractingAudio, .transcribing, .exporting:
             return true
         default:
             return false
@@ -100,6 +121,263 @@ struct SubtitleCue: Equatable, Identifiable {
     }
 }
 
+enum SubtitleStylePreset: String, Codable, CaseIterable, Identifiable, Equatable, Hashable {
+    case standard
+    case outline
+    case movie
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .standard: return "subdub.subtitle_style.standard"
+        case .outline: return "subdub.subtitle_style.outline"
+        case .movie: return "subdub.subtitle_style.movie"
+        }
+    }
+
+    var fontName: String { "Hiragino Sans GB" }
+
+    var fontScale: CGFloat {
+        switch self {
+        case .standard, .outline: return 0.06
+        case .movie: return 0.075
+        }
+    }
+
+    var marginScale: CGFloat {
+        switch self {
+        case .standard, .outline: return 0.055
+        case .movie: return 0.06
+        }
+    }
+
+    var usesBackground: Bool {
+        // Keep preview and the burned result free of a subtitle box.
+        return false
+    }
+
+    var backgroundOpacity: Double {
+        0
+    }
+
+    var isBold: Bool { self == .movie }
+
+    var assBorderStyle: Int { 1 }
+
+    var assOutlineWidth: Int { self == .outline ? 3 : 0 }
+
+    func previewFontSize(forVideoHeight height: CGFloat) -> CGFloat {
+        max(12, height * fontScale)
+    }
+
+    func assFontSize(forVideoHeight height: CGFloat) -> Int {
+        max(12, Int((height * fontScale).rounded()))
+    }
+
+    func assMarginV(forVideoHeight height: CGFloat) -> Int {
+        max(18, Int((height * marginScale).rounded()))
+    }
+}
+
+struct SubtitleTimelineDocument: Codable, Equatable {
+    let schemaVersion: Int
+    let sourceDuration: Double
+    var style: SubtitleStylePreset
+    var cues: [SubtitleTimelineCue]
+
+    init(
+        schemaVersion: Int = 2,
+        sourceDuration: Double,
+        style: SubtitleStylePreset = .standard,
+        cues: [SubtitleTimelineCue] = []
+    ) {
+        self.schemaVersion = schemaVersion
+        self.sourceDuration = sourceDuration
+        self.style = style
+        self.cues = cues
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case sourceDuration
+        case style
+        case cues
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        sourceDuration = try container.decode(Double.self, forKey: .sourceDuration)
+        style = try container.decodeIfPresent(SubtitleStylePreset.self, forKey: .style) ?? .standard
+        cues = try container.decode([SubtitleTimelineCue].self, forKey: .cues)
+    }
+}
+
+struct SubtitleTimelineCue: Codable, Equatable, Identifiable {
+    let id: UUID
+    var startTime: Double
+    var endTime: Double
+    var text: String
+
+    init(
+        id: UUID = UUID(),
+        startTime: Double,
+        endTime: Double,
+        text: String
+    ) {
+        self.id = id
+        self.startTime = startTime
+        self.endTime = endTime
+        self.text = text
+    }
+
+    init(cue: SubtitleCue) {
+        self.init(
+            id: cue.id,
+            startTime: cue.start.seconds,
+            endTime: cue.end.seconds,
+            text: cue.text
+        )
+    }
+
+    var duration: Double { max(0, endTime - startTime) }
+
+    var subtitleCue: SubtitleCue {
+        SubtitleCue(
+            id: id,
+            start: CMTime(seconds: startTime, preferredTimescale: 1_000),
+            end: CMTime(seconds: endTime, preferredTimescale: 1_000),
+            text: text
+        )
+    }
+}
+
+enum AudioReplacementLanguageMode: String, Codable, CaseIterable, Identifiable {
+    case automatic
+    case chinese
+    case english
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .automatic: return "subdub.audio_replacement.language.automatic"
+        case .chinese: return "subdub.audio_replacement.language.chinese"
+        case .english: return "subdub.audio_replacement.language.english"
+        }
+    }
+
+    var localeIdentifier: String? {
+        switch self {
+        case .automatic: return nil
+        case .chinese: return "zh-CN"
+        case .english: return "en-US"
+        }
+    }
+}
+
+enum AudioPreviewMode: String, CaseIterable, Identifiable {
+    case original
+    case replacement
+    case imported
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .original: return "subdub.audio_replacement.preview.original"
+        case .replacement: return "subdub.audio_replacement.preview.replacement"
+        case .imported: return "subdub.audio_replacement.preview.imported"
+        }
+    }
+}
+
+enum AudioReplacementState: Equatable {
+    case idle
+    case generating
+    case mixing
+    case ready
+    case exporting
+    case failed
+
+    var isBusy: Bool {
+        switch self {
+        case .generating, .mixing, .exporting: return true
+        default: return false
+        }
+    }
+}
+
+enum AudioReplacementCueStatus: String, Codable, Equatable {
+    case pending
+    case generating
+    case generated
+    case failed
+}
+
+struct AudioReplacementSegment {
+    let id: UUID
+    let audioURL: URL
+    let startTime: Double
+    let endTime: Double
+}
+
+struct AudioReplacementVoiceOption: Identifiable, Equatable {
+    let id: String
+    let title: String
+}
+
+struct AudioReplacementDraft: Equatable {
+    var cueAudioURLs: [UUID: URL] = [:]
+    var cueSignatures: [UUID: String] = [:]
+    var cueStatuses: [UUID: AudioReplacementCueStatus] = [:]
+    var voiceIdentifier: String?
+    var languageMode: AudioReplacementLanguageMode = .automatic
+    var rate: Double = 1.0
+    var replacementAudioURL: URL?
+}
+
+struct AudioReplacementManifest: Codable, Equatable {
+    struct Cue: Codable, Equatable {
+        let id: UUID
+        let status: AudioReplacementCueStatus
+        let signature: String
+        let audioFileName: String?
+    }
+
+    let schemaVersion: Int
+    var languageMode: AudioReplacementLanguageMode
+    var voiceIdentifier: String?
+    var rate: Double
+    var replacementAudioFileName: String?
+    var cues: [Cue]
+
+    init(
+        languageMode: AudioReplacementLanguageMode,
+        voiceIdentifier: String?,
+        rate: Double,
+        replacementAudioFileName: String?,
+        cues: [Cue]
+    ) {
+        schemaVersion = 1
+        self.languageMode = languageMode
+        self.voiceIdentifier = voiceIdentifier
+        self.rate = rate
+        self.replacementAudioFileName = replacementAudioFileName
+        self.cues = cues
+    }
+}
+
+protocol AppleTTSService {
+    func synthesize(
+        text: String,
+        voiceIdentifier: String?,
+        rate: Double,
+        outputURL: URL
+    ) async throws -> URL
+}
+
 struct SubDubTTSRequest {
     let text: String
     let voice: String
@@ -127,6 +405,18 @@ enum SubDubError: LocalizedError {
     case audioValidationFailed
     case videoValidationFailed
     case subtitleValidationFailed(String)
+    case whisperDependencyMissing
+    case whisperModelMissing
+    case transcriptionOutputMissing
+    case transcriptionInvalidJSON
+    case transcriptionEmpty
+    case transcriptionFailed(String)
+    case subtitleBurnValidationFailed(String)
+    case speechVoiceMissing
+    case speechOutputMissing
+    case audioReplacementTiming(String)
+    case audioReplacementMixFailed(String)
+    case audioReplacementValidationFailed(String)
     case emptyText
     case apiKeyMissing
     case networkFailed(String)
@@ -160,6 +450,30 @@ enum SubDubError: LocalizedError {
             reason = L10n.tr("subdub.error.video_validation")
         case let .subtitleValidationFailed(message):
             reason = L10n.f("subdub.error.subtitle_validation", message)
+        case .whisperDependencyMissing:
+            reason = L10n.tr("subdub.error.whisper_dependency_missing")
+        case .whisperModelMissing:
+            reason = L10n.tr("subdub.error.whisper_model_missing")
+        case .transcriptionOutputMissing:
+            reason = L10n.tr("subdub.error.transcription_output_missing")
+        case .transcriptionInvalidJSON:
+            reason = L10n.tr("subdub.error.transcription_invalid_json")
+        case .transcriptionEmpty:
+            reason = L10n.tr("subdub.error.transcription_empty")
+        case let .transcriptionFailed(message):
+            reason = L10n.f("subdub.error.transcription_failed", message)
+        case let .subtitleBurnValidationFailed(message):
+            reason = L10n.f("subdub.error.subtitle_burn_validation", message)
+        case .speechVoiceMissing:
+            reason = L10n.tr("subdub.error.speech_voice_missing")
+        case .speechOutputMissing:
+            reason = L10n.tr("subdub.error.speech_output_missing")
+        case let .audioReplacementTiming(message):
+            reason = L10n.f("subdub.error.audio_replacement_timing", message)
+        case let .audioReplacementMixFailed(message):
+            reason = L10n.f("subdub.error.audio_replacement_mix_failed", message)
+        case let .audioReplacementValidationFailed(message):
+            reason = L10n.f("subdub.error.audio_replacement_validation_failed", message)
         case .emptyText:
             reason = L10n.tr("subdub.error.empty_text")
         case .apiKeyMissing:

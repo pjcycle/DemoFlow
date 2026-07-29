@@ -114,6 +114,94 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         Task { await loadVideo(from: url) }
     }
 
+    func adoptSharedVideo(
+        url: URL,
+        duration: Double,
+        sessionDirectory: URL,
+        sourceAudioURL: URL?,
+        sourceWaveformSamples: [Double]
+    ) {
+        guard duration > 0 else { return }
+        if self.sourceURL == url, self.sessionDirectory == sessionDirectory {
+            if let sourceAudioURL {
+                self.sourceAudioURL = sourceAudioURL
+            }
+            if !sourceWaveformSamples.isEmpty {
+                self.sourceWaveformSamples = sourceWaveformSamples
+            }
+            return
+        }
+
+        recorder?.stop()
+        recorder = nil
+        pendingTakeValidation = false
+        activeRecordingRange = nil
+        stopMetering()
+        player.pause()
+        player.isMuted = false
+        player.replaceCurrentItem(with: nil)
+        isPreviewPlaying = false
+
+        removeTemporaryAudio()
+        self.sessionDirectory = sessionDirectory
+        self.sourceURL = url
+        self.sourceAudioURL = sourceAudioURL
+        sourceDuration = duration
+        playbackPosition = 0
+        self.sourceWaveformSamples = sourceWaveformSamples
+        clearSelectedDubbingRange()
+        exportURL = nil
+        isPlayerReady = false
+        state = .preparing
+        statusMessage = L10n.tr("subdub.status.importing")
+
+        let asset = AVURLAsset(url: url)
+        player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await player.seek(to: .zero)
+            isPlayerReady = true
+            state = .ready
+            statusMessage = L10n.f("subdub.status.imported", url.lastPathComponent)
+        }
+    }
+
+    func clearSharedVideo() {
+        clearVideoState(deleteSession: false)
+    }
+
+    func removeVideo() {
+        clearVideoState(deleteSession: true)
+    }
+
+    private func clearVideoState(deleteSession: Bool) {
+        recorder?.stop()
+        recorder = nil
+        pendingTakeValidation = false
+        activeRecordingRange = nil
+        stopMetering()
+
+        player.pause()
+        player.isMuted = false
+        player.replaceCurrentItem(with: nil)
+        isPreviewPlaying = false
+
+        removeTemporaryAudio()
+        if deleteSession, let sessionDirectory {
+            try? FileManager.default.removeItem(at: sessionDirectory)
+        }
+        sessionDirectory = nil
+        sourceURL = nil
+        sourceAudioURL = nil
+        sourceDuration = 0
+        playbackPosition = 0
+        isPlayerReady = false
+        sourceWaveformSamples.removeAll(keepingCapacity: true)
+        clearSelectedDubbingRange()
+        state = .idle
+        statusMessage = L10n.tr("subdub.status.video_removed")
+    }
+
     func importDroppedProviders(_ providers: [NSItemProvider]) {
         guard let provider = providers.first else { return }
         let typeIdentifier = workspace.videoTypes.map(\.identifier).first(where: {
@@ -348,6 +436,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
             await player.seek(to: .zero)
             sessionDirectory = session
+            // Direct imports still own their temporary directory. Shared imports are adopted above.
             sourceURL = persistedURL
             sourceDuration = duration.seconds
             playbackPosition = 0

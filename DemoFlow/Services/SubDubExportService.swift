@@ -48,6 +48,28 @@ struct SubDubExportService {
         return true
     }
 
+    func extractAudioForTranscription(from videoURL: URL, outputURL: URL) async throws {
+        let tools = try binaryService.ensureReady()
+        try prepareOutput(outputURL)
+        let command = FFmpegCommand(
+            executableURL: tools.ffmpegURL,
+            arguments: [
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-i", videoURL.path,
+                "-vn", "-ac", "1", "-ar", "16000",
+                "-c:a", "pcm_s16le", outputURL.path
+            ],
+            expectedDurationSeconds: nil
+        )
+        do {
+            _ = try await runner.run(command: command)
+            try await validateAudio(outputURL)
+        } catch {
+            try? fileManager.removeItem(at: outputURL)
+            throw SubDubError.serviceFailed(error.localizedDescription)
+        }
+    }
+
     func makeDubbingMixdown(
         sourceAudioURL: URL?,
         segments: [VideoDubbingSegment],
@@ -98,30 +120,201 @@ struct SubDubExportService {
         outputURL: URL,
         duration: Double,
         sessionDirectory: URL,
+        style: SubtitleStylePreset = .standard,
+        progress: ((Double) -> Void)? = nil
+    ) async throws {
+        let videoSize = try await subtitleCanvasSize(from: videoURL)
+        let intermediateURL = sessionDirectory.appendingPathComponent(
+            "subtitle_burned_video.mp4"
+        )
+        do {
+            // Burn the current subtitle document first. The second pass only changes audio,
+            // so the final video always keeps the already-rendered captions.
+            try await burnSubtitles(
+                videoURL: videoURL,
+                cues: cues.map(SubtitleTimelineCue.init(cue:)),
+                outputURL: intermediateURL,
+                duration: duration,
+                sessionDirectory: sessionDirectory,
+                videoSize: videoSize,
+                style: style,
+                progress: progress
+            )
+            try await replaceAudio(
+                videoURL: intermediateURL,
+                audioURL: audioURL,
+                outputURL: outputURL,
+                duration: duration,
+                progress: progress
+            )
+        } catch {
+            try? fileManager.removeItem(at: intermediateURL)
+            throw SubDubError.serviceFailed(error.localizedDescription)
+        }
+        try? fileManager.removeItem(at: intermediateURL)
+    }
+
+    func fitAudioToDuration(
+        sourceURL: URL,
+        targetDuration: Double,
+        outputURL: URL
+    ) async throws {
+        guard targetDuration >= 0.1 else {
+            throw SubDubError.audioReplacementTiming("字幕区间太短")
+        }
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceDuration = try await asset.load(.duration).seconds
+        guard sourceDuration > 0 else {
+            throw SubDubError.speechOutputMissing
+        }
+
+        let speed = sourceDuration / targetDuration
+        guard speed <= 2.0 else {
+            throw SubDubError.audioReplacementTiming(
+                String(format: "%.2f 秒语音无法放入 %.2f 秒区间", sourceDuration, targetDuration)
+            )
+        }
+
+        let tools = try binaryService.ensureReady()
+        try prepareOutput(outputURL)
+        var filters: [String] = []
+        if speed > 1.001 {
+            filters.append("atempo=\(ffmpegSeconds(speed))")
+        }
+        filters.append("apad=whole_dur=\(ffmpegSeconds(targetDuration))")
+        filters.append("atrim=duration=\(ffmpegSeconds(targetDuration))")
+
+        let command = FFmpegCommand(
+            executableURL: tools.ffmpegURL,
+            arguments: [
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-i", sourceURL.path,
+                "-af", filters.joined(separator: ","),
+                "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le",
+                outputURL.path
+            ],
+            expectedDurationSeconds: targetDuration
+        )
+        do {
+            _ = try await runner.run(command: command)
+            try await validateAudio(outputURL)
+        } catch {
+            try? fileManager.removeItem(at: outputURL)
+            throw error
+        }
+    }
+
+    func makeAudioReplacementMixdown(
+        segments: [AudioReplacementSegment],
+        duration: Double,
+        outputURL: URL,
+        progress: ((Double) -> Void)? = nil
+    ) async throws {
+        let orderedSegments = segments
+            .filter { $0.endTime - $0.startTime >= 0.05 }
+            .sorted { $0.startTime < $1.startTime }
+        guard duration > 0, !orderedSegments.isEmpty else {
+            throw SubDubError.audioReplacementMixFailed(
+                L10n.tr("subdub.audio_replacement.timeline_empty")
+            )
+        }
+
+        let tools = try binaryService.ensureReady()
+        var arguments = ["-hide_banner", "-loglevel", "error", "-y"]
+        for segment in orderedSegments {
+            arguments += ["-i", segment.audioURL.path]
+        }
+
+        let durationText = ffmpegSeconds(duration)
+        var filters: [String] = []
+        var labels: [String] = []
+        for (index, segment) in orderedSegments.enumerated() {
+            let delay = max(0, Int((segment.startTime * 1_000).rounded()))
+            let label = "speech\(index)"
+            filters.append(
+                "[\(index):a]aresample=44100,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,adelay=\(delay)|\(delay),apad=whole_dur=\(durationText),atrim=duration=\(durationText)[\(label)]"
+            )
+            labels.append("[\(label)]")
+        }
+        filters.append(
+            "\(labels.joined())amix=inputs=\(labels.count):duration=longest:normalize=0,aresample=44100,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,atrim=duration=\(durationText)[outa]"
+        )
+        arguments += [
+            "-filter_complex", filters.joined(separator: ";"),
+            "-map", "[outa]", "-vn", "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", outputURL.path
+        ]
+
+        try prepareOutput(outputURL)
+        let command = FFmpegCommand(
+            executableURL: tools.ffmpegURL,
+            arguments: arguments,
+            expectedDurationSeconds: duration
+        )
+        do {
+            _ = try await runner.run(command: command, onProgress: progress)
+            try await validateAudio(outputURL)
+        } catch {
+            try? fileManager.removeItem(at: outputURL)
+            throw SubDubError.audioReplacementMixFailed(error.localizedDescription)
+        }
+    }
+
+    func burnSubtitles(
+        videoURL: URL,
+        cues: [SubtitleTimelineCue],
+        outputURL: URL,
+        duration: Double,
+        sessionDirectory: URL,
+        videoSize: CGSize,
+        style: SubtitleStylePreset,
         progress: ((Double) -> Void)? = nil
     ) async throws {
         let tools = try binaryService.ensureReady()
         let subtitleURL = sessionDirectory.appendingPathComponent("captions.ass")
-        try SubtitleASSWriter.write(cues: cues, to: subtitleURL)
+        try SubtitleASSWriter.write(
+            cues: cues.map(\.subtitleCue),
+            to: subtitleURL,
+            style: style,
+            videoSize: videoSize
+        )
         try prepareOutput(outputURL)
-        let filter = "subtitles=\(escapeFilterPath(subtitleURL.path))"
+        let filter = "subtitles=\(escapeFilterPath(subtitleURL.path)):charenc=UTF-8"
         let command = FFmpegCommand(
             executableURL: tools.ffmpegURL,
             arguments: [
-                "-y", "-i", videoURL.path, "-i", audioURL.path,
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-vf", filter, "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                "-c:a", "aac", "-b:a", "128k", "-af", "apad",
-                "-t", formatDuration(duration), "-movflags", "+faststart", outputURL.path
+                "-y", "-i", videoURL.path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", filter,
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-c:a", "copy",
+                "-t", formatDuration(duration),
+                "-movflags", "+faststart", outputURL.path
             ],
             expectedDurationSeconds: duration
         )
         do {
             _ = try await runner.run(command: command, onProgress: progress)
         } catch {
+            try? fileManager.removeItem(at: outputURL)
             throw SubDubError.serviceFailed(error.localizedDescription)
         }
         try await validateMedia(outputURL, requireVideo: true)
+    }
+
+    private func subtitleCanvasSize(from videoURL: URL) async throws -> CGSize {
+        let asset = AVURLAsset(url: videoURL)
+        guard let videoTrack = try await AVAssetAsyncLoaders.firstTrack(
+            in: asset,
+            mediaType: .video
+        ) else {
+            throw SubDubError.videoValidationFailed
+        }
+        let size = try await AVAssetAsyncLoaders.orientedSize(of: videoTrack)
+        guard size.width > 0, size.height > 0 else {
+            throw SubDubError.videoValidationFailed
+        }
+        return size
     }
 
     func validateAudio(_ url: URL) async throws {
@@ -270,15 +463,30 @@ struct SubDubExportService {
 }
 
 private enum SubtitleASSWriter {
-    static func write(cues: [SubtitleCue], to url: URL) throws {
+    static func write(
+        cues: [SubtitleCue],
+        to url: URL,
+        style: SubtitleStylePreset = .standard,
+        videoSize: CGSize = CGSize(width: 1920, height: 1080)
+    ) throws {
+        let width = max(1, Int(videoSize.width.rounded()))
+        let height = max(1, Int(videoSize.height.rounded()))
+        let fontSize = style.assFontSize(forVideoHeight: CGFloat(height))
+        let marginV = style.assMarginV(forVideoHeight: CGFloat(height))
+        let sideMargin = max(20, Int((Double(width) * 0.02).rounded()))
+        let backgroundColour = assBackgroundColour(opacity: style.backgroundOpacity)
+        let bold = style.isBold ? -1 : 0
+
         var lines = [
             "[Script Info]",
             "ScriptType: v4.00+",
-            "PlayResX: 1920",
-            "PlayResY: 1080",
+            "PlayResX: \(width)",
+            "PlayResY: \(height)",
+            "WrapStyle: 2",
+            "ScaledBorderAndShadow: yes",
             "[V4+ Styles]",
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-            "Style: Default,Arial,26,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,3,1,0,2,36,36,36,1",
+            "Style: Default,\(style.fontName),\(fontSize),&H00FFFFFF,&H00FFFFFF,&H00000000,\(backgroundColour),\(bold),0,0,0,100,100,0,0,\(style.assBorderStyle),\(style.assOutlineWidth),0,2,\(sideMargin),\(sideMargin),\(marginV),1",
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
         ]
@@ -286,6 +494,12 @@ private enum SubtitleASSWriter {
             "Dialogue: 0,\(time(cue.start.seconds)),\(time(cue.end.seconds)),Default,,0,0,0,,\(sanitize(cue.text))"
         })
         try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func assBackgroundColour(opacity: Double) -> String {
+        let clampedOpacity = min(max(opacity, 0), 1)
+        let alpha = Int(((1 - clampedOpacity) * 255).rounded())
+        return String(format: "&H%02X000000", alpha)
     }
 
     private static func time(_ seconds: Double) -> String {

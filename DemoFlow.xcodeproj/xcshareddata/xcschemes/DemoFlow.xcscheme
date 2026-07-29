@@ -54,12 +54,12 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
          <CommandLineArgument
-            argument="-DemoFlowEnableDebugSubscriptionFallback"
-            isEnabled="YES">
+            argument = "-DemoFlowEnableDebugSubscriptionFallback"
+            isEnabled = "YES">
          </CommandLineArgument>
       </CommandLineArguments>
       <StoreKitConfigurationFileReference
-         identifier = "DemoFlow.storekit">
+         identifier = "container:DemoFlow.storekit">
       </StoreKitConfigurationFileReference>
    </LaunchAction>
    <ProfileAction

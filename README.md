@@ -26,7 +26,7 @@ DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawi
 
 - Independent floating camera preview (always-on-top, works across Spaces)
 - Video/audio device selection including Continuity Camera
-- Video dubbing, AI voiceover, and subtitle synchronization in the `配音字幕` workbench
+- Video dubbing, subtitle burning, and local Apple TTS audio replacement in the `配音字幕` workbench
 - Preview mute and real-time microphone level feedback
 - Aspect ratio: Auto / 16:9 / 4:3
 - Global hotkey: `⌘⌥P`
@@ -62,6 +62,12 @@ Hotkeys:
 - `Audio Transcode` and `Music Trim` are local-file only in the first release
 - Audio Extract now defaults to the unified workspace's `Music/` folder
 - Audio Transcode and Music Trim still confirm the target file in a save panel, but that panel opens in `Music/` first
+
+### Dubbing & Subtitles (Module 6)
+
+- Three tabs: `Video Dubbing`, `Subtitle Burning`, and `Audio Replacement`
+- The three tabs share one video import and temporary session, so the same loaded video and subtitle timeline stay available across the workbench
+- Subtitle Burning uses local FFmpeg and Whisper.cpp; Audio Replacement uses local Apple TTS
 
 ## Requirements
 

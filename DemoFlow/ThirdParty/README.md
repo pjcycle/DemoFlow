@@ -1,5 +1,25 @@
 # ThirdParty 目录说明（DemoFlow）
 
+## Whisper.cpp
+
+Whisper.cpp 的完整源码不要放在本目录。DemoFlow 使用 Xcode 的文件系统同步目录，源码中的示例资源、CMake 文件和测试文件会被误识别为 App 资源并造成重复打包。
+
+开发机目录约定：
+
+```text
+DemoFlow/whisper-src/                         # 源码检出目录，与 Git 工程同级
+DemoFlow/DemoFlow/ThirdParty/whisper/         # 仅放构建后的 Helper 和模型
+```
+
+从 Git 工程根目录执行：
+
+```sh
+brew install cmake
+Scripts/setup_whisper.sh
+```
+
+脚本会构建 Metal 版 `whisper-cli`，下载多语言 `ggml-base.bin`，并将它们复制到本目录供 Xcode 构建脚本签名和嵌入。没有生成物时，工程仍可编译，但字幕自动识别会明确提示缺少 Whisper 依赖。
+
 本目录用于存放 **随 App 一起打包** 的第三方二进制资源，避免运行时依赖用户本机环境。
 
 ## 1. 当前资源与用途

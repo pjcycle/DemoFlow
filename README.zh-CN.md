@@ -9,7 +9,7 @@
 [![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
 
 DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄像头、屏幕画笔、视频裁剪，以及通过既有“音频提取（MP3）”入口承载的统一音频工具台。
-同时提供独立的“配音字幕”工作台，包含视频配音、AI口播和字幕同步。
+同时提供独立的“配音字幕”工作台，包含视频配音、字幕烧制和音频替换；三个页面共用同一视频导入会话。
 
 ## 模块
 
@@ -62,6 +62,12 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 - `音频转换` 与 `音乐裁切` 首发仅支持本地文件
 - 音频提取默认写入统一工作区下的 `Music/`
 - 音频转换与音乐裁切仍保留保存面板确认，但默认打开 `Music/`
+
+### 配音字幕（第 6 模块）
+
+- 页面固定包含 `视频配音 / 字幕烧制 / 音频替换` 三个 Tab
+- 三个 Tab 共用同一视频导入与临时会话，切换页面后仍使用同一载入视频和字幕时间轴
+- 字幕烧制使用本地 FFmpeg 与 Whisper.cpp，音频替换使用本地 Apple TTS
 
 ## 系统要求
 

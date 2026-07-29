@@ -63,6 +63,22 @@ if [[ -z "$ytdlp_source_dir" ]]; then
 	}
 fi
 
+whisper_source_dir="${DEMOFLOW_WHISPER_SOURCE_DIR:-}"
+if [[ -z "$whisper_source_dir" ]]; then
+	if whisper_source_dir="$(pick_existing_dir \
+		"${srcroot}/DemoFlow/ThirdParty/whisper/arm64" \
+		"${srcroot}/ThirdParty/whisper/arm64" 2>/dev/null)"; then
+		:
+	else
+		whisper_source_dir=""
+	fi
+fi
+
+whisper_model_source="${DEMOFLOW_WHISPER_MODEL_SOURCE:-}"
+if [[ -z "$whisper_model_source" && -n "$whisper_source_dir" && -f "${whisper_source_dir:h}/models/ggml-base.bin" ]]; then
+	whisper_model_source="${whisper_source_dir:h}/models/ggml-base.bin"
+fi
+
 entitlements_path="${DEMOFLOW_EMBEDDED_TOOL_ENTITLEMENTS:-${script_dir}/EmbeddedTool.entitlements}"
 
 if [[ ! -d "$resources_dir" ]]; then
@@ -95,11 +111,27 @@ remove_stale_resource_code() {
 		"${resources_dir}/ffprobe" \
 		"${resources_dir}/yt-dlp" \
 		"${resources_dir}/yt-dlp_macos_onedir" \
-		"${resources_dir}/Runtime"
+		"${resources_dir}/Runtime" \
+		"${resources_dir}/whisper-cli" \
+		"${resources_dir}/ggml-base.bin" \
+		"${resources_dir}/ThirdParty/whisper"
 	do
 		if [[ -e "$candidate" ]]; then
 			rm -rf "$candidate"
 			echo "[DemoFlow codesign] Removed stale resource code ${candidate#${app_bundle}/}"
+		fi
+		done
+	for candidate in \
+		"${helpers_dir}/libwhisper.1.dylib" \
+		"${helpers_dir}/libggml.0.dylib" \
+		"${helpers_dir}/libggml-cpu.0.dylib" \
+		"${helpers_dir}/libggml-blas.0.dylib" \
+		"${helpers_dir}/libggml-metal.0.dylib" \
+		"${helpers_dir}/libggml-base.0.dylib"
+	do
+		if [[ -e "$candidate" ]]; then
+			rm -rf "$candidate"
+			echo "[DemoFlow codesign] Removed stale Whisper runtime ${candidate#${app_bundle}/}"
 		fi
 	done
 }
@@ -132,6 +164,20 @@ collect_archive_dsyms_if_needed() {
 copy_path "${ffmpeg_source_dir}/ffmpeg" "${helpers_dir}/ffmpeg"
 copy_path "${ffmpeg_source_dir}/ffprobe" "${helpers_dir}/ffprobe"
 chmod +x "${helpers_dir}/ffmpeg" "${helpers_dir}/ffprobe"
+
+if [[ -n "$whisper_source_dir" && -f "${whisper_source_dir}/whisper-cli" ]]; then
+	copy_path "${whisper_source_dir}/whisper-cli" "${helpers_dir}/whisper-cli"
+	chmod +x "${helpers_dir}/whisper-cli"
+else
+	echo "[DemoFlow codesign] Warning: whisper-cli not found; subtitle transcription will be unavailable."
+fi
+
+if [[ -n "$whisper_model_source" && -f "$whisper_model_source" ]]; then
+	mkdir -p "${resources_dir}/Models"
+	copy_path "$whisper_model_source" "${resources_dir}/Models/ggml-base.bin"
+else
+	echo "[DemoFlow codesign] Warning: ggml-base.bin not found; subtitle transcription will be unavailable."
+fi
 remove_stale_resource_code
 
 # When code signing is disabled (CI builds), copy yt-dlp without signing and exit early
@@ -150,6 +196,14 @@ if [[ "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
 		fi
 	else
 		echo "[DemoFlow codesign] yt-dlp excluded from this build (AppStore)."
+	fi
+	if [[ -n "$whisper_source_dir" && -f "${whisper_source_dir}/whisper-cli" ]]; then
+		copy_path "${whisper_source_dir}/whisper-cli" "${helpers_dir}/whisper-cli"
+		chmod +x "${helpers_dir}/whisper-cli"
+	fi
+	if [[ -n "$whisper_model_source" && -f "$whisper_model_source" ]]; then
+		mkdir -p "${resources_dir}/Models"
+		copy_path "$whisper_model_source" "${resources_dir}/Models/ggml-base.bin"
 	fi
 	exit 0
 fi
@@ -172,6 +226,9 @@ codesign_common_flags=(
 )
 
 helpers=(ffmpeg ffprobe)
+if [[ -f "${helpers_dir}/whisper-cli" ]]; then
+	helpers+=(whisper-cli)
+fi
 for helper in "${helpers[@]}"; do
 	helper_path="${helpers_dir}/${helper}"
 	identifier="${product_identifier}.${helper}"

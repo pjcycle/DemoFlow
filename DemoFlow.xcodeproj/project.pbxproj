@@ -252,6 +252,10 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/DemoFlow/ThirdParty/whisper/arm64",
+				);
 				MARKETING_VERSION = 1.0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = pjln.top.demoflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -425,6 +429,10 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/DemoFlow/ThirdParty/whisper/arm64",
+				);
 				MARKETING_VERSION = 1.0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = pjln.top.demoflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -479,6 +487,10 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/DemoFlow/ThirdParty/whisper/arm64",
 				);
 				MARKETING_VERSION = 1.0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = pjln.top.demoflow;

@@ -1,6 +1,7 @@
 import AVFoundation
 import AVKit
 import AppKit
+import CoreGraphics
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -14,11 +15,26 @@ struct SubDubSettingsView: View {
 
             switch viewModel.selectedTab {
             case .videoDubbing:
-                VideoDubbingPanel(viewModel: viewModel.videoDubbingViewModel)
-            case .aiVoiceover:
-                AIVoiceoverPanel(viewModel: viewModel.aiVoiceoverViewModel)
-            case .subtitleSync:
-                SubtitleSyncPanel(viewModel: viewModel.subtitleSyncViewModel)
+                VideoDubbingPanel(
+                    viewModel: viewModel.videoDubbingViewModel,
+                    onImportVideo: viewModel.importVideoByPanel,
+                    onImportDroppedProviders: viewModel.importDroppedProviders,
+                    onRemoveVideo: viewModel.removeSharedVideo
+                )
+            case .subtitleBurning:
+                SubtitleBurnPanel(
+                    viewModel: viewModel.subtitleBurnViewModel,
+                    onImportVideo: viewModel.importVideoByPanel,
+                    onImportDroppedProviders: viewModel.importDroppedProviders,
+                    onRemoveVideo: viewModel.removeSharedVideo
+                )
+            case .audioReplacement:
+                AudioReplacementPanel(
+                    viewModel: viewModel.audioReplacementViewModel,
+                    onImportVideo: viewModel.importVideoByPanel,
+                    onImportDroppedProviders: viewModel.importDroppedProviders,
+                    onRemoveVideo: viewModel.removeSharedVideo
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -98,6 +114,9 @@ struct SubDubSettingsView: View {
 
 private struct VideoDubbingPanel: View {
     @ObservedObject var viewModel: VideoDubbingViewModel
+    let onImportVideo: () -> Void
+    let onImportDroppedProviders: ([NSItemProvider]) -> Void
+    let onRemoveVideo: () -> Void
 
     private let dropTypes = [
         UTType.fileURL.identifier,
@@ -121,6 +140,14 @@ private struct VideoDubbingPanel: View {
                 SubDubPlayerView(player: viewModel.player)
                     .frame(minHeight: 280, maxHeight: 420)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contextMenu {
+                        Button(L10n.tr("subdub.action.remove_video")) {
+                            onRemoveVideo()
+                        }
+                        Button(L10n.tr("subdub.action.reselect_video")) {
+                            onImportVideo()
+                        }
+                    }
 
                 dubbingTimeline
 
@@ -214,10 +241,10 @@ private struct VideoDubbingPanel: View {
                 dropZone(
                     icon: "film",
                     text: L10n.tr("subdub.action.drop_video"),
-                    action: viewModel.importVideoByPanel
+                    action: onImportVideo
                 )
                 .onDrop(of: dropTypes, isTargeted: nil) { providers in
-                    viewModel.importDroppedProviders(providers)
+                    onImportDroppedProviders(providers)
                     return true
                 }
             }
@@ -301,6 +328,1041 @@ private struct VideoDubbingPanel: View {
             Spacer(minLength: 0)
         }
     }
+}
+
+private struct SubtitleBurnPanel: View {
+    @ObservedObject var viewModel: SubtitleBurnViewModel
+    let onImportVideo: () -> Void
+    let onImportDroppedProviders: ([NSItemProvider]) -> Void
+    let onRemoveVideo: () -> Void
+
+    private let dropTypes = [
+        UTType.fileURL.identifier,
+        UTType.movie.identifier,
+        UTType.plainText.identifier
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 14) {
+                subtitleEditor
+                videoPreview
+            }
+
+            if viewModel.hasSource {
+                SubtitleBurnTimelineView(
+                    duration: viewModel.sourceDuration,
+                    position: viewModel.playbackPosition,
+                    sourceSamples: viewModel.sourceWaveformSamples,
+                    cues: viewModel.cues,
+                    selectedCueID: viewModel.selectedCueID,
+                    onSeek: viewModel.seek
+                )
+            }
+
+            statusText(viewModel.statusMessage)
+        }
+        .padding(16)
+        .background(cardBackground)
+        .onDrop(of: dropTypes, isTargeted: nil) { providers in
+            onImportDroppedProviders(providers)
+            return true
+        }
+    }
+
+    private var subtitleEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(
+                    L10n.tr("subdub.subtitle_burn.editor"),
+                    systemImage: "list.bullet.rectangle"
+                )
+                .font(.headline)
+                Spacer()
+                Button {
+                    viewModel.addCue()
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.tr("subdub.action.add_subtitle"))
+                .disabled(!viewModel.hasSource || viewModel.state.isBusy)
+                .opacity(!viewModel.hasSource || viewModel.state.isBusy ? 0.38 : 1)
+                iconButton(
+                    systemName: "arrow.down.doc",
+                    help: L10n.tr("subdub.action.import_timeline_json"),
+                    action: viewModel.importTimelineJSONByPanel,
+                    isDisabled: !viewModel.hasSource || viewModel.state.isBusy
+                )
+                iconButton(
+                    systemName: "arrow.up.doc",
+                    help: L10n.tr("subdub.action.export_timeline_json"),
+                    action: viewModel.exportTimelineJSONByPanel,
+                    isDisabled: !viewModel.hasSource || viewModel.cues.isEmpty || viewModel.state.isBusy
+                )
+                subtitleStyleMenu
+            }
+
+            if viewModel.cues.isEmpty {
+                Text(L10n.tr("subdub.subtitle_burn.empty"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(10)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(viewModel.cues) { cue in
+                            SubtitleCueEditorRow(
+                                cue: cue,
+                                isSelected: cue.id == viewModel.selectedCueID,
+                                onSelect: { viewModel.selectCue(cue.id) },
+                                onTimeChanged: { start, end in
+                                    viewModel.updateCueTime(
+                                        id: cue.id,
+                                        startText: start,
+                                        endText: end
+                                    )
+                                },
+                                onTextChanged: { text in
+                                    viewModel.updateCueText(id: cue.id, text: text)
+                                },
+                                onDelete: { viewModel.removeCue(cue.id) }
+                            )
+                        }
+                    }
+                    .padding(4)
+                }
+            }
+        }
+        .frame(width: 330, height: subtitleEditorHeight, alignment: .topLeading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private var subtitleStyleMenu: some View {
+        Menu {
+            ForEach(SubtitleStylePreset.allCases) { style in
+                Button {
+                    viewModel.updateSubtitleStyle(style)
+                } label: {
+                    HStack {
+                        Text(L10n.tr(style.titleKey))
+                        if style == viewModel.subtitleStyle {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "textformat")
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .help(L10n.tr("subdub.subtitle_style.label"))
+        .disabled(!viewModel.hasSource || viewModel.state.isBusy)
+        .opacity(!viewModel.hasSource || viewModel.state.isBusy ? 0.38 : 1)
+    }
+
+    private var subtitleEditorHeight: CGFloat {
+        guard viewModel.hasSource else { return 320 }
+        // Match the preview header, video surface, and action row on the right.
+        return videoPreviewSize.height + 48
+    }
+
+    private var videoPreview: some View {
+        let previewSize = videoPreviewSize
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(
+                    viewModel.sourceURL?.lastPathComponent ?? L10n.tr("subdub.empty.no_video"),
+                    systemImage: "film"
+                )
+                .lineLimit(1)
+                Spacer()
+                Text("\(formatSubtitleTime(viewModel.playbackPosition)) / \(formatSubtitleTime(viewModel.sourceDuration))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if viewModel.hasSource {
+                GeometryReader { proxy in
+                    let contentRect = videoContentRect(in: proxy.size)
+
+                    ZStack {
+                        SubDubPlayerView(player: viewModel.player)
+
+                        if let cue = viewModel.activeCue {
+                            let style = viewModel.subtitleStyle
+                            let fontSize = style.previewFontSize(forVideoHeight: contentRect.height)
+                            let horizontalPadding = max(8, fontSize * 0.65)
+                            let verticalPadding = max(4, fontSize * 0.25)
+                            let bottomMargin = max(6, contentRect.height * style.marginScale)
+                            Text(cue.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                                .font(.custom(style.fontName, size: fontSize))
+                                .fontWeight(style.isBold ? .bold : .medium)
+                                .multilineTextAlignment(.center)
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: min(max(contentRect.width - 32, 1), 360))
+                                .padding(.horizontal, horizontalPadding)
+                                .padding(.vertical, verticalPadding)
+                                .background(
+                                    style.usesBackground
+                                        ? Color.black.opacity(style.backgroundOpacity)
+                                        : Color.clear
+                                )
+                                .shadow(
+                                    color: style == .outline ? .black : .clear,
+                                    radius: style == .outline ? 1.5 : 0,
+                                    x: style == .outline ? 1 : 0,
+                                    y: style == .outline ? 1 : 0
+                                )
+                                .padding(.bottom, bottomMargin)
+                                .frame(
+                                    width: max(contentRect.width, 1),
+                                    height: max(contentRect.height, 1),
+                                    alignment: .bottom
+                                )
+                                .position(x: contentRect.midX, y: contentRect.midY)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                }
+                .frame(width: previewSize.width, height: previewSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contextMenu {
+                        Button(L10n.tr("subdub.action.remove_video")) {
+                            onRemoveVideo()
+                        }
+                        Button(L10n.tr("subdub.action.reselect_video")) {
+                            onImportVideo()
+                        }
+                }
+            } else {
+                dropZone(
+                    icon: "film",
+                    text: L10n.tr("subdub.action.drop_video"),
+                    action: onImportVideo
+                )
+                .frame(minWidth: 420, minHeight: 250)
+            }
+
+            HStack(spacing: 8) {
+                iconButton(
+                    systemName: viewModel.player.timeControlStatus == .playing ? "pause.fill" : "play.fill",
+                    help: viewModel.player.timeControlStatus == .playing
+                        ? L10n.tr("subdub.action.pause")
+                        : L10n.tr("subdub.action.play"),
+                    action: viewModel.togglePlayback,
+                    isDisabled: !viewModel.isPlayerReady
+                )
+                labeledAction(
+                    icon: "film",
+                    title: L10n.tr("subdub.action.import_video"),
+                    action: onImportVideo
+                )
+                labeledAction(
+                    icon: "captions.bubble",
+                    title: L10n.tr("subdub.action.import_subtitle"),
+                    action: viewModel.importSubtitleByPanel,
+                    isDisabled: !viewModel.hasSource || viewModel.state.isBusy
+                )
+                labeledAction(
+                    icon: "wand.and.stars",
+                    title: L10n.tr("subdub.action.generate_subtitles"),
+                    action: viewModel.generateSubtitles,
+                    isDisabled: !viewModel.hasSource || viewModel.state.isBusy
+                )
+                if viewModel.state.isBusy {
+                    iconButton(
+                        systemName: "xmark",
+                        help: L10n.tr("subdub.action.cancel"),
+                        action: viewModel.cancelCurrentTask
+                    )
+                } else {
+                    labeledActionWithBadge(
+                        systemName: "captions.bubble",
+                        title: L10n.tr("subdub.action.burn_export"),
+                        help: L10n.tr("subdub.action.burn_export"),
+                        action: viewModel.burnSubtitles,
+                        badge: L10n.tr("subscription.membership.vip"),
+                        isDisabled: !viewModel.canBurn
+                    )
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var videoPreviewSize: CGSize {
+        let sourceSize = viewModel.sourceVideoSize
+        guard sourceSize.width > 0, sourceSize.height > 0 else {
+            return CGSize(width: 520, height: 292.5)
+        }
+
+        let aspectRatio = sourceSize.width / sourceSize.height
+        let maxWidth: CGFloat = 520
+        let maxHeight: CGFloat = 320
+        let width = min(maxWidth, maxHeight * aspectRatio)
+        let height = width / aspectRatio
+        return CGSize(width: width, height: height)
+    }
+
+    private func labeledAction(
+        icon: String,
+        title: String,
+        action: @escaping () -> Void,
+        isDisabled: Bool = false
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.caption)
+        }
+        .buttonStyle(.bordered)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.42 : 1)
+    }
+
+    private func labeledActionWithBadge(
+        systemName: String,
+        title: String,
+        help: String,
+        action: @escaping () -> Void,
+        badge: String,
+        isDisabled: Bool = false
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title)
+                Image(systemName: systemName)
+                    .font(.caption.weight(.semibold))
+                Text(badge)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.16))
+                    .clipShape(Capsule())
+            }
+            .font(.caption)
+        }
+        .buttonStyle(.bordered)
+        .help(help)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.42 : 1)
+    }
+
+    private func videoContentRect(in containerSize: CGSize) -> CGRect {
+        let size = viewModel.sourceVideoSize
+        guard size.width > 0, size.height > 0,
+              containerSize.width > 0, containerSize.height > 0 else {
+            return CGRect(origin: .zero, size: containerSize)
+        }
+
+        let scale = min(
+            containerSize.width / size.width,
+            containerSize.height / size.height
+        )
+        let contentSize = CGSize(
+            width: size.width * scale,
+            height: size.height * scale
+        )
+        return CGRect(
+            x: (containerSize.width - contentSize.width) / 2,
+            y: (containerSize.height - contentSize.height) / 2,
+            width: contentSize.width,
+            height: contentSize.height
+        )
+    }
+}
+
+private struct AudioReplacementPanel: View {
+    @ObservedObject var viewModel: AudioReplacementViewModel
+    let onImportVideo: () -> Void
+    let onImportDroppedProviders: ([NSItemProvider]) -> Void
+    let onRemoveVideo: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if viewModel.hasSource {
+                HStack(alignment: .bottom, spacing: 14) {
+                    subtitleEditor
+                    videoPreview
+                }
+                SubtitleBurnTimelineView(
+                    duration: viewModel.sourceDuration,
+                    position: viewModel.playbackPosition,
+                    sourceSamples: viewModel.sourceWaveformSamples,
+                    cues: viewModel.cues,
+                    selectedCueID: viewModel.selectedCueID,
+                    overlaySamples: viewModel.overlayWaveformSamples,
+                    overlayDuration: viewModel.overlayWaveformDuration,
+                    onSeek: viewModel.seek
+                )
+            } else {
+                emptyState
+            }
+            statusText(viewModel.statusMessage)
+        }
+        .padding(12)
+        .background(cardBackground)
+        .onDrop(of: [
+            UTType.fileURL.identifier,
+            UTType.movie.identifier,
+            UTType.mpeg4Movie.identifier,
+            UTType.quickTimeMovie.identifier
+        ], isTargeted: nil) { providers in
+            onImportDroppedProviders(providers)
+            return true
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(
+                L10n.tr("subdub.audio_replacement.title"),
+                systemImage: "waveform.badge.plus"
+            )
+            .font(.headline)
+            Text(L10n.tr("subdub.audio_replacement.placeholder"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            dropZone(
+                icon: "film",
+                text: L10n.tr("subdub.action.drop_video"),
+                action: onImportVideo
+            )
+            .onDrop(of: [
+                UTType.fileURL.identifier,
+                UTType.movie.identifier,
+                UTType.mpeg4Movie.identifier,
+                UTType.quickTimeMovie.identifier
+            ], isTargeted: nil) { providers in
+                onImportDroppedProviders(providers)
+                return true
+            }
+
+            HStack(spacing: 8) {
+                Button(action: viewModel.importVoiceByPanel) {
+                    Label(
+                        L10n.tr("subdub.action.import_audio"),
+                        systemImage: "waveform.badge.plus"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .help(L10n.tr("subdub.audio_replacement.import_hint"))
+
+                Text(L10n.tr("subdub.audio_replacement.import_hint"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+    }
+
+    private var subtitleEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(
+                    L10n.tr("subdub.subtitle_burn.editor"),
+                    systemImage: "list.bullet.rectangle"
+                )
+                .font(.headline)
+                Spacer()
+                iconButton(
+                    systemName: "trash",
+                    help: L10n.tr("subdub.action.clear_replacement_audio"),
+                    action: viewModel.clearReplacementAudio,
+                    isDisabled: !(viewModel.hasReplacementAudio || viewModel.hasImportedAudio) || viewModel.state.isBusy
+                )
+            }
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(viewModel.cues) { cue in
+                        VStack(alignment: .leading, spacing: 4) {
+                            cueEditorRow(for: cue)
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(cueStatusColor(viewModel.cueStatuses[cue.id] ?? .pending))
+                                    .frame(width: 6, height: 6)
+                                Text(viewModel.cueStatusText(for: cue.id))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                iconButton(
+                                    systemName: "arrow.clockwise",
+                                    help: L10n.tr("subdub.action.regenerate_replacement_audio"),
+                                    action: { viewModel.regenerateCue(cue.id) },
+                                    isDisabled: viewModel.state.isBusy
+                                )
+                            }
+                            .padding(.horizontal, 8)
+                        }
+                    }
+                }
+                .padding(4)
+            }
+        }
+        .frame(width: 330, height: 430, alignment: .topLeading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private var videoPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(viewModel.sourceName, systemImage: "film")
+                    .lineLimit(1)
+                Spacer()
+                Text(viewModel.playbackPositionText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            SubDubPlayerView(player: viewModel.player)
+                .frame(width: previewSize.width, height: previewSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contextMenu {
+                    Button(L10n.tr("subdub.action.remove_video")) {
+                        onRemoveVideo()
+                    }
+                    Button(L10n.tr("subdub.action.reselect_video"), action: onImportVideo)
+                }
+
+            HStack(spacing: 8) {
+                iconButton(
+                    systemName: viewModel.player.timeControlStatus == .playing ? "pause.fill" : "play.fill",
+                    help: viewModel.player.timeControlStatus == .playing
+                        ? L10n.tr("subdub.action.pause")
+                        : L10n.tr("subdub.action.play"),
+                    action: viewModel.togglePlayback,
+                    isDisabled: !viewModel.isPlayerReady
+                )
+                iconButton(
+                    systemName: "stop.fill",
+                    help: L10n.tr("subdub.action.stop_recording"),
+                    action: viewModel.stopPlayback,
+                    isDisabled: !viewModel.isPlayerReady
+                )
+                audioPreviewControl
+                Spacer()
+            }
+
+            HStack(alignment: .center, spacing: 8) {
+                Picker(L10n.tr("subdub.audio_replacement.language"), selection: Binding(
+                    get: { viewModel.languageMode },
+                    set: { viewModel.updateLanguageMode($0) }
+                )) {
+                    ForEach(AudioReplacementLanguageMode.allCases) { mode in
+                        Text(L10n.tr(mode.titleKey)).tag(mode)
+                    }
+                }
+                .frame(width: 150)
+                Picker(L10n.tr("subdub.audio_replacement.voice"), selection: Binding(
+                    get: { viewModel.selectedVoiceIdentifier },
+                    set: { viewModel.updateVoiceIdentifier($0) }
+                )) {
+                    ForEach(viewModel.voiceOptions) { voice in
+                        Text(voice.title).tag(voice.id)
+                    }
+                }
+                .frame(width: 220, alignment: .leading)
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                Text(L10n.tr("subdub.audio_replacement.rate"))
+                    .font(.caption)
+                Slider(value: Binding(
+                    get: { viewModel.rate },
+                    set: { viewModel.updateRate($0) }
+                ), in: 0.5...2.0, step: 0.05)
+                Text("\(viewModel.rate, specifier: "%.2fx")")
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 46, alignment: .trailing)
+            }
+
+            HStack(spacing: 8) {
+                if viewModel.state.isBusy {
+                    iconButton(
+                        systemName: "xmark",
+                        help: L10n.tr("subdub.action.cancel"),
+                        action: viewModel.cancelCurrentTask
+                    )
+                } else {
+                    labeledActionWithBadge(
+                        systemName: "waveform.and.mic",
+                        title: L10n.tr("subdub.action.generate_replacement_audio"),
+                        help: L10n.tr("subdub.action.generate_replacement_audio"),
+                        action: viewModel.generateAllAudio,
+                        badge: L10n.tr("subscription.membership.vip"),
+                        isDisabled: !viewModel.hasCues
+                    )
+                    labeledActionWithBadge(
+                        systemName: "square.and.arrow.down",
+                        title: L10n.tr("subdub.action.export_replacement_video"),
+                        help: L10n.tr("subdub.action.export_replacement_video"),
+                        action: viewModel.exportReplacementVideo,
+                        badge: L10n.tr("subscription.membership.vip"),
+                        isDisabled: !viewModel.canExport
+                    )
+                    labeledActionWithBadge(
+                        systemName: "waveform.badge.arrow.down",
+                        title: L10n.tr("subdub.action.export_audio_replacement"),
+                        help: L10n.tr("subdub.action.export_audio_replacement"),
+                        action: viewModel.exportAudioReplacement,
+                        badge: L10n.tr("subscription.membership.vip"),
+                        isDisabled: !viewModel.canAudioReplaceExport
+                    )
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var previewSize: CGSize {
+        let sourceSize = viewModel.sourceVideoSize
+        guard sourceSize.width > 0, sourceSize.height > 0 else {
+            return CGSize(width: 520, height: 292.5)
+        }
+        let aspectRatio = sourceSize.width / sourceSize.height
+        let maxWidth: CGFloat = 520
+        let maxHeight: CGFloat = 300
+        let width = min(maxWidth, maxHeight * aspectRatio)
+        return CGSize(width: width, height: width / aspectRatio)
+    }
+
+    private var audioPreviewControl: some View {
+        HStack(spacing: 2) {
+            audioModeButton(.original)
+            if viewModel.hasReplacementAudio {
+                audioModeButton(.replacement)
+            }
+            Button(action: viewModel.handleImportedAudioButton) {
+                Label(
+                    L10n.tr("subdub.action.import_replacement_audio"),
+                    systemImage: "waveform.badge.plus"
+                )
+                .font(.caption)
+                .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(viewModel.previewMode == .imported ? Color.white : Color.primary)
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+            .background(
+                viewModel.previewMode == .imported
+                    ? Color.accentColor
+                    : Color.clear
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .help(L10n.tr("subdub.action.import_replacement_audio"))
+            .disabled(viewModel.state.isBusy || !viewModel.hasSource)
+
+            if let importedAudioURL = viewModel.importedAudioURL {
+                Divider()
+                    .frame(height: 18)
+                Text(importedAudioURL.lastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 130, alignment: .leading)
+                Button(action: viewModel.removeImportedAudio) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.tr("subdub.action.remove_imported_audio"))
+                .disabled(viewModel.state.isBusy)
+            }
+        }
+        .padding(3)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+        .onDrop(
+            of: [UTType.audio.identifier, UTType.fileURL.identifier],
+            isTargeted: nil,
+            perform: { providers in
+                viewModel.importDroppedVoiceProviders(providers)
+                return true
+            }
+        )
+    }
+
+    private func audioModeButton(_ mode: AudioPreviewMode) -> some View {
+        Button {
+            viewModel.setPreviewMode(mode)
+        } label: {
+            Text(L10n.tr(mode.titleKey))
+                .font(.headline)
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(viewModel.previewMode == mode ? Color.white : Color.primary)
+        .padding(.horizontal, 14)
+        .frame(height: 32)
+        .background(
+            viewModel.previewMode == mode
+                ? Color.accentColor
+                : Color.clear
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .disabled(viewModel.state.isBusy || !viewModel.hasSource)
+    }
+
+    private func cueStatusColor(_ status: AudioReplacementCueStatus) -> Color {
+        switch status {
+        case .pending: return .secondary
+        case .generating: return .orange
+        case .generated: return .green
+        case .failed: return .red
+        }
+    }
+
+    private func cueEditorRow(for cue: SubtitleTimelineCue) -> some View {
+        SubtitleCueEditorRow(
+            cue: cue,
+            isSelected: cue.id == viewModel.selectedCueID,
+            onSelect: { viewModel.selectCue(cue.id) },
+            onTimeChanged: { start, end in
+                viewModel.updateCueTime(id: cue.id, startText: start, endText: end)
+            },
+            onTextChanged: { text in
+                viewModel.updateCueText(id: cue.id, text: text)
+            },
+            onDelete: { viewModel.removeCue(cue.id) }
+        )
+    }
+
+    private func labeledActionWithBadge(
+        systemName: String,
+        title: String,
+        help: String,
+        action: @escaping () -> Void,
+        badge: String,
+        isDisabled: Bool = false
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: systemName)
+                    .font(.caption.weight(.semibold))
+                Text(title)
+                Text(badge)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.16))
+                    .clipShape(Capsule())
+            }
+            .font(.caption)
+        }
+        .buttonStyle(.bordered)
+        .help(help)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.42 : 1)
+    }
+}
+
+private struct SubtitleCueEditorRow: View {
+    let cue: SubtitleTimelineCue
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onTimeChanged: (String, String) -> Void
+    let onTextChanged: (String) -> Void
+    let onDelete: () -> Void
+
+    @State private var startText: String
+    @State private var endText: String
+    @State private var textDraft: String
+
+    init(
+        cue: SubtitleTimelineCue,
+        isSelected: Bool,
+        onSelect: @escaping () -> Void,
+        onTimeChanged: @escaping (String, String) -> Void,
+        onTextChanged: @escaping (String) -> Void,
+        onDelete: @escaping () -> Void
+    ) {
+        self.cue = cue
+        self.isSelected = isSelected
+        self.onSelect = onSelect
+        self.onTimeChanged = onTimeChanged
+        self.onTextChanged = onTextChanged
+        self.onDelete = onDelete
+        _startText = State(initialValue: formatSubtitleTime(cue.startTime))
+        _endText = State(initialValue: formatSubtitleTime(cue.endTime))
+        _textDraft = State(initialValue: cue.text)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                TextField("00:00.000", text: $startText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption.monospacedDigit())
+                    .onSubmit { onTimeChanged(startText, endText) }
+                Text(L10n.tr("subdub.subtitle_burn.to"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                TextField("00:00.000", text: $endText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption.monospacedDigit())
+                    .onSubmit { onTimeChanged(startText, endText) }
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.tr("subdub.action.remove_subtitle"))
+            }
+
+            TextEditor(text: $textDraft)
+                .font(.caption)
+                .foregroundStyle(
+                    isDefaultText
+                        ? Color.secondary.opacity(0.55)
+                        : Color.primary
+                )
+                .frame(minHeight: 44, maxHeight: 64)
+                .padding(3)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .simultaneousGesture(
+                    TapGesture().onEnded {
+                        clearDefaultTextIfNeeded()
+                    }
+                )
+                .onChange(of: textDraft) { _, value in
+                    onTextChanged(value)
+                }
+        }
+        .padding(8)
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(isSelected ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+    }
+
+    private var isDefaultText: Bool {
+        textDraft == L10n.tr("subdub.subtitle_burn.default_text")
+    }
+
+    private func clearDefaultTextIfNeeded() {
+        guard isDefaultText else { return }
+        textDraft = ""
+        onTextChanged("")
+    }
+}
+
+private struct SubtitleBurnTimelineView: View {
+    let duration: Double
+    let position: Double
+    let sourceSamples: [Double]
+    let cues: [SubtitleTimelineCue]
+    let selectedCueID: UUID?
+    let overlaySamples: [Double]
+    let overlayDuration: Double
+    let onSeek: ((Double) -> Void)?
+
+    init(
+        duration: Double,
+        position: Double,
+        sourceSamples: [Double],
+        cues: [SubtitleTimelineCue],
+        selectedCueID: UUID?,
+        overlaySamples: [Double] = [],
+        overlayDuration: Double = 0,
+        onSeek: ((Double) -> Void)? = nil
+    ) {
+        self.duration = duration
+        self.position = position
+        self.sourceSamples = sourceSamples
+        self.cues = cues
+        self.selectedCueID = selectedCueID
+        self.overlaySamples = overlaySamples
+        self.overlayDuration = overlayDuration
+        self.onSeek = onSeek
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ZStack(alignment: .topLeading) {
+                SubtitleBurnWaveformCanvas(
+                    duration: duration,
+                    sourceSamples: sourceSamples,
+                    cues: cues,
+                    selectedCueID: selectedCueID,
+                    overlaySamples: overlaySamples,
+                    overlayDuration: overlayDuration
+                )
+                .frame(height: 72)
+                .padding(.top, 22)
+
+                SubDubTimelineRuler(duration: duration)
+                    .frame(height: 22)
+
+                SubDubTimelinePlayhead(duration: duration, position: position)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                GeometryReader { proxy in
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .allowsHitTesting(onSeek != nil)
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    guard let onSeek, duration > 0 else { return }
+                                    let progress = min(
+                                        max(value.location.x / max(proxy.size.width, 1), 0),
+                                        1
+                                    )
+                                    onSeek(progress * duration)
+                                }
+                        )
+                }
+            }
+        }
+        .frame(height: 94)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(red: 0.09, green: 0.10, blue: 0.11))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+}
+
+private struct SubtitleBurnWaveformCanvas: View {
+    let duration: Double
+    let sourceSamples: [Double]
+    let cues: [SubtitleTimelineCue]
+    let selectedCueID: UUID?
+    let overlaySamples: [Double]
+    let overlayDuration: Double
+
+    var body: some View {
+        Canvas { context, size in
+            let barCount = max(32, Int(size.width / 6))
+            let baselineY = size.height / 2
+
+            for cue in cues {
+                let start = CGFloat(min(max(cue.startTime / max(duration, 0.001), 0), 1)) * size.width
+                let end = CGFloat(min(max(cue.endTime / max(duration, 0.001), 0), 1)) * size.width
+                let rect = CGRect(x: start, y: 0, width: max(end - start, 1), height: size.height)
+                let color = cue.id == selectedCueID ? Color.accentColor.opacity(0.28) : Color.accentColor.opacity(0.12)
+                context.fill(Path(rect), with: .color(color))
+            }
+
+            var baseline = Path()
+            baseline.move(to: CGPoint(x: 8, y: baselineY))
+            baseline.addLine(to: CGPoint(x: size.width - 8, y: baselineY))
+            context.stroke(
+                baseline,
+                with: .color(Color.secondary.opacity(0.42)),
+                style: StrokeStyle(lineWidth: 0.75, lineCap: .round, dash: [1, 3])
+            )
+
+            if !sourceSamples.isEmpty {
+                for index in 0..<barCount {
+                    let fraction = Double(index) / Double(max(barCount - 1, 1))
+                    let start = min(
+                        sourceSamples.count - 1,
+                        Int(Double(index) / Double(barCount) * Double(sourceSamples.count))
+                    )
+                    let end = min(
+                        sourceSamples.count,
+                        max(start + 1, Int(Double(index + 1) / Double(barCount) * Double(sourceSamples.count)))
+                    )
+                    let value = sourceSamples[start..<end].max() ?? 0
+                    guard value > 0.02 else { continue }
+                    let height = min(size.height * 0.64, size.height * (0.04 + value * 0.60))
+                    let rect = CGRect(
+                        x: CGFloat(fraction) * size.width,
+                        y: (size.height - height) / 2,
+                        width: 2,
+                        height: max(height, 2)
+                    )
+                    context.fill(
+                        Path(roundedRect: rect, cornerRadius: 1),
+                        with: .color(Color.secondary.opacity(0.58))
+                    )
+                }
+            }
+
+            guard !overlaySamples.isEmpty, overlayDuration > 0, duration > 0 else { return }
+            let visibleFraction = min(max(overlayDuration / duration, 0), 1)
+            let overlayBarCount = max(1, Int(Double(barCount) * visibleFraction))
+            for index in 0..<overlayBarCount {
+                let sampleFraction = Double(index) / Double(max(overlayBarCount - 1, 1))
+                let timelineFraction = sampleFraction * visibleFraction
+                let start = min(
+                    overlaySamples.count - 1,
+                    Int(sampleFraction * Double(overlaySamples.count))
+                )
+                let end = min(
+                    overlaySamples.count,
+                    max(start + 1, Int((sampleFraction + 1 / Double(max(overlayBarCount, 1))) * Double(overlaySamples.count)))
+                )
+                let value = overlaySamples[start..<end].max() ?? 0
+                guard value > 0.02 else { continue }
+                let height = min(size.height * 0.92, size.height * (0.04 + value * 0.86))
+                let rect = CGRect(
+                    x: CGFloat(timelineFraction) * size.width,
+                    y: (size.height - height) / 2,
+                    width: 2,
+                    height: max(height, 2)
+                )
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: 1),
+                    with: .color(Color.accentColor.opacity(0.9))
+                )
+            }
+        }
+        .background(Color.clear)
+    }
+}
+
+private func formatSubtitleTime(_ seconds: Double) -> String {
+    let totalMilliseconds = max(0, Int((seconds * 1_000).rounded()))
+    let milliseconds = totalMilliseconds % 1_000
+    let totalSeconds = totalMilliseconds / 1_000
+    let secondsPart = totalSeconds % 60
+    let minutes = totalSeconds / 60
+    return String(format: "%02d:%02d.%03d", minutes, secondsPart, milliseconds)
 }
 
 private struct AIVoiceoverPanel: View {
@@ -737,7 +1799,7 @@ private final class SubDubPlayerHostingView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     @available(*, unavailable)
@@ -746,7 +1808,7 @@ private final class SubDubPlayerHostingView: NSView {
     override func makeBackingLayer() -> CALayer {
         let layer = AVPlayerLayer()
         layer.videoGravity = .resizeAspect
-        layer.backgroundColor = NSColor.black.cgColor
+        layer.backgroundColor = NSColor.clear.cgColor
         return layer
     }
 
