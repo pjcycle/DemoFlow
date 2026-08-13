@@ -13,6 +13,13 @@ struct YtDlpBinaryService {
     private static let bundledOnedirDirectoryName = "yt-dlp_macos_onedir"
     private static let executableName = "yt-dlp_macos"
     private static let helpersExecutableName = "yt-dlp"
+#if DEBUG
+    private static let localHostCandidates = [
+        "/opt/homebrew/bin/yt-dlp",
+        "/usr/local/bin/yt-dlp",
+        "/usr/bin/yt-dlp"
+    ]
+#endif
     private var helpersDirectoryURL: URL? {
         Bundle.main.bundleURL
             .appendingPathComponent("Contents", isDirectory: true)
@@ -33,6 +40,17 @@ struct YtDlpBinaryService {
            let cmd = validateCandidate(at: onedirURL, label: "onedir", errors: &errors) {
             return cmd
         }
+
+#if DEBUG
+        // Local Debug builds may use a developer-installed yt-dlp so URL flows
+        // remain testable before the standalone binary is added to the bundle.
+        for candidatePath in Self.localHostCandidates {
+            let candidateURL = URL(fileURLWithPath: candidatePath)
+            if let cmd = validateCandidate(at: candidateURL, label: "debug-host", errors: &errors) {
+                return cmd
+            }
+        }
+#endif
 
         // 3. No binary found
         throw YtDlpError.notIncluded

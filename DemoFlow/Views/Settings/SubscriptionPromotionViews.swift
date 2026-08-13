@@ -33,6 +33,9 @@ private enum SubscriptionPalette {
     static let cardDefaultStart = Color(red: 1.00, green: 0.93, blue: 0.89)
     static let cardDefaultEnd = Color(red: 1.00, green: 0.88, blue: 0.82)
     static let cardDefaultStroke = Color(red: 0.94, green: 0.71, blue: 0.64)
+    static let cardDisabledStart = Color(red: 0.88, green: 0.86, blue: 0.84)
+    static let cardDisabledEnd = Color(red: 0.80, green: 0.78, blue: 0.76)
+    static let cardDisabledStroke = Color(red: 0.65, green: 0.62, blue: 0.59)
     static let ribbonStart = Color(red: 1.00, green: 0.75, blue: 0.16)
     static let ribbonEnd = Color(red: 0.98, green: 0.58, blue: 0.10)
     static let ctaStart = Color(red: 1.00, green: 0.41, blue: 0.36)
@@ -110,6 +113,53 @@ struct SubscriptionWindowView: View {
                         .foregroundStyle(SubscriptionPalette.inkPrimary)
 
                     membershipStatusChip
+
+                    membershipValidityChip
+
+                    #if DEBUG
+                    if !subscriptionViewModel.isProUnlocked,
+                       subscriptionViewModel.isDebugSubscriptionTrialAvailable {
+                        Button {
+                            subscriptionViewModel.activateDebugSubscriptionTrial()
+                            onClose()
+                        } label: {
+                            Label(
+                                L10n.tr("subscription.debug.mark_member"),
+                                systemImage: "checkmark.seal.fill"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(SubscriptionPalette.headerEnd)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.tr("subscription.debug.mark_member_help"))
+                        .disabled(subscriptionViewModel.isPurchasing)
+                    }
+
+                    if subscriptionViewModel.isUsingDebugFallback {
+                        Button(L10n.tr("subscription.debug.clear")) {
+                            subscriptionViewModel.clearDebugFallback()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(SubscriptionPalette.inkPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(SubscriptionPalette.secondaryButtonFill)
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
+                        )
+                    }
+                    #endif
                 }
 
                 Text(L10n.tr("subscription.teaser.subtitle"))
@@ -162,65 +212,20 @@ struct SubscriptionWindowView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
-                statusPill(subscriptionViewModel.statusMessage ?? L10n.tr("subscription.status.loading"))
-
-                #if DEBUG
-                if subscriptionViewModel.isUsingDebugFallback {
-                    Button(L10n.tr("subscription.debug.clear")) {
-                        subscriptionViewModel.clearDebugFallback()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(SubscriptionPalette.inkPrimary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(SubscriptionPalette.secondaryButtonFill)
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
-                    )
+                if !subscriptionViewModel.isProUnlocked {
+                    statusPill(subscriptionViewModel.statusMessage ?? L10n.tr("subscription.status.loading"))
                 }
-                #endif
             }
 
             #if DEBUG
-            Text(subscriptionViewModel.debugRunMarkerMessage)
-                .font(.caption2.monospaced())
-                .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
-                .lineLimit(2)
-                .truncationMode(.middle)
-
-            HStack(spacing: 8) {
-                Button {
-                    SubscriptionDiagnosticsStore.shared.openLogFile()
-                } label: {
-                    Label(L10n.tr("subscription.debug.open_log"), systemImage: "doc.text.magnifyingglass")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Text(L10n.f("subscription.debug.log_path", SubscriptionDiagnosticsStore.shared.logFileURL.path))
+            if !subscriptionViewModel.isProUnlocked {
+                Text(subscriptionViewModel.storeKitDebugSummary)
                     .font(.caption2.monospaced())
                     .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
-                    .lineLimit(1)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
                     .truncationMode(.middle)
-            }
-
-            if let debugFallbackExpirationText = subscriptionViewModel.debugFallbackExpirationText {
-                Text(debugFallbackExpirationText)
-                    .font(.caption)
-                    .foregroundStyle(SubscriptionPalette.inkSecondary)
-            }
-
-            if let productLoadDiagnosticsMessage = subscriptionViewModel.productLoadDiagnosticsMessage {
-                Text(productLoadDiagnosticsMessage)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
-                    .lineLimit(2)
-                    .truncationMode(.tail)
             }
             #endif
 
@@ -303,6 +308,31 @@ struct SubscriptionWindowView: View {
                 .disabled(subscriptionViewModel.isPurchasing)
                 .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
 
+                #if DEBUG
+                if !subscriptionViewModel.isProUnlocked,
+                   subscriptionViewModel.isDebugSubscriptionTrialAvailable {
+                    Button(L10n.tr("subscription.debug.skip")) {
+                        subscriptionViewModel.activateDebugSubscriptionTrial()
+                        onClose()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(SubscriptionPalette.inkPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(SubscriptionPalette.secondaryButtonFill)
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
+                    )
+                    .disabled(subscriptionViewModel.isPurchasing)
+                    .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
+                }
+                #endif
+
                 Spacer(minLength: 0)
             }
         }
@@ -335,6 +365,25 @@ struct SubscriptionWindowView: View {
                 .background(
                     Capsule(style: .continuous)
                         .fill(SubscriptionPalette.headerEnd.opacity(0.14))
+                )
+        }
+    }
+
+    @ViewBuilder
+    private var membershipValidityChip: some View {
+        if let validityText = subscriptionViewModel.membershipValidityText {
+            Text(validityText)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(SubscriptionPalette.inkPrimary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(SubscriptionPalette.secondaryButtonFill)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
                 )
         }
     }
@@ -430,9 +479,7 @@ private struct SubscriptionPlanCardView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(
                         LinearGradient(
-                            colors: isSelected
-                                ? [SubscriptionPalette.cardSelectedStart, SubscriptionPalette.cardSelectedEnd]
-                                : [SubscriptionPalette.cardDefaultStart, SubscriptionPalette.cardDefaultEnd],
+                            colors: cardBackgroundColors,
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -440,7 +487,7 @@ private struct SubscriptionPlanCardView: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(isSelected ? Color.white.opacity(0.9) : SubscriptionPalette.cardDefaultStroke.opacity(0.8), lineWidth: isSelected ? 2 : 1)
+                    .stroke(cardStrokeColor, lineWidth: isSelected && !isDisabled ? 2 : 1)
             )
             .overlay(alignment: .topLeading) {
                 if let badgeText {
@@ -458,11 +505,26 @@ private struct SubscriptionPlanCardView: View {
     }
 
     private var cardPrimaryTextColor: Color {
-        isSelected ? .white : SubscriptionPalette.inkPrimary
+        isDisabled ? SubscriptionPalette.inkSecondary : (isSelected ? .white : SubscriptionPalette.inkPrimary)
     }
 
     private var cardSecondaryTextColor: Color {
-        isSelected ? SubscriptionPalette.mutedText : SubscriptionPalette.inkSecondary
+        isDisabled ? SubscriptionPalette.inkSecondary.opacity(0.82) : (isSelected ? SubscriptionPalette.mutedText : SubscriptionPalette.inkSecondary)
+    }
+
+    private var cardBackgroundColors: [Color] {
+        if isDisabled {
+            return [SubscriptionPalette.cardDisabledStart, SubscriptionPalette.cardDisabledEnd]
+        }
+        return isSelected
+            ? [SubscriptionPalette.cardSelectedStart, SubscriptionPalette.cardSelectedEnd]
+            : [SubscriptionPalette.cardDefaultStart, SubscriptionPalette.cardDefaultEnd]
+    }
+
+    private var cardStrokeColor: Color {
+        isDisabled
+            ? SubscriptionPalette.cardDisabledStroke.opacity(0.8)
+            : (isSelected ? Color.white.opacity(0.9) : SubscriptionPalette.cardDefaultStroke.opacity(0.8))
     }
 
     private var planSummaryText: String {

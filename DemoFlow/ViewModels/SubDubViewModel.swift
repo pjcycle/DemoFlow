@@ -7,18 +7,29 @@ final class SubDubViewModel: ObservableObject {
     @Published var selectedTab: SubDubTab = .videoDubbing
 
     let videoDubbingViewModel: VideoDubbingViewModel
+    let videoConversionViewModel: VideoConvertViewModel
+    let watermarkRemovalViewModel: WatermarkRemovalViewModel
     let subtitleBurnViewModel: SubtitleBurnViewModel
     let audioReplacementViewModel: AudioReplacementViewModel
     let timelineSession: SubDubTimelineSession
 
     private let workspace = SubDubWorkspaceService()
     private var timelineCancellable: AnyCancellable?
+    private var pendingWatermarkReloadURL: URL?
 
     init() {
         timelineSession = SubDubTimelineSession()
         videoDubbingViewModel = VideoDubbingViewModel()
+        videoConversionViewModel = VideoConvertViewModel(timelineSession: timelineSession)
+        watermarkRemovalViewModel = WatermarkRemovalViewModel(timelineSession: timelineSession)
         subtitleBurnViewModel = SubtitleBurnViewModel(timelineSession: timelineSession)
         audioReplacementViewModel = AudioReplacementViewModel(timelineSession: timelineSession)
+        watermarkRemovalViewModel.onProcessedVideoReady = { [weak self] url in
+            self?.replaceSharedVideoAfterWatermarkRemoval(with: url)
+        }
+        subtitleBurnViewModel.onVideoImportResult = { [weak self] url, result in
+            self?.handleVideoImportResult(url: url, result: result)
+        }
         timelineCancellable = timelineSession.objectWillChange
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -30,6 +41,10 @@ final class SubDubViewModel: ObservableObject {
     var currentStatusText: String {
         switch selectedTab {
         case .videoDubbing: return videoDubbingViewModel.statusMessage
+        case .videoConversion:
+            return videoConversionViewModel.selectedMode == .watermarkRemoval
+                ? watermarkRemovalViewModel.statusMessage
+                : videoConversionViewModel.statusMessage
         case .subtitleBurning: return subtitleBurnViewModel.statusMessage
         case .audioReplacement: return audioReplacementViewModel.statusMessage
         }
@@ -43,8 +58,55 @@ final class SubDubViewModel: ObservableObject {
         importVideo(from: url)
     }
 
+    func importVideoForConversionByPanel() {
+        guard let url = workspace.pickVideoConversionURL() else {
+            videoConversionViewModel.cancelCurrentTask()
+            return
+        }
+        importVideo(from: url)
+    }
+
     func importVideo(from url: URL) {
+        videoConversionViewModel.cancelCurrentTask()
+        watermarkRemovalViewModel.cancelCurrentTask()
+        if url.pathExtension.lowercased() == "webm" {
+            videoDubbingViewModel.clearSharedVideo()
+            subtitleBurnViewModel.removeVideo()
+            videoConversionViewModel.importStandaloneVideo(from: url)
+            return
+        }
+        videoConversionViewModel.prepareForSharedImport()
         subtitleBurnViewModel.importVideo(from: url)
+    }
+
+    func importConvertedVideoIntoSharedSession() {
+        guard let url = videoConversionViewModel.outputURL else { return }
+        importVideo(from: url)
+    }
+
+    func replaceSharedVideoAfterWatermarkRemoval(with url: URL) {
+        // A watermark-processed file is a new source. Stop every dependent workflow
+        // before recreating the shared timeline session so no draft remains bound to it.
+        videoDubbingViewModel.stopPlaybackForSourceReplacement()
+        videoConversionViewModel.cancelCurrentTask()
+        subtitleBurnViewModel.cancelCurrentTask()
+        subtitleBurnViewModel.stopPlaybackForSourceReplacement()
+        audioReplacementViewModel.cancelCurrentTask()
+        audioReplacementViewModel.stopPlayback()
+        guard let reloadAccessToken = DemoFlowOutputDirectoryPolicy.makeVideoCutsAccessToken() else {
+            watermarkRemovalViewModel.markReloadFailed()
+            return
+        }
+        pendingWatermarkReloadURL = url.standardizedFileURL
+        videoConversionViewModel.selectedMode = .formatConversion
+        selectedTab = .videoConversion
+        videoConversionViewModel.prepareForSharedImport()
+        // Keep the workspace scope alive inside the import task while the finished
+        // file is copied into the new shared session.
+        subtitleBurnViewModel.importVideo(
+            from: url.standardizedFileURL,
+            retainingAccessToken: reloadAccessToken
+        )
     }
 
     func importDroppedProviders(_ providers: [NSItemProvider]) {
@@ -74,6 +136,8 @@ final class SubDubViewModel: ObservableObject {
     }
 
     func removeSharedVideo() {
+        videoConversionViewModel.clearSharedVideo()
+        watermarkRemovalViewModel.resetForNewSharedVideo()
         videoDubbingViewModel.clearSharedVideo()
         subtitleBurnViewModel.removeVideo()
     }
@@ -83,6 +147,14 @@ final class SubDubViewModel: ObservableObject {
         onRequireSubscription: @escaping () -> Void
     ) {
         videoDubbingViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: subscriptionViewModel,
+            onRequireSubscription: onRequireSubscription
+        )
+        videoConversionViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: subscriptionViewModel,
+            onRequireSubscription: onRequireSubscription
+        )
+        watermarkRemovalViewModel.configureSubscriptionAccess(
             subscriptionViewModel: subscriptionViewModel,
             onRequireSubscription: onRequireSubscription
         )
@@ -109,5 +181,13 @@ final class SubDubViewModel: ObservableObject {
             sourceAudioURL: timelineSession.sourceAudioURL,
             sourceWaveformSamples: timelineSession.sourceWaveformSamples
         )
+    }
+
+    private func handleVideoImportResult(url: URL, result: Result<Void, Error>) {
+        guard url.standardizedFileURL == pendingWatermarkReloadURL else { return }
+        pendingWatermarkReloadURL = nil
+        if case .failure = result {
+            watermarkRemovalViewModel.markReloadFailed()
+        }
     }
 }

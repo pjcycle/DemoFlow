@@ -118,7 +118,21 @@ struct AudioExtractSettingsView: View {
         case .transcode:
             AudioTranscodeWorkbenchView(viewModel: viewModel.transcodeViewModel)
         case .trim:
-            AudioTrimWorkbenchView(viewModel: viewModel.trimViewModel)
+            AudioTrimWorkbenchView(
+                viewModel: viewModel.trimViewModel,
+                canImportLatestExtract: viewModel.extractViewModel.latestMP3URL != nil,
+                latestExtractDisplayName: viewModel.extractViewModel.latestMP3URL?.lastPathComponent,
+                onImportLatestExtract: { [weak viewModel] in
+                    guard let viewModel else { return }
+                    // Resolve a security-scoped URL from the saved bookmark so the
+                    // sandbox app can keep reading the file after the extraction
+                    // access token has been released.
+                    let url = viewModel.extractViewModel.latestMP3SecurityScopedURL()
+                        ?? viewModel.extractViewModel.latestMP3URL
+                    guard let url else { return }
+                    viewModel.trimViewModel.importAudio(from: url)
+                }
+            )
         }
     }
 
@@ -132,7 +146,7 @@ struct AudioExtractSettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .center, spacing: 12) {
                         Picker(L10n.tr("audio.extract.label.source_type"), selection: $viewModel.extractViewModel.sourceType) {
-                            ForEach(AudioExtractSourceType.allCases) { type in
+                            ForEach(AudioExtractSourceType.availableCases) { type in
                                 Text(L10n.tr(type.titleKey)).tag(type)
                             }
                         }
@@ -147,6 +161,22 @@ struct AudioExtractSettingsView: View {
                     }
 
                     sourceInputRow
+
+#if DEMOFLOW_EXTERNAL_CHANNEL
+                    if viewModel.extractViewModel.sourceType == .onlineURL {
+                        Toggle(isOn: $viewModel.extractViewModel.downloadVideo) {
+                            Label(
+                                L10n.tr("audio.extract.label.download_video"),
+                                systemImage: "film"
+                            )
+                        }
+                        .toggleStyle(.switch)
+
+                        Text(L10n.tr("audio.extract.hint.download_video"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+#endif
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -191,7 +221,8 @@ struct AudioExtractSettingsView: View {
                     viewModel.extractViewModel.startExtraction()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!viewModel.extractViewModel.canStart)
+                // Keep the action reachable so missing output/input can be handled visibly.
+                .disabled(viewModel.extractViewModel.isExtracting)
 
                 Button(L10n.tr("audio.extract.action.stop")) {
                     viewModel.extractViewModel.stopExtraction()
@@ -216,6 +247,16 @@ struct AudioExtractSettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(viewModel.extractViewModel.latestMP3URL == nil)
+
+#if DEMOFLOW_EXTERNAL_CHANNEL
+                if viewModel.extractViewModel.sourceType == .onlineURL {
+                    Button(L10n.tr("audio.extract.action.reveal_video")) {
+                        viewModel.extractViewModel.revealLatestVideo()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.extractViewModel.latestVideoURL == nil)
+                }
+#endif
 
                 Button(L10n.tr("audio.extract.action.clear_logs")) {
                     viewModel.extractViewModel.clearLogs()

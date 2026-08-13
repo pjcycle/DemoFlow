@@ -101,5 +101,6 @@ create_helper_dsym_bundle() {
 
 create_helper_dsym_bundle "ffmpeg"
 create_helper_dsym_bundle "ffprobe"
+create_helper_dsym_bundle "whisper-cli"
 
 echo "[DemoFlow dSYM] Archive dSYM collection finished."

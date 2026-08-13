@@ -56,18 +56,28 @@ Hotkeys:
 ### Audio Extract (Module 5)
 
 - The sidebar entry remains **Audio Extract (MP3)**, but the page is now a 3-tab audio workbench:
-  - `Audio Extract` — local file / online URL to MP3
+  - `Audio Extract` — local file / online URL to MP3; direct-distribution builds can also save the online video
   - `Audio Transcode` — local audio batch conversion
   - `Music Trim` — single-file waveform trim and export
 - `Audio Transcode` and `Music Trim` are local-file only in the first release
+- The companion video download for online URLs is external-distribution only; AppStore builds hide this channel
 - Audio Extract now defaults to the unified workspace's `Music/` folder
 - Audio Transcode and Music Trim still confirm the target file in a save panel, but that panel opens in `Music/` first
 
 ### Dubbing & Subtitles (Module 6)
 
-- Three tabs: `Video Dubbing`, `Subtitle Burning`, and `Audio Replacement`
-- The three tabs share one video import and temporary session, so the same loaded video and subtitle timeline stay available across the workbench
+- Four tabs: `Video Dubbing`, `Video Conversion`, `Subtitle Burning`, and `Audio Replacement`
+- The four tabs share one video import and temporary session, so the same loaded video and subtitle timeline stay available across the workbench
+- Video Conversion accepts `MP4 / MOV / M4V / WebM`, outputs `MP4 / MOV / WebM`, and writes completed files to the unified workspace's `Vido/` folder. A WebM result can be loaded into the shared workbench after converting to MP4/MOV.
+- The Video Conversion tab has internal `Format Conversion` and `Remove Watermark` modes. Both use the subtitle-burning layout: configuration on the left, video preview on the right, and a source-audio waveform timeline below.
+- Remove Watermark supports multiple manual fixed regions and a true local FFmpeg preview for the current frame. Adding or choosing a region opens the replacement-watermark library, where each region can independently apply a saved PNG and one saved text style; export order is removal, PNG overlays, then text. PNG originals and text styles persist in `Watermarks/Images/` and `watermark-library.json` under the output workspace, while region placement remains session-only. It creates an H.264/AAC MP4 in `Vido/`, then automatically reloads it as a clean shared workbench session. It supports MP4/MOV/M4V; convert WebM to MP4/MOV first.
 - Subtitle Burning uses local FFmpeg and Whisper.cpp; Audio Replacement uses local Apple TTS
+
+## Subscription
+
+- The primary action is `Purchase` for free users. Existing members can only choose a higher tier, where the action becomes `Upgrade Subscription`; the current and lower tiers are gray and disabled.
+- Monthly and yearly memberships show whole days remaining in the subscription window. A lifetime purchase shows `Lifetime SVIP`.
+- The 100-day free trial and clear-debug-membership actions exist only in local Debug builds and are excluded from release builds.
 
 ## Requirements
 
@@ -83,7 +93,7 @@ DemoFlow requests:
 - **Microphone** — for recording and PiP audio
 - **User-selected files and folders** — for import, export, and manually selected output folders
 
-After you choose a parent folder in **Settings**, DemoFlow creates a `DemoFlow/` workspace there and lazily adds `Recoding / Pip / Draw / Vido / Music` subfolders as needed. Recording, PiP films, and screen-drawing auto captures write directly into their mapped folders. Video Cutting, Audio Transcode, and Music Trim open their save panels in the matching workspace folder first, while Audio Extract defaults to `Music/`. DemoFlow no longer writes user-visible outputs to the app container's `Application Support/DemoFlow/Outputs/` directory. Intermediate files (recording segments, camera `.mov`, framing sidecars, temporary audio working copies) remain in temporary storage and are not user-visible artifacts.
+After you choose a parent folder in **Settings**, DemoFlow creates a `DemoFlow/` workspace there and lazily adds `Recoding / Pip / Draw / Vido / Music` subfolders as needed. The persistent watermark library lives in `Watermarks/`, with PNG files in `Watermarks/Images/` and its index in `watermark-library.json`. Recording, PiP films, and screen-drawing auto captures write directly into their mapped folders. Video Cutting, Audio Transcode, and Music Trim open their save panels in the matching workspace folder first, while Audio Extract defaults to `Music/`. DemoFlow no longer writes user-visible outputs to the app container's `Application Support/DemoFlow/Outputs/` directory. Intermediate files (recording segments, camera `.mov`, framing sidecars, temporary audio working copies) remain in temporary storage and are not user-visible artifacts.
 
 ## Download
 

@@ -26,6 +26,14 @@ final class AudioImportService {
         guard url.isSupportedAudioToolLocalFile else {
             throw AudioImportError.unsupportedType
         }
+        // Sandbox apps need a security scope to read user-configured output
+        // directories outside the container (e.g. ~/Movies/DemoFlow).
+        let isAccessingScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if isAccessingScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
         return try await metadataService.preparedAsset(from: url)
     }
 }

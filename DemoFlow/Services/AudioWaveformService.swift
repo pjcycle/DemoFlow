@@ -10,14 +10,27 @@ import Foundation
 
 final class AudioWaveformService {
     nonisolated private let ffmpegBinaryService = FFmpegBinaryService()
+    nonisolated private let fileManager = FileManager.default
 
     nonisolated func loadWaveformSamples(from url: URL, sampleCount: Int = 180) async throws -> [CGFloat] {
         let targetCount = max(sampleCount, 60)
         let task = Task.detached(priority: .userInitiated) { [self] in
             let tools = try await MainActor.run { try self.ffmpegBinaryService.ensureReady() }
+            // Sandbox apps need a security scope to read user-configured
+            // output directories outside the container.
+            let isAccessingScope = url.startAccessingSecurityScopedResource()
+            defer {
+                if isAccessingScope {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            let pcmURL = try self.makeTemporaryPCMURL()
+            defer {
+                try? self.fileManager.removeItem(at: pcmURL)
+            }
+
             let process = Process()
-            let stdout = Pipe()
-            let stderr = Pipe()
 
             process.executableURL = tools.ffmpegURL
             process.arguments = [
@@ -28,11 +41,15 @@ final class AudioWaveformService {
                 "-ac", "1",
                 "-ar", "1000",
                 "-f", "f32le",
-                "pipe:1"
+                "-y",
+                pcmURL.path
             ]
 
-            process.standardOutput = stdout
-            process.standardError = stderr
+            // Decoding a full track to a Pipe and waiting before reading it can
+            // deadlock once the pipe buffer fills. Use a short-lived PCM file
+            // instead so long MP3 files import just like other audio formats.
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
 
             do {
                 try process.run()
@@ -41,16 +58,12 @@ final class AudioWaveformService {
                 throw AudioImportError.metadataFailed
             }
 
-            let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             guard process.terminationStatus == 0 else {
                 throw AudioImportError.metadataFailed
             }
 
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            let data = try Data(contentsOf: pcmURL, options: .mappedIfSafe)
             guard data.count >= MemoryLayout<Float>.size else {
-                if !errorOutput.isEmpty {
-                    throw AudioImportError.metadataFailed
-                }
                 return Self.placeholderSamples(count: targetCount)
             }
 
@@ -77,6 +90,13 @@ final class AudioWaveformService {
             }
         }
         return try await task.value
+    }
+
+    nonisolated private func makeTemporaryPCMURL() throws -> URL {
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("demoflow-audio-waveforms", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("f32")
     }
 
     nonisolated static func placeholderSamples(count: Int = 180) -> [CGFloat] {

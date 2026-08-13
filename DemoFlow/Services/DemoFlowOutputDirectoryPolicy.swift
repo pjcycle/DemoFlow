@@ -251,6 +251,15 @@ struct DemoFlowOutputDirectoryPolicy {
         return token
     }
 
+    /// 申请视频转换写入统一工作区的访问 token。
+    static func makeVideoCutsAccessToken() -> OutputLocationAccessToken? {
+        let targetURL = resolveWorkspaceBaseDirectoryURL() ?? resolveLegacyRecordingsDirectoryURL()
+        guard let url = targetURL else { return nil }
+        let token = OutputLocationAccessToken(url: url)
+        guard token.startIfNeeded() else { return nil }
+        return token
+    }
+
     /// 显示 NSOpenPanel 选目录，保存为 security-scoped bookmark，返回选定 URL。
     /// 用户取消返回 nil。
     @MainActor

@@ -49,6 +49,11 @@ struct SubDubExportService {
     }
 
     func extractAudioForTranscription(from videoURL: URL, outputURL: URL) async throws {
+        let asset = AVAssetAsyncLoaders.makeURLAsset(videoURL)
+        guard try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .audio) != nil else {
+            throw SubDubError.audioValidationFailed
+        }
+
         let tools = try binaryService.ensureReady()
         try prepareOutput(outputURL)
         let command = FFmpegCommand(
@@ -56,7 +61,11 @@ struct SubDubExportService {
             arguments: [
                 "-hide_banner", "-loglevel", "error", "-y",
                 "-i", videoURL.path,
-                "-vn", "-ac", "1", "-ar", "16000",
+                "-map", "0:a:0",
+                "-vn", "-sn", "-dn",
+                "-ac", "1", "-ar", "16000",
+                "-af", "aresample=async=1:first_pts=0",
+                "-avoid_negative_ts", "make_zero",
                 "-c:a", "pcm_s16le", outputURL.path
             ],
             expectedDurationSeconds: nil
@@ -66,6 +75,41 @@ struct SubDubExportService {
             try await validateAudio(outputURL)
         } catch {
             try? fileManager.removeItem(at: outputURL)
+            throw SubDubError.serviceFailed(error.localizedDescription)
+        }
+    }
+
+    func extractWaveformSamples(
+        from videoURL: URL,
+        outputURL: URL,
+        sampleCount: Int = 512
+    ) async throws -> [Double] {
+        let asset = AVAssetAsyncLoaders.makeURLAsset(videoURL)
+        guard try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .audio) != nil else {
+            throw SubDubError.audioValidationFailed
+        }
+
+        let tools = try binaryService.ensureReady()
+        try prepareOutput(outputURL)
+        defer { try? fileManager.removeItem(at: outputURL) }
+
+        let command = FFmpegCommand(
+            executableURL: tools.ffmpegURL,
+            arguments: [
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-i", videoURL.path,
+                "-map", "0:a:0",
+                "-vn", "-sn", "-dn",
+                "-ac", "1", "-ar", "1000",
+                "-f", "s16le", outputURL.path
+            ],
+            expectedDurationSeconds: nil
+        )
+        do {
+            _ = try await runner.run(command: command)
+            let waveformService = SubDubWaveformService(sampleCount: sampleCount)
+            return try await waveformService.samples(fromRawPCM: outputURL)
+        } catch {
             throw SubDubError.serviceFailed(error.localizedDescription)
         }
     }
@@ -121,6 +165,7 @@ struct SubDubExportService {
         duration: Double,
         sessionDirectory: URL,
         style: SubtitleStylePreset = .standard,
+        themeColor: SubtitleThemeColor = .white,
         progress: ((Double) -> Void)? = nil
     ) async throws {
         let videoSize = try await subtitleCanvasSize(from: videoURL)
@@ -138,6 +183,7 @@ struct SubDubExportService {
                 sessionDirectory: sessionDirectory,
                 videoSize: videoSize,
                 style: style,
+                themeColor: themeColor,
                 progress: progress
             )
             try await replaceAudio(
@@ -268,6 +314,7 @@ struct SubDubExportService {
         sessionDirectory: URL,
         videoSize: CGSize,
         style: SubtitleStylePreset,
+        themeColor: SubtitleThemeColor = .white,
         progress: ((Double) -> Void)? = nil
     ) async throws {
         let tools = try binaryService.ensureReady()
@@ -276,6 +323,7 @@ struct SubDubExportService {
             cues: cues.map(\.subtitleCue),
             to: subtitleURL,
             style: style,
+            themeColor: themeColor,
             videoSize: videoSize
         )
         try prepareOutput(outputURL)
@@ -467,6 +515,7 @@ private enum SubtitleASSWriter {
         cues: [SubtitleCue],
         to url: URL,
         style: SubtitleStylePreset = .standard,
+        themeColor: SubtitleThemeColor = .white,
         videoSize: CGSize = CGSize(width: 1920, height: 1080)
     ) throws {
         let width = max(1, Int(videoSize.width.rounded()))
@@ -486,7 +535,7 @@ private enum SubtitleASSWriter {
             "ScaledBorderAndShadow: yes",
             "[V4+ Styles]",
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-            "Style: Default,\(style.fontName),\(fontSize),&H00FFFFFF,&H00FFFFFF,&H00000000,\(backgroundColour),\(bold),0,0,0,100,100,0,0,\(style.assBorderStyle),\(style.assOutlineWidth),0,2,\(sideMargin),\(sideMargin),\(marginV),1",
+            "Style: Default,\(style.fontName),\(fontSize),\(themeColor.assColour),\(themeColor.assColour),&H00000000,\(backgroundColour),\(bold),0,0,0,100,100,0,0,\(style.assBorderStyle),\(style.assOutlineWidth),0,2,\(sideMargin),\(sideMargin),\(marginV),1",
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
         ]

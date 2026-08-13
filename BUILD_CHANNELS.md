@@ -16,7 +16,7 @@ Apple MAS review requirement (error 90296): all Mach-O executables inside the ap
 - `ffmpeg` / `ffprobe` can be signed with `com.apple.security.inherit` and run correctly
 - `yt-dlp` is a PyInstaller-packaged binary; `codesign` corrupts its internal offsets, causing exit code 133
 
-Therefore the MAS version cannot include `yt-dlp`, but the direct download version can.
+Therefore the MAS version cannot include `yt-dlp`, but the direct download version can. The online URL companion-video download is also restricted to the direct-download build.
 
 ## How to Build
 
@@ -109,8 +109,9 @@ If none are found, it throws `YtDlpError.notIncluded` with a user-friendly messa
 | Video Cutting (local) | OK | OK |
 | Audio Extract (local) | OK | OK |
 | Audio Extract (URL) | **N/A** | OK |
+| Audio Extract (URL + video) | **N/A** | OK |
 
-In the MAS version, the online URL extraction feature shows an error prompting the user to use local files instead.
+In the MAS version, the online URL and companion-video download entries are hidden. In the direct-download version, URL mode can save the video and MP3 beside each other with the same base filename.
 
 ## Updating yt-dlp
 

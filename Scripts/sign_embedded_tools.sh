@@ -63,6 +63,19 @@ if [[ -z "$ytdlp_source_dir" ]]; then
 	}
 fi
 
+pick_standalone_ytdlp() {
+	local candidate
+	for candidate in \
+		"${ytdlp_source_dir}/yt-dlp_macos.bundle" \
+		"${ytdlp_source_dir}/yt-dlp_macos"; do
+		if [[ -f "$candidate" ]]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
 whisper_source_dir="${DEMOFLOW_WHISPER_SOURCE_DIR:-}"
 if [[ -z "$whisper_source_dir" ]]; then
 	if whisper_source_dir="$(pick_existing_dir \
@@ -185,17 +198,20 @@ if [[ "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
 	collect_archive_dsyms_if_needed
 	include_ytdlp="${INCLUDE_YT_DLP:-${DEMOFLOW_INCLUDE_YT_DLP:-YES}}"
 	if [[ "$include_ytdlp" == "YES" ]]; then
-		ytdlp_source="${ytdlp_source_dir}/yt-dlp"
 		ytdlp_dest="${helpers_dir}/yt-dlp"
-		if [[ -f "$ytdlp_source" ]]; then
+		if ytdlp_source="$(pick_standalone_ytdlp)"; then
 			copy_path "$ytdlp_source" "$ytdlp_dest"
 			chmod +x "$ytdlp_dest"
 			echo "[DemoFlow codesign] yt-dlp included without signing (CI build)."
 		else
-			echo "[DemoFlow codesign] Warning: yt-dlp source not found at ${ytdlp_source}, skipping." >&2
+			rm -f "$ytdlp_dest"
+			echo "[DemoFlow codesign] Warning: standalone yt-dlp_macos.bundle not found, skipping." >&2
 		fi
 	else
 		echo "[DemoFlow codesign] yt-dlp excluded from this build (AppStore)."
+	fi
+	if [[ "$include_ytdlp" != "YES" ]]; then
+		rm -rf "${resources_dir}/yt-dlp" "${resources_dir}/yt-dlp_macos_onedir"
 	fi
 	if [[ -n "$whisper_source_dir" && -f "${whisper_source_dir}/whisper-cli" ]]; then
 		copy_path "${whisper_source_dir}/whisper-cli" "${helpers_dir}/whisper-cli"
@@ -212,18 +228,28 @@ signing_identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
 if [[ -z "$signing_identity" || "$signing_identity" == "-" ]]; then
 	signing_identity="${CODE_SIGN_IDENTITY:-}"
 fi
-if [[ -z "$signing_identity" || "$signing_identity" == "-" ]]; then
+if [[ -z "$signing_identity" ]]; then
 	echo "[DemoFlow codesign] No signing identity found for embedded helpers." >&2
 	exit 1
 fi
 
 product_identifier="${PRODUCT_BUNDLE_IDENTIFIER:-pjln.top.demoflow}"
-codesign_common_flags=(
-	--force
-	--sign "$signing_identity"
-	--options runtime
-	--generate-entitlement-der
-)
+if [[ "$signing_identity" == "-" ]]; then
+	# Debug local StoreKit runs may use an ad-hoc app signature when no Apple
+	# Development certificate is installed. Keep helper entitlements valid.
+	codesign_common_flags=(
+		--force
+		--sign -
+		--generate-entitlement-der
+	)
+else
+	codesign_common_flags=(
+		--force
+		--sign "$signing_identity"
+		--options runtime
+		--generate-entitlement-der
+	)
+fi
 
 helpers=(ffmpeg ffprobe)
 if [[ -f "${helpers_dir}/whisper-cli" ]]; then
@@ -242,9 +268,8 @@ done
 
 include_ytdlp="${INCLUDE_YT_DLP:-${DEMOFLOW_INCLUDE_YT_DLP:-YES}}"
 if [[ "$include_ytdlp" == "YES" ]]; then
-	ytdlp_source="${ytdlp_source_dir}/yt-dlp"
 	ytdlp_dest="${helpers_dir}/yt-dlp"
-	if [[ -f "$ytdlp_source" ]]; then
+	if ytdlp_source="$(pick_standalone_ytdlp)"; then
 		copy_path "$ytdlp_source" "$ytdlp_dest"
 		chmod +x "$ytdlp_dest"
 		ytdlp_identifier="${product_identifier}.yt-dlp"
@@ -252,10 +277,15 @@ if [[ "$include_ytdlp" == "YES" ]]; then
 		/usr/bin/codesign "${codesign_common_flags[@]}" --identifier "$ytdlp_identifier" --entitlements "$entitlements_path" "$ytdlp_dest"
 		echo "[DemoFlow codesign] yt-dlp included in this build."
 	else
-		echo "[DemoFlow codesign] Warning: yt-dlp source not found at ${ytdlp_source}, skipping." >&2
+		rm -f "$ytdlp_dest"
+		echo "[DemoFlow codesign] Warning: standalone yt-dlp_macos.bundle not found, skipping." >&2
 	fi
 else
 	echo "[DemoFlow codesign] yt-dlp excluded from this build (AppStore)."
+fi
+
+if [[ "$include_ytdlp" != "YES" ]]; then
+	rm -rf "${resources_dir}/yt-dlp" "${resources_dir}/yt-dlp_macos_onedir"
 fi
 
 collect_archive_dsyms_if_needed

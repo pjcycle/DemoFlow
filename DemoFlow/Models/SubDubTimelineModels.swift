@@ -7,6 +7,7 @@ final class SubDubTimelineSession: ObservableObject {
     @Published private(set) var videoURL: URL?
     @Published private(set) var sourceDuration: Double = 0
     @Published private(set) var sourceAudioURL: URL?
+    @Published private(set) var hasSourceAudioTrack = false
     @Published private(set) var sourceWaveformSamples: [Double] = []
     @Published private(set) var document: SubtitleTimelineDocument?
     @Published private(set) var sessionDirectory: URL?
@@ -24,6 +25,7 @@ final class SubDubTimelineSession: ObservableObject {
         self.videoURL = videoURL
         sourceDuration = duration
         sourceAudioURL = nil
+        hasSourceAudioTrack = false
         sourceWaveformSamples = []
         self.sessionDirectory = sessionDirectory
         try updateDocument(SubtitleTimelineDocument(sourceDuration: duration))
@@ -31,7 +33,13 @@ final class SubDubTimelineSession: ObservableObject {
 
     func updateSourceAudio(url: URL, waveformSamples: [Double]) {
         sourceAudioURL = url
+        hasSourceAudioTrack = true
         sourceWaveformSamples = waveformSamples
+    }
+
+    func updateSourceWaveform(samples: [Double], hasAudioTrack: Bool) {
+        hasSourceAudioTrack = hasAudioTrack
+        sourceWaveformSamples = samples
     }
 
     func updateDocument(_ document: SubtitleTimelineDocument) throws {
@@ -54,6 +62,7 @@ final class SubDubTimelineSession: ObservableObject {
         videoURL = nil
         sourceDuration = 0
         sourceAudioURL = nil
+        hasSourceAudioTrack = false
         sourceWaveformSamples = []
         document = nil
         sessionDirectory = nil
@@ -112,6 +121,35 @@ struct SubDubWaveformService {
                     }
                 }
                 frameOffset += AVAudioFramePosition(frameLength)
+            }
+
+            let peak = samples.max() ?? 0
+            guard peak > 0 else { return samples }
+            return samples.map { min(max($0 / peak, 0), 1) }
+        }.value
+    }
+
+    func samples(fromRawPCM url: URL) async throws -> [Double] {
+        let count = sampleCount
+        return try await Task.detached(priority: .userInitiated) {
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let frameCount = data.count / MemoryLayout<Int16>.size
+            guard frameCount > 0 else { return [] }
+
+            var samples = Array(repeating: 0.0, count: count)
+            data.withUnsafeBytes { rawBuffer in
+                let bytes = rawBuffer.bindMemory(to: UInt8.self)
+                guard bytes.count >= 2 else { return }
+                for frame in 0..<frameCount {
+                    let offset = frame * 2
+                    let bits = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+                    let value = abs(Double(Int16(bitPattern: bits))) / 32_768.0
+                    let bucket = min(
+                        count - 1,
+                        Int(Double(frame) / Double(frameCount) * Double(count))
+                    )
+                    samples[bucket] = max(samples[bucket], value)
+                }
             }
 
             let peak = samples.max() ?? 0

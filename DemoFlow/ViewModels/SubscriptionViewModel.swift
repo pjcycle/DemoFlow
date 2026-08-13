@@ -25,15 +25,17 @@ struct SyntheticStoreKitProduct {
 
 @MainActor
 final class SubscriptionViewModel: ObservableObject {
-    #if DEBUG
+#if DEBUG
     private static let debugFallbackPlanDefaultsKey = "demoflow.subscription.debug.plan"
     private static let debugFallbackExpirationDefaultsKey = "demoflow.subscription.debug.expiration"
-    #endif
+    private static let legacyDebugBypassEnabledDefaultsKey = "demoflow.subscription.debug.bypass.enabled"
+#endif
 
     @Published private(set) var isLoadingProducts = false
     @Published private(set) var isPurchasing = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var activePlan: SubscriptionPlan?
+    @Published private(set) var activeExpirationDate: Date?
     @Published private(set) var activeEntitlement: SubscriptionEntitlementStatus = .free
     @Published private(set) var membershipLevel: SubscriptionMembershipLevel = .free
     @Published private(set) var products: [SubscriptionPlan: Product] = [:]
@@ -46,8 +48,38 @@ final class SubscriptionViewModel: ObservableObject {
     private var hasBootstrapped = false
     private var transactionObserverTask: Task<Void, Never>?
 #if DEBUG
+    private var localStoreKitSessionStatus: String {
+        let hasInjectedURL = ProcessInfo.processInfo.environment["STOREKIT_CONFIGURATION_URL"] != nil
+        if hasInjectedURL {
+            return "xcode-injected"
+        }
+        return isLocalStoreKitRequested
+            ? "xcode-scheme-requested-without-injected-url"
+            : "not-requested"
+    }
+#endif
+
+    private var isLocalStoreKitRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-DemoFlowLocalStoreKit")
+    }
+#if DEBUG
     private var lastProductLoadDiagnostics: String?
-    private let debugBuildMarker = "SUBSCRIPTION-DIAG-2026-07-17-CANONICAL-STOREKIT"
+
+    private var debugBuildMarker: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        let builtAt: String
+        if let executableURL = Bundle.main.executableURL,
+           let values = try? executableURL.resourceValues(forKeys: [.contentModificationDateKey]),
+           let date = values.contentModificationDate {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            builtAt = formatter.string(from: date)
+        } else {
+            builtAt = "unknown"
+        }
+        return "version=\(version) build=\(build) executableBuiltAt=\(builtAt)"
+    }
 
     var debugRunMarkerMessage: String {
         let bundlePath = Bundle.main.bundleURL.path
@@ -58,7 +90,21 @@ final class SubscriptionViewModel: ObservableObject {
         let syntheticCount = 0
         #endif
         let bundledCount = bundledStoreKitProductCount
-        return "\(debugBuildMarker) | app=\(bundlePath) | bundledConfig=\(bundledCount)/\(SubscriptionPlan.allCases.count) | realProducts=\(realCount)/\(SubscriptionPlan.allCases.count) | syntheticProducts=\(syntheticCount)/\(SubscriptionPlan.allCases.count) | scheme=DemoFlow.storekit"
+        return "\(debugBuildMarker) | app=\(bundlePath) | bundledConfig=\(bundledCount)/\(SubscriptionPlan.allCases.count) | realProducts=\(realCount)/\(SubscriptionPlan.allCases.count) | syntheticProducts=\(syntheticCount)/\(SubscriptionPlan.allCases.count) | localRequested=\(isLocalStoreKitRequested) | scheme=DemoFlow.storekit"
+    }
+
+    var storeKitDebugSummary: String {
+        let injectedURL = ProcessInfo.processInfo.environment["STOREKIT_CONFIGURATION_URL"] ?? "<none>"
+        let bundledURL = Bundle.main.url(forResource: "DemoFlow", withExtension: "storekit")?.path ?? "<none>"
+        var lines = [
+            "bundledConfig=\(bundledStoreKitProductCount)/\(SubscriptionPlan.allCases.count)   realProducts=\(products.count)/\(SubscriptionPlan.allCases.count)   syntheticProducts=\(syntheticProducts.count)/\(SubscriptionPlan.allCases.count)",
+            "injectedURL=\(injectedURL)   bundledURL=\(bundledURL)",
+            "localRequested=\(isLocalStoreKitRequested)   localSession=\(localStoreKitSessionStatus)   runtime=\(debugBuildMarker)"
+        ]
+        if let lastProductLoadDiagnostics, !lastProductLoadDiagnostics.isEmpty {
+            lines.append(lastProductLoadDiagnostics)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private var bundledStoreKitProductCount: Int {
@@ -122,10 +168,11 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     private func pickStoreKitLocalization(localizations: [[String: Any]], key: String) -> String? {
-        // Prefer zh-Hans (matches project convention), then en_US, then first available.
-        let preferredLocales = ["zh-Hans", "en_US"]
-        for locale in preferredLocales {
-            if let entry = localizations.first(where: { ($0["locale"] as? String) == locale }),
+        // Match locales case-insensitively so files using either "zh-Hans"/"zh_Hans"/"zh_CN"
+        // can still surface Chinese copy on a Chinese-locale device.
+        let preferredLocales = ["zh-Hans", "zh_CN", "en_US", "en"]
+        for preferred in preferredLocales {
+            if let entry = localizations.first(where: { ($0["locale"] as? String)?.lowercased() == preferred.lowercased() }),
                let value = entry[key] as? String {
                 return value
             }
@@ -147,12 +194,25 @@ final class SubscriptionViewModel: ObservableObject {
     }
 #endif
 
-    var isProUnlocked: Bool {
-        activeEntitlement.isPro
-    }
+    var isProUnlocked: Bool { activeEntitlement.isPro }
 
     var membershipBadgeText: String? {
         membershipLevel.badgeTextKey.map { L10n.tr($0) }
+    }
+
+    var membershipValidityText: String? {
+        guard let activePlan else { return nil }
+
+        if activePlan == .lifetime {
+            return L10n.tr("subscription.membership.lifetime_svip")
+        }
+
+        guard let activeExpirationDate else { return nil }
+        let remainingDays = max(
+            0,
+            Int(ceil(activeExpirationDate.timeIntervalSinceNow / (24 * 60 * 60)))
+        )
+        return L10n.f("subscription.membership.days_remaining", remainingDays)
     }
 
     var purchaseActionTitle: String {
@@ -164,7 +224,7 @@ final class SubscriptionViewModel: ObservableObject {
             guard selectedPlan.sortPriority > activePlan.sortPriority else {
                 return L10n.tr("subscription.paywall.current_plan")
             }
-            return L10n.f("subscription.paywall.upgrade_to", L10n.tr(selectedPlan.titleKey))
+            return L10n.tr("subscription.paywall.upgrade")
         }
 
         return L10n.tr("subscription.paywall.purchase")
@@ -172,16 +232,35 @@ final class SubscriptionViewModel: ObservableObject {
 
     var canPurchaseSelectedPlan: Bool {
         guard !isLoadingProducts, !isPurchasing else { return false }
-        guard let activePlan else { return true }
-        return selectedPlan.sortPriority > activePlan.sortPriority
+        if let activePlan {
+            guard selectedPlan.sortPriority > activePlan.sortPriority else { return false }
+#if DEBUG
+            if canUseDebugSubscriptionFallback || isDebugSubscriptionTrialAvailable {
+                return true
+            }
+#endif
+            return hasProduct(for: selectedPlan)
+        }
+#if DEBUG
+        if canUseDebugSubscriptionFallback || isDebugSubscriptionTrialAvailable {
+            return true
+        }
+#endif
+        guard hasProduct(for: selectedPlan) else { return false }
+        return true
     }
 
     var hasLoadedAllProducts: Bool {
-        var loaded = products.count
-        #if DEBUG
-        loaded += syntheticProducts.count
-        #endif
-        return loaded == SubscriptionPlan.allCases.count
+        if products.count == SubscriptionPlan.allCases.count {
+            return true
+        }
+#if DEBUG
+        if canUseDebugSubscriptionFallback || isDebugSubscriptionTrialAvailable {
+            return true
+        }
+#else
+#endif
+        return false
     }
 
     #if DEBUG
@@ -197,7 +276,13 @@ final class SubscriptionViewModel: ObservableObject {
     #endif
 
     func bootstrap() async {
+        let env = ProcessInfo.processInfo.environment
+        let storeKitURL = storeKitConfigurationDescription
+        let injectedStoreKitURL = env["STOREKIT_CONFIGURATION_URL"] ?? "<none>"
+        let hasInjectedStoreKitURL = env["STOREKIT_CONFIGURATION_URL"] != nil
+        let xpcService = env["XPC_SERVICE_NAME"] ?? "<none>"
         diagnosticsLog("bootstrap begin; bundle=\(Bundle.main.bundleURL.path); bundleID=\(Bundle.main.bundleIdentifier ?? "<missing>"); version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "<missing>"); build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "<missing>"); arguments=\(ProcessInfo.processInfo.arguments.joined(separator: " | "))")
+        diagnosticsLog("env STOREKIT_CONFIGURATION_URL=\(injectedStoreKitURL); bundledStoreKit=\(storeKitURL); storeKitEnvironmentInjected=\(hasInjectedStoreKitURL); XPC_SERVICE_NAME=\(xpcService); localStoreKitRequested=\(isLocalStoreKitRequested)")
         diagnosticsLogBundledStoreKitResources()
         if !hasBootstrapped {
             hasBootstrapped = true
@@ -232,6 +317,8 @@ final class SubscriptionViewModel: ObservableObject {
             diagnosticsLog("product load attempt \(attempt + 1)/3 begin")
             do {
                 let loaded = try await Product.products(for: requestedProductIDs)
+                let debugURL = storeKitConfigurationDescription
+                diagnosticsLog("Product.products(for:) returned count=\(loaded.count); IDs=[\(loaded.map(\.id).sorted().joined(separator: ", "))]; storeKitURL=\(debugURL)")
                 lastError = nil
                 nextProducts.removeAll(keepingCapacity: true)
                 for product in loaded {
@@ -275,24 +362,27 @@ final class SubscriptionViewModel: ObservableObject {
 
         products = nextProducts
         #if DEBUG
-        // Fill synthetic products (parsed directly from bundled .storekit JSON)
-        // for any plans where the real StoreKit product is missing. This lets the
-        // app surface prices and trigger the existing debug fallback purchase
-        // path even when launched outside Xcode's StoreKit Test daemon.
-        let parsedSynthetic = parseBundledStoreKitSyntheticProducts()
-        var addedSyntheticCount = 0
-        for plan in SubscriptionPlan.allCases where products[plan] == nil {
-            guard syntheticProducts[plan] == nil, let synthetic = parsedSynthetic[plan] else { continue }
-            syntheticProducts[plan] = synthetic
-            addedSyntheticCount += 1
+        for plan in SubscriptionPlan.allCases where products[plan] != nil {
+            syntheticProducts.removeValue(forKey: plan)
         }
-        let syntheticCount = syntheticProducts.count
+        if products.count == totalProductCount {
+            syntheticProducts.removeAll()
+        } else if canUseDebugSubscriptionFallback {
+            let parsedSynthetic = parseBundledStoreKitSyntheticProducts()
+            var addedSyntheticCount = 0
+            for plan in SubscriptionPlan.allCases where products[plan] == nil {
+                guard syntheticProducts[plan] == nil, let synthetic = parsedSynthetic[plan] else { continue }
+                syntheticProducts[plan] = synthetic
+                addedSyntheticCount += 1
+            }
+            diagnosticsLog("synthetic product fill; parsed=\(parsedSynthetic.count); added=\(addedSyntheticCount); total=\(syntheticProducts.count)/\(totalProductCount); mode=explicit-debug-fallback")
+        }
         let missingPlans = SubscriptionPlan.allCases
             .filter { products[$0] == nil && syntheticProducts[$0] == nil }
             .map(\.rawValue)
             .sorted()
             .joined(separator: ", ")
-        diagnosticsLog("synthetic product fill; parsed=\(parsedSynthetic.count); added=\(addedSyntheticCount); total=\(syntheticCount)/\(totalProductCount); missingPlans=[\(missingPlans)]")
+        diagnosticsLog("product availability; real=\(products.count)/\(totalProductCount); synthetic=\(syntheticProducts.count)/\(totalProductCount); missingPlans=[\(missingPlans)]")
         #endif
         diagnosticsLog("product load end; products=\(nextProducts.count)/\(totalProductCount); lastError=\(lastError.map(diagnosticErrorDescription) ?? "none"); fallbackAllowed=\(diagnosticsFallbackAllowed); fallbackActive=\(isUsingDebugFallback)")
         if nextProducts.count == totalProductCount {
@@ -301,7 +391,7 @@ final class SubscriptionViewModel: ObservableObject {
         } else if nextProducts.isEmpty {
             #if DEBUG
             if canUseDebugSubscriptionFallback {
-                isUsingDebugFallback = true
+                isUsingDebugFallback = persistedDebugFallbackPlan != nil
                 statusMessage = L10n.tr("subscription.status.debug_fallback_ready")
             } else {
                 isUsingDebugFallback = false
@@ -311,8 +401,18 @@ final class SubscriptionViewModel: ObservableObject {
             statusMessage = productsUnavailableMessage(error: lastError)
             #endif
         } else {
+#if DEBUG
+            if canUseDebugSubscriptionFallback && hasLoadedAllProducts {
+                isUsingDebugFallback = persistedDebugFallbackPlan != nil
+                statusMessage = L10n.tr("subscription.status.debug_fallback_ready")
+            } else {
+                isUsingDebugFallback = false
+                statusMessage = L10n.tr("subscription.status.products_partial")
+            }
+#else
             isUsingDebugFallback = false
             statusMessage = L10n.tr("subscription.status.products_partial")
+#endif
         }
     }
 
@@ -321,11 +421,11 @@ final class SubscriptionViewModel: ObservableObject {
             return product.displayPrice
         }
         #if DEBUG
-        if let synthetic = syntheticProducts[plan] {
+        if canUseDebugSubscriptionFallback, let synthetic = syntheticProducts[plan] {
             return synthetic.displayPrice
         }
         #endif
-        return plan.priceText
+        return L10n.tr("subscription.plan.price_unavailable")
     }
 
     func selectPlan(_ plan: SubscriptionPlan) {
@@ -335,8 +435,22 @@ final class SubscriptionViewModel: ObservableObject {
 
     func canSelectPlan(_ plan: SubscriptionPlan) -> Bool {
         guard !isLoadingProducts, !isPurchasing else { return false }
-        guard let activePlan else { return true }
-        return plan.sortPriority > activePlan.sortPriority
+        if let activePlan {
+            guard plan.sortPriority > activePlan.sortPriority else { return false }
+#if DEBUG
+            if canUseDebugSubscriptionFallback || isDebugSubscriptionTrialAvailable {
+                return true
+            }
+#endif
+            return hasProduct(for: plan)
+        }
+#if DEBUG
+        if canUseDebugSubscriptionFallback || isDebugSubscriptionTrialAvailable {
+            return true
+        }
+#endif
+        guard hasProduct(for: plan) else { return false }
+        return true
     }
 
     func purchaseSelectedPlan() async -> SubscriptionPurchaseOutcome {
@@ -355,14 +469,9 @@ final class SubscriptionViewModel: ObservableObject {
         }
 
         #if DEBUG
-        if products[plan] == nil, canUseDebugSubscriptionFallback {
-            persistDebugFallbackPlan(plan)
-            await refreshEntitlements()
-            statusMessage = L10n.f(
-                "subscription.status.debug_fallback_purchase",
-                L10n.tr(plan.titleKey)
-            )
-            diagnosticsLog("purchase debug fallback success; plan=\(plan.rawValue); expiration=\(persistedDebugFallbackExpirationDate.map(String.init(describing:)) ?? "none")")
+        if products[plan] == nil, canUseDebugSubscriptionFallback || isDebugSubscriptionTrialAvailable {
+            activateDebugSubscriptionTrial()
+            diagnosticsLog("purchase debug fallback redirected to local trial; selectedPlan=\(plan.rawValue); expiration=\(persistedDebugFallbackExpirationDate.map(String.init(describing:)) ?? "none")")
             return .success
         }
         #endif
@@ -465,6 +574,7 @@ final class SubscriptionViewModel: ObservableObject {
     func refreshEntitlements() async {
         diagnosticsLog("entitlement refresh begin")
         var activePlan: SubscriptionPlan?
+        var activeExpirationDate: Date?
         var entitlementProductIDs: [String] = []
         var entitlementResultCount = 0
 
@@ -480,19 +590,33 @@ final class SubscriptionViewModel: ObservableObject {
             if let currentPlan = activePlan {
                 if plan.sortPriority > currentPlan.sortPriority {
                     activePlan = plan
+                    activeExpirationDate = transaction.expirationDate
+                } else if plan == currentPlan,
+                          let expirationDate = transaction.expirationDate,
+                          expirationDate > (activeExpirationDate ?? .distantPast) {
+                    activeExpirationDate = expirationDate
                 }
             } else {
                 activePlan = plan
+                activeExpirationDate = transaction.expirationDate
             }
         }
 
         #if DEBUG
-        if activePlan == nil, canUseDebugSubscriptionFallback {
-            activePlan = persistedDebugFallbackPlan
+        if activePlan == nil {
+            if let persistedPlan = persistedDebugFallbackPlan {
+                activePlan = persistedPlan
+                activeExpirationDate = persistedDebugFallbackExpirationDate
+                isUsingDebugFallback = true
+            } else {
+                isUsingDebugFallback = false
+            }
+        } else {
+            isUsingDebugFallback = false
         }
         #endif
 
-        applyActivePlan(activePlan)
+        applyActivePlan(activePlan, expirationDate: activeExpirationDate)
         diagnosticsLog("entitlement refresh end; results=\(entitlementResultCount); productIDs=[\(entitlementProductIDs.sorted().joined(separator: ", "))]; activePlan=\(activePlan?.rawValue ?? "free"); membership=\(membershipLevel.rawValue); fallback=\(isUsingDebugFallback)")
     }
 
@@ -519,8 +643,9 @@ final class SubscriptionViewModel: ObservableObject {
         }
     }
 
-    private func applyActivePlan(_ plan: SubscriptionPlan?) {
+    private func applyActivePlan(_ plan: SubscriptionPlan?, expirationDate: Date? = nil) {
         activePlan = plan
+        activeExpirationDate = expirationDate
         activeEntitlement = SubscriptionEntitlementStatus(plan: plan)
         membershipLevel = SubscriptionMembershipLevel(activePlan: plan)
         selectedPlan = plan ?? .yearly
@@ -558,6 +683,17 @@ final class SubscriptionViewModel: ObservableObject {
         return L10n.tr("subscription.status.purchase_failed")
     }
 
+    private func hasProduct(for plan: SubscriptionPlan) -> Bool {
+        if products[plan] != nil {
+            return true
+        }
+#if DEBUG
+        return canUseDebugSubscriptionFallback && syntheticProducts[plan] != nil
+#else
+        return false
+#endif
+    }
+
     private func productsUnavailableMessage(error: Error?) -> String {
         #if DEBUG
         if let error {
@@ -590,6 +726,16 @@ final class SubscriptionViewModel: ObservableObject {
 
     private func diagnosticsLog(_ message: String) {
         SubscriptionDiagnosticsStore.shared.append(message)
+    }
+
+    private var storeKitConfigurationDescription: String {
+        if let injectedURL = ProcessInfo.processInfo.environment["STOREKIT_CONFIGURATION_URL"] {
+            return injectedURL
+        }
+        if let bundledURL = Bundle.main.url(forResource: "DemoFlow", withExtension: "storekit") {
+            return bundledURL.path
+        }
+        return "<not-injected>"
     }
 
     private func diagnosticErrorDescription(_ error: Error) -> String {
@@ -649,11 +795,25 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     #if DEBUG
+    var isDebugSubscriptionTrialAvailable: Bool {
+        true
+    }
+
+    func activateDebugSubscriptionTrial() {
+        let expiration = debugTrialExpirationDate()
+        persistDebugFallbackPlan(.yearly, expiration: expiration)
+        applyActivePlan(.yearly, expirationDate: expiration)
+        isUsingDebugFallback = true
+        statusMessage = L10n.tr("subscription.status.debug_bypass_activated")
+        diagnosticsLog("debug subscription trial activated; plan=yearly; expiration=\(expiration)")
+    }
+
     func clearDebugFallback() {
         diagnosticsLog("debug fallback clear begin")
         UserDefaults.standard.removeObject(forKey: Self.debugFallbackPlanDefaultsKey)
         UserDefaults.standard.removeObject(forKey: Self.debugFallbackExpirationDefaultsKey)
-        isUsingDebugFallback = canUseDebugSubscriptionFallback
+        UserDefaults.standard.removeObject(forKey: Self.legacyDebugBypassEnabledDefaultsKey)
+        isUsingDebugFallback = false
         statusMessage = L10n.tr("subscription.status.debug_fallback_cleared")
         diagnosticsLog("debug fallback cleared")
         Task { @MainActor in
@@ -673,10 +833,20 @@ final class SubscriptionViewModel: ObservableObject {
             return nil
         }
 
-        guard let rawValue = UserDefaults.standard.string(forKey: Self.debugFallbackPlanDefaultsKey) else {
+        guard let rawValue = UserDefaults.standard.string(forKey: Self.debugFallbackPlanDefaultsKey),
+              let plan = SubscriptionPlan(rawValue: rawValue) else {
             return nil
         }
-        return SubscriptionPlan(rawValue: rawValue)
+        if plan == .lifetime || UserDefaults.standard.bool(forKey: Self.legacyDebugBypassEnabledDefaultsKey) {
+            // Migrate historical permanent local bypasses to the bounded 100-day VIP trial.
+            let expiration = debugTrialExpirationDate()
+            UserDefaults.standard.set(SubscriptionPlan.yearly.rawValue, forKey: Self.debugFallbackPlanDefaultsKey)
+            UserDefaults.standard.set(expiration.timeIntervalSince1970, forKey: Self.debugFallbackExpirationDefaultsKey)
+            UserDefaults.standard.removeObject(forKey: Self.legacyDebugBypassEnabledDefaultsKey)
+            diagnosticsLog("migrated legacy debug bypass to 100-day VIP trial; expiration=\(expiration)")
+            return .yearly
+        }
+        return plan
     }
 
     private var persistedDebugFallbackExpirationDate: Date? {
@@ -686,25 +856,18 @@ final class SubscriptionViewModel: ObservableObject {
         return Date(timeIntervalSince1970: timestamp)
     }
 
-    private func persistDebugFallbackPlan(_ plan: SubscriptionPlan) {
+    private func persistDebugFallbackPlan(_ plan: SubscriptionPlan, expiration: Date) {
         UserDefaults.standard.set(plan.rawValue, forKey: Self.debugFallbackPlanDefaultsKey)
-        UserDefaults.standard.set(debugFallbackExpirationDate(for: plan).timeIntervalSince1970, forKey: Self.debugFallbackExpirationDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: Self.legacyDebugBypassEnabledDefaultsKey)
+        UserDefaults.standard.set(expiration.timeIntervalSince1970, forKey: Self.debugFallbackExpirationDefaultsKey)
         isUsingDebugFallback = true
         NSLog("[Subscription] Persisted debug fallback plan: %@", plan.rawValue)
-        diagnosticsLog("debug fallback activated; plan=\(plan.rawValue); expiration=\(debugFallbackExpirationDate(for: plan).description)")
+        diagnosticsLog("debug fallback activated; plan=\(plan.rawValue); expiration=\(expiration.description)")
     }
 
-    private func debugFallbackExpirationDate(for plan: SubscriptionPlan) -> Date {
-        let duration: TimeInterval
-        switch plan {
-        case .monthly:
-            duration = 60
-        case .yearly:
-            duration = 5 * 60
-        case .lifetime:
-            duration = 10 * 60
-        }
-        return Date().addingTimeInterval(duration)
+    private func debugTrialExpirationDate() -> Date {
+        Calendar.current.date(byAdding: .day, value: 100, to: Date())
+            ?? Date().addingTimeInterval(100 * 24 * 60 * 60)
     }
     #endif
 }

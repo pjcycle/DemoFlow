@@ -10,6 +10,9 @@ import UniformTypeIdentifiers
 
 struct AudioTrimWorkbenchView: View {
     @ObservedObject var viewModel: AudioTrimViewModel
+    let canImportLatestExtract: Bool
+    let latestExtractDisplayName: String?
+    let onImportLatestExtract: () -> Void
 
     var body: some View {
         trimWorkbenchCard
@@ -72,6 +75,22 @@ struct AudioTrimWorkbenchView: View {
                     Label(L10n.tr("audio.import.action.choose_file"), systemImage: "waveform.badge.plus")
                 }
                 .buttonStyle(.borderedProminent)
+
+                if canImportLatestExtract {
+                    Button {
+                        onImportLatestExtract()
+                    } label: {
+                        Label(
+                            L10n.f(
+                                "audio.trim.action.import_latest_extract",
+                                latestExtractDisplayName ?? ""
+                            ),
+                            systemImage: "tray.and.arrow.down"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .help(L10n.tr("audio.trim.action.import_latest_extract.help"))
+                }
 
                 Button {
                     viewModel.playPause()

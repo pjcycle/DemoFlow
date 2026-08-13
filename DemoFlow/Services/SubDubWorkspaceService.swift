@@ -6,6 +6,12 @@ struct SubDubWorkspaceService {
     let fileManager = FileManager.default
 
     var videoTypes: [UTType] { [.mpeg4Movie, .quickTimeMovie] }
+    var videoConversionTypes: [UTType] {
+        let webMType = UTType(filenameExtension: "webm", conformingTo: .movie)
+            ?? UTType(filenameExtension: "webm")
+            ?? .data
+        return [.movie, .mpeg4Movie, .quickTimeMovie, webMType]
+    }
     var audioTypes: [UTType] { [.mp3, .mpeg4Audio, .wav, .aiff, .audio] }
     var subtitleTypes: [UTType] { [.plainText] }
     var timelineJSONTypes: [UTType] { [.json] }
@@ -76,6 +82,15 @@ struct SubDubWorkspaceService {
     }
 
     @MainActor
+    func pickVideoConversionURL() -> URL? {
+        pickURL(
+            title: L10n.tr("subdub.action.import_video"),
+            types: videoConversionTypes,
+            directory: DemoFlowOutputDirectoryPolicy.preferredVideoCuttingImportDirectory()
+        )
+    }
+
+    @MainActor
     func pickAudioURL() -> URL? {
         pickURL(
             title: L10n.tr("subdub.action.import_audio"),
@@ -124,6 +139,65 @@ struct SubDubWorkspaceService {
     }
 
     @MainActor
+    func pickWatermarkPNGURL() -> URL? {
+        pickURL(
+            title: L10n.tr("subdub.watermark.action.choose_png"),
+            types: [.png],
+            directory: FileManager.default.homeDirectoryForCurrentUser
+        )
+    }
+
+    func persistWatermarkPNG(from url: URL, sessionDirectory: URL) throws -> WatermarkImageReplacement {
+        let resolvedURL = url.standardizedFileURL
+        guard resolvedURL.pathExtension.lowercased() == "png",
+              fileManager.fileExists(atPath: resolvedURL.path) else {
+            throw WatermarkAssetError.invalidPNG
+        }
+
+        let isAccessingSecurityScope = resolvedURL.startAccessingSecurityScopedResource()
+        defer {
+            if isAccessingSecurityScope {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard let image = NSImage(contentsOf: resolvedURL),
+              image.isValid,
+              image.size.width > 0,
+              image.size.height > 0 else {
+            throw WatermarkAssetError.invalidPNG
+        }
+
+        let directory = sessionDirectory.appendingPathComponent("WatermarkAssets", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent("watermark-")
+            .appendingPathExtension(UUID().uuidString)
+            .appendingPathExtension("png")
+        do {
+            try fileManager.copyItem(at: resolvedURL, to: destination)
+        } catch {
+            throw WatermarkAssetError.copyFailed
+        }
+
+        return WatermarkImageReplacement(
+            assetURL: destination,
+            aspectRatio: image.size.width / image.size.height,
+            rectNormalized: .full
+        )
+    }
+
+    func deleteWatermarkPNG(_ replacement: WatermarkImageReplacement?) {
+        guard let replacement else { return }
+        try? fileManager.removeItem(at: replacement.assetURL)
+    }
+
+    func clearWatermarkAssets(in sessionDirectory: URL?) {
+        guard let sessionDirectory else { return }
+        let directory = sessionDirectory.appendingPathComponent("WatermarkAssets", isDirectory: true)
+        try? fileManager.removeItem(at: directory)
+    }
+
+    @MainActor
     func pickVideoOutputURL(suggestedName: String) -> URL? {
         let panel = NSSavePanel()
         panel.title = L10n.tr("subdub.action.export_video")
@@ -156,7 +230,7 @@ struct SubDubWorkspaceService {
         let ext = url.pathExtension.lowercased()
         switch kind {
         case .video:
-            return ["mp4", "mov"].contains(ext)
+            return ["mp4", "mov", "m4v", "webm"].contains(ext)
         case .audio:
             return ["mp3", "aac", "wav", "wave", "m4a", "aiff", "aif"].contains(ext)
         case .subtitle:
@@ -174,5 +248,19 @@ struct SubDubWorkspaceService {
         panel.directoryURL = directory
         guard panel.runModal() == .OK else { return nil }
         return panel.url
+    }
+}
+
+enum WatermarkAssetError: LocalizedError {
+    case invalidPNG
+    case copyFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPNG:
+            return L10n.tr("subdub.watermark.error.invalid_png")
+        case .copyFailed:
+            return L10n.tr("subdub.watermark.error.png_copy")
+        }
     }
 }

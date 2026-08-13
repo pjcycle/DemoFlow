@@ -25,6 +25,7 @@ final class AudioExtractService {
         sourceURLString: String,
         quality: AudioExtractQualityPreset,
         outputMP3URL: URL,
+        downloadVideo: Bool,
         installDeps: Bool,
         onLog: @escaping (String) -> Void
     ) async throws -> AudioExtractResult {
@@ -44,6 +45,7 @@ final class AudioExtractService {
                 sourceURLString: sourceURLString,
                 quality: quality,
                 outputMP3URL: outputMP3URL,
+                downloadVideo: downloadVideo,
                 installDeps: installDeps,
                 onLog: onLog
             )
@@ -119,6 +121,7 @@ final class AudioExtractService {
         return try validateOutput(
             directory: outputDirectory,
             mp3URL: outputMP3URL,
+            videoURL: nil,
             ffprobeURL: tools.ffprobeURL,
             onLog: onLog
         )
@@ -128,6 +131,7 @@ final class AudioExtractService {
         sourceURLString: String,
         quality: AudioExtractQualityPreset,
         outputMP3URL: URL,
+        downloadVideo: Bool,
         installDeps: Bool,
         onLog: @escaping (String) -> Void
     ) async throws -> AudioExtractResult {
@@ -153,8 +157,7 @@ final class AudioExtractService {
 
         let outputDirectory = outputMP3URL.deletingLastPathComponent()
         try? fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        // yt-dlp `-o` 接受固定文件路径：若后缀与音频格式不一致会自行加 .mp3。
-        // 我们用 deletingPathExtension + .%(ext)s 模板，让 yt-dlp 落到选定目录并采用选定 basename。
+        // 使用 deletingPathExtension + .%(ext)s 模板，让 yt-dlp 落到选定目录并采用选定 basename。
         let outputTemplate = outputMP3URL
             .deletingPathExtension()
             .appendingPathExtension("%(ext)s")
@@ -166,27 +169,35 @@ final class AudioExtractService {
                 "请使用发布版内置 yt-dlp，或联系开发者检查包体资源是否完整"
             )
         }
-        let command = ProcessCommand(
+        let baseArguments = [
+            "--newline",
+            "--no-warnings",
+            "--restrict-filenames",
+            "--ffmpeg-location", tools.ffmpegURL.deletingLastPathComponent().path,
+        ]
+        var audioArguments = baseArguments
+        audioArguments += [
+            "-x",
+            "--audio-format", "mp3",
+            "--audio-quality", quality.ytDlpQualityValue,
+            "--force-overwrites",
+            "--no-continue",
+            "--output", outputTemplate,
+            sourceURLString,
+        ]
+
+        // MP3 独立优先完成；视频下载异常不能阻止音频提取结果落盘。
+        let audioCommand = ProcessCommand(
             executableURL: ytDlpCommand.executableURL,
             currentDirectoryURL: ytDlpCommand.workingDirectoryURL,
             environment: ytDlpCommand.environment,
-            arguments: ytDlpCommand.makeArguments([
-                "--newline",
-                "--no-warnings",
-                "--restrict-filenames",
-                "--ffmpeg-location", tools.ffmpegURL.deletingLastPathComponent().path,
-                "-x",
-                "--audio-format", "mp3",
-                "--audio-quality", quality.ytDlpQualityValue,
-                "--output", outputTemplate,
-                sourceURLString
-            ])
+            arguments: ytDlpCommand.makeArguments(audioArguments)
         )
 
-        onLog("[run] \(command.rendered)")
+        onLog("[run] \(audioCommand.rendered)")
 
         do {
-            _ = try await runProcess(command: command, onLog: onLog)
+            _ = try await runProcess(command: audioCommand, onLog: onLog)
         } catch let runnerError as ProcessRunnerError {
             throw AudioExtractServiceError.urlExtractionFailed(
                 classifyURLExtractionFailure(
@@ -200,7 +211,7 @@ final class AudioExtractService {
         if fileManager.fileExists(atPath: outputMP3URL.path) {
             resolvedMP3URL = outputMP3URL
         } else {
-            // 兜底：yt-dlp 因扩展名策略落到同目录其他文件名时，按"最新 .mp3"找回
+            // 兜底：yt-dlp 因扩展名策略落到同目录其他文件名时，按“最新 .mp3”找回。
             guard let fallback = latestMP3(in: outputDirectory) else {
                 throw AudioExtractServiceError.urlExtractionFailed(
                     AudioExtractCommandHint(
@@ -212,9 +223,62 @@ final class AudioExtractService {
             resolvedMP3URL = fallback
         }
 
+#if DEMOFLOW_EXTERNAL_CHANNEL
+        let resolvedVideoURL: URL?
+        if downloadVideo {
+            // 优先选择 H.264 + AAC，直接封装为 MP4；不再对整部视频做本机转码。
+            var videoArguments = baseArguments
+            videoArguments += [
+                "--format", "bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=avc]+bestaudio/best[vcodec^=avc]",
+                "--merge-output-format", "mp4",
+                "--remux-video", "mp4",
+                "--force-overwrites",
+                "--no-continue",
+                "--output", outputTemplate,
+                sourceURLString,
+            ]
+            let videoCommand = ProcessCommand(
+                executableURL: ytDlpCommand.executableURL,
+                currentDirectoryURL: ytDlpCommand.workingDirectoryURL,
+                environment: ytDlpCommand.environment,
+                arguments: ytDlpCommand.makeArguments(videoArguments)
+            )
+            onLog("[run] \(videoCommand.rendered)")
+            do {
+                _ = try await runProcess(command: videoCommand, onLog: onLog)
+            } catch let runnerError as ProcessRunnerError {
+                throw AudioExtractServiceError.urlExtractionFailed(
+                    classifyURLExtractionFailure(
+                        runnerError: runnerError,
+                        sourceURLString: sourceURLString
+                    )
+                )
+            }
+            guard let videoURL = latestVideo(
+                in: outputDirectory,
+                matchingBaseName: outputMP3URL.deletingPathExtension().lastPathComponent
+            ) else {
+                throw AudioExtractServiceError.urlExtractionFailed(
+                    AudioExtractCommandHint(
+                        reason: L10n.tr("audio.extract.reason.no_video_output"),
+                        nextCommand: "ls -la \"\(outputDirectory.path)\""
+                    )
+                )
+            }
+            resolvedVideoURL = videoURL
+            onLog("[video] \(videoURL.path)")
+        } else {
+            resolvedVideoURL = nil
+        }
+#else
+        _ = downloadVideo
+        let resolvedVideoURL: URL? = nil
+#endif
+
         return try validateOutput(
             directory: outputDirectory,
             mp3URL: resolvedMP3URL,
+            videoURL: resolvedVideoURL,
             ffprobeURL: tools.ffprobeURL,
             onLog: onLog
         )
@@ -223,6 +287,7 @@ final class AudioExtractService {
     private func validateOutput(
         directory: URL,
         mp3URL: URL,
+        videoURL: URL?,
         ffprobeURL: URL,
         onLog: @escaping (String) -> Void
     ) throws -> AudioExtractResult {
@@ -236,16 +301,66 @@ final class AudioExtractService {
             throw AudioExtractServiceError.outputValidationFailed
         }
 
-        let duration = try probeDuration(mp3URL: mp3URL, ffprobeURL: ffprobeURL, onLog: onLog)
+        let duration = try probeDuration(mediaURL: mp3URL, ffprobeURL: ffprobeURL, onLog: onLog)
         guard duration > 0 else {
             throw AudioExtractServiceError.outputValidationFailed
         }
 
-        return AudioExtractResult(outputDirectory: directory, mp3URL: mp3URL, duration: duration)
+        if let videoURL {
+            guard fileManager.fileExists(atPath: videoURL.path) else {
+                throw AudioExtractServiceError.outputValidationFailed
+            }
+            let videoAttributes = try fileManager.attributesOfItem(atPath: videoURL.path)
+            let videoSize = (videoAttributes[.size] as? NSNumber)?.int64Value ?? 0
+            guard videoSize > 0 else {
+                throw AudioExtractServiceError.outputValidationFailed
+            }
+            guard hasStream(
+                mediaURL: videoURL,
+                streamSelector: "v:0",
+                ffprobeURL: ffprobeURL,
+                onLog: onLog
+            ) else {
+                onLog("[error] video output has no video stream: \(videoURL.path)")
+                throw AudioExtractServiceError.outputValidationFailed
+            }
+            let videoDuration = try probeDuration(mediaURL: videoURL, ffprobeURL: ffprobeURL, onLog: onLog)
+            guard videoDuration > 0 else {
+                throw AudioExtractServiceError.outputValidationFailed
+            }
+            let videoDurationText = String(format: "%.2f", videoDuration)
+            onLog("[verify] video size=\(videoSize) duration=\(videoDurationText)s")
+        }
+
+        return AudioExtractResult(outputDirectory: directory, mp3URL: mp3URL, videoURL: videoURL, duration: duration)
+    }
+
+    private func hasStream(
+        mediaURL: URL,
+        streamSelector: String,
+        ffprobeURL: URL,
+        onLog: @escaping (String) -> Void
+    ) -> Bool {
+        let command = ProcessCommand(
+            executableURL: ffprobeURL,
+            arguments: [
+                "-v", "error",
+                "-select_streams", streamSelector,
+                "-show_entries", "stream=codec_type",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                mediaURL.path,
+            ]
+        )
+
+        onLog("[verify] \(command.rendered)")
+        guard let result = try? runProcessSync(command: command) else { return false }
+        return result.stdout
+            .split(whereSeparator: { $0.isNewline })
+            .contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == "video" }
     }
 
     private func probeDuration(
-        mp3URL: URL,
+        mediaURL: URL,
         ffprobeURL: URL,
         onLog: @escaping (String) -> Void
     ) throws -> Double {
@@ -255,7 +370,7 @@ final class AudioExtractService {
                 "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
-                mp3URL.path
+                mediaURL.path
             ]
         )
 
@@ -356,6 +471,31 @@ final class AudioExtractService {
             }
             .first
     }
+
+#if DEMOFLOW_EXTERNAL_CHANNEL
+    private func latestVideo(in directory: URL, matchingBaseName baseName: String) -> URL? {
+        guard let items = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        let videoExtensions = Set(["mp4", "m4v", "mov", "mkv", "webm"])
+        return items
+            .filter {
+                videoExtensions.contains($0.pathExtension.lowercased()) &&
+                $0.deletingPathExtension().lastPathComponent == baseName
+            }
+            .sorted {
+                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return a > b
+            }
+            .first
+    }
+#endif
 
     private func sourceTagForURL(_ urlString: String) -> String {
         if let matched = urlString.range(of: "BV[0-9A-Za-z]{10}", options: .regularExpression) {

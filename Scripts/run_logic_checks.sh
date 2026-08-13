@@ -11,12 +11,14 @@ required_files=(
   "DemoFlow/Services/SubDubSubtitleParser.swift"
   "DemoFlow/Services/SubDubTTSService.swift"
   "DemoFlow/Services/SubDubWorkspaceService.swift"
+  "DemoFlow/Services/WatermarkRemovalService.swift"
   "DemoFlow/Services/WhisperTranscriptionService.swift"
   "DemoFlow/ViewModels/SubDubViewModel.swift"
   "DemoFlow/ViewModels/SubtitleBurnViewModel.swift"
   "DemoFlow/ViewModels/AudioReplacementViewModel.swift"
   "Scripts/setup_whisper.sh"
   "DemoFlow/ViewModels/VideoDubbingViewModel.swift"
+  "DemoFlow/ViewModels/WatermarkRemovalViewModel.swift"
   "DemoFlow/ViewModels/AIVoiceoverViewModel.swift"
   "DemoFlow/ViewModels/SubtitleSyncViewModel.swift"
   "DemoFlow/Views/Settings/SubDubSettingsView.swift"
@@ -40,14 +42,22 @@ contains 'subdub\.tab\.subtitle_burning' DemoFlow/Lang/en.lproj/Localizable.stri
 contains 'subdub\.tab\.subtitle_burning' DemoFlow/Lang/zh-Hans.lproj/Localizable.strings
 contains 'subdub\.tab\.audio_replacement' DemoFlow/Lang/en.lproj/Localizable.strings
 contains 'subdub\.tab\.audio_replacement' DemoFlow/Lang/zh-Hans.lproj/Localizable.strings
+contains 'subdub\.video_conversion\.mode\.watermark' DemoFlow/Lang/en.lproj/Localizable.strings
+contains 'subdub\.video_conversion\.mode\.watermark' DemoFlow/Lang/zh-Hans.lproj/Localizable.strings
+contains 'subdub\.watermark\.action\.start' DemoFlow/Lang/en.lproj/Localizable.strings
+contains 'subdub\.watermark\.action\.start' DemoFlow/Lang/zh-Hans.lproj/Localizable.strings
 contains 'SubtitleStylePreset' DemoFlow/Models/SubDubModels.swift
 contains 'Hiragino Sans GB' DemoFlow/Models/SubDubModels.swift
 contains 'charenc=UTF-8' DemoFlow/Services/SubDubExportService.swift
-contains 'schemaVersion == 1 \|\| document\.schemaVersion == 2' DemoFlow/ViewModels/SubtitleBurnViewModel.swift
+contains '\(1\.\.\.3\)\.contains\(document\.schemaVersion\)' DemoFlow/ViewModels/SubtitleBurnViewModel.swift
 contains 'subdub\.subtitle_style\.label' DemoFlow/Lang/en.lproj/Localizable.strings
 contains 'subdub\.subtitle_style\.label' DemoFlow/Lang/zh-Hans.lproj/Localizable.strings
+contains 'subdub\.subtitle_style\.theme_color' DemoFlow/Lang/en.lproj/Localizable.strings
+contains 'subdub\.subtitle_style\.theme_color' DemoFlow/Lang/zh-Hans.lproj/Localizable.strings
+contains 'h264_videotoolbox' DemoFlow/Services/WatermarkRemovalService.swift
 contains 'spec/subdub/README\.md' ../AGENTS.md
 [[ -f ../spec/subdub/subtitle-burn.md ]] || { print -u2 "Missing subtitle burn specification."; exit 1; }
+[[ -f ../spec/subdub/watermark-removal.md ]] || { print -u2 "Missing watermark removal specification."; exit 1; }
 
 en_keys=$(/usr/bin/sed -n 's/^"\([^"]*\)"[[:space:]]*=.*/\1/p' DemoFlow/Lang/en.lproj/Localizable.strings | /usr/bin/sort -u)
 zh_keys=$(/usr/bin/sed -n 's/^"\([^"]*\)"[[:space:]]*=.*/\1/p' DemoFlow/Lang/zh-Hans.lproj/Localizable.strings | /usr/bin/sort -u)

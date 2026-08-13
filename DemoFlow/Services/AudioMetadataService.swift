@@ -10,17 +10,21 @@ import CoreMedia
 import Foundation
 
 final class AudioMetadataService {
+    private let ffmpegBinaryService = FFmpegBinaryService()
+
     func preparedAsset(from url: URL) async throws -> AudioPreparedAsset {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw AudioImportError.fileNotAccessible
         }
 
-        let asset = AVAssetAsyncLoaders.makeURLAsset(url)
-        let duration = try await AVAssetAsyncLoaders.duration(of: asset).seconds
-        guard let audioTrack = try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .audio) else {
-            throw AudioImportError.metadataFailed
+        let metadata: AudioMetadata
+        do {
+            metadata = try await avFoundationMetadata(from: url)
+        } catch {
+            // Some valid MP3 files are decodable by FFmpeg but do not expose a
+            // complete AVFoundation stream description. Do not reject them.
+            metadata = try ffprobeMetadata(from: url)
         }
-        let (sampleRate, channelCount) = try await audioStreamDescription(for: audioTrack, fallbackURL: url)
 
         let values = try? url.resourceValues(forKeys: [.fileSizeKey])
         let byteCount = values?.fileSize.map(Int64.init) ?? 0
@@ -30,12 +34,61 @@ final class AudioMetadataService {
         return AudioPreparedAsset(
             sourceURL: url,
             displayName: displayName,
-            duration: max(duration, 0),
-            sampleRate: sampleRate,
-            channelCount: channelCount,
+            duration: metadata.duration,
+            sampleRate: metadata.sampleRate,
+            channelCount: metadata.channelCount,
             sourceByteCount: byteCount,
             sourceFormatHint: formatHint(for: ext)
         )
+    }
+
+    private func avFoundationMetadata(from url: URL) async throws -> AudioMetadata {
+        let asset = AVAssetAsyncLoaders.makeURLAsset(url)
+        let duration = try await AVAssetAsyncLoaders.duration(of: asset).seconds
+        guard duration.isFinite, duration > 0,
+              let audioTrack = try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .audio) else {
+            throw AudioImportError.metadataFailed
+        }
+        let (sampleRate, channelCount) = try await audioStreamDescription(for: audioTrack, fallbackURL: url)
+        return AudioMetadata(duration: duration, sampleRate: sampleRate, channelCount: channelCount)
+    }
+
+    private func ffprobeMetadata(from url: URL) throws -> AudioMetadata {
+        let tools = try ffmpegBinaryService.ensureReady()
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+
+        process.executableURL = tools.ffprobeURL
+        process.arguments = [
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "format=duration:stream=sample_rate,channels",
+            "-of", "json",
+            url.path
+        ]
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw AudioImportError.metadataFailed
+        }
+
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        _ = stderr.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0,
+              let response = try? JSONDecoder().decode(FFprobeResponse.self, from: data),
+              let stream = response.streams.first,
+              let duration = Double(response.format.duration), duration.isFinite, duration > 0,
+              let sampleRate = Double(stream.sampleRate), sampleRate > 0,
+              let channelCount = stream.channels, channelCount > 0 else {
+            throw AudioImportError.metadataFailed
+        }
+
+        return AudioMetadata(duration: duration, sampleRate: sampleRate, channelCount: channelCount)
     }
 
     private func audioStreamDescription(
@@ -81,4 +134,29 @@ final class AudioMetadataService {
             return ext.uppercased()
         }
     }
+}
+
+private struct AudioMetadata {
+    let duration: TimeInterval
+    let sampleRate: Double
+    let channelCount: Int
+}
+
+private struct FFprobeResponse: Decodable {
+    let streams: [FFprobeAudioStream]
+    let format: FFprobeFormat
+}
+
+private struct FFprobeAudioStream: Decodable {
+    let sampleRate: String
+    let channels: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case sampleRate = "sample_rate"
+        case channels
+    }
+}
+
+private struct FFprobeFormat: Decodable {
+    let duration: String
 }

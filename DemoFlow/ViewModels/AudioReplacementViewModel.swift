@@ -439,6 +439,7 @@ final class AudioReplacementViewModel: ObservableObject {
         let exportCues = cues
         let exportDuration = sourceDuration
         let exportStyle = timelineSession.document?.style ?? .standard
+        let exportThemeColor = timelineSession.document?.themeColor ?? .white
         state = .exporting
         statusMessage = L10n.tr("subdub.subtitle.status.exporting")
         activeTask = Task { [weak self] in
@@ -451,7 +452,8 @@ final class AudioReplacementViewModel: ObservableObject {
                     outputURL: outputURL,
                     duration: exportDuration,
                     sessionDirectory: sessionDirectory,
-                    style: exportStyle
+                    style: exportStyle,
+                    themeColor: exportThemeColor
                 )
                 state = .ready
                 statusMessage = L10n.f("subdub.status.exported", outputURL.lastPathComponent)
@@ -890,6 +892,7 @@ final class AudioReplacementViewModel: ObservableObject {
                 SubtitleTimelineDocument(
                     sourceDuration: sourceDuration,
                     style: timelineSession.document?.style ?? .standard,
+                    themeColor: timelineSession.document?.themeColor ?? .white,
                     cues: cues
                 )
             )

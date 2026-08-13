@@ -51,37 +51,43 @@ nonisolated final class FFmpegRunner {
             captureState.appendStderr(String(decoding: data, as: UTF8.self))
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { process in
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                process.terminationHandler = { process in
+                    stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                    stderrPipe.fileHandleForReading.readabilityHandler = nil
 
-                let stdoutTail = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                if !stdoutTail.isEmpty {
-                    captureState.appendStdout(String(decoding: stdoutTail, as: UTF8.self))
+                    let stdoutTail = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    if !stdoutTail.isEmpty {
+                        captureState.appendStdout(String(decoding: stdoutTail, as: UTF8.self))
+                    }
+                    let stderrTail = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    if !stderrTail.isEmpty {
+                        captureState.appendStderr(String(decoding: stderrTail, as: UTF8.self))
+                    }
+
+                    let result = FFmpegExecutionResult(
+                        stdout: captureState.stdout,
+                        stderr: captureState.stderr,
+                        exitCode: process.terminationStatus
+                    )
+
+                    if process.terminationStatus == 0 {
+                        continuation.resume(returning: result)
+                    } else {
+                        continuation.resume(throwing: FFmpegRunnerError.commandFailed(result))
+                    }
                 }
-                let stderrTail = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                if !stderrTail.isEmpty {
-                    captureState.appendStderr(String(decoding: stderrTail, as: UTF8.self))
-                }
 
-                let result = FFmpegExecutionResult(
-                    stdout: captureState.stdout,
-                    stderr: captureState.stderr,
-                    exitCode: process.terminationStatus
-                )
-
-                if process.terminationStatus == 0 {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: FFmpegRunnerError.commandFailed(result))
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(throwing: FFmpegRunnerError.launchFailed(error.localizedDescription))
                 }
             }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: FFmpegRunnerError.launchFailed(error.localizedDescription))
+        } onCancel: {
+            if process.isRunning {
+                process.terminate()
             }
         }
     }

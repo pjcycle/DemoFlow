@@ -14,6 +14,14 @@ enum AudioExtractSourceType: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    static var availableCases: [AudioExtractSourceType] {
+#if DEMOFLOW_EXTERNAL_CHANNEL
+        allCases
+#else
+        [.localFile]
+#endif
+    }
+
     var titleKey: String {
         switch self {
         case .localFile:
@@ -97,6 +105,7 @@ struct AudioExtractCommandHint {
 struct AudioExtractResult {
     let outputDirectory: URL
     let mp3URL: URL
+    let videoURL: URL?
     let duration: Double
 }
 

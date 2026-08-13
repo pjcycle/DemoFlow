@@ -18,12 +18,22 @@ final class AudioExtractViewModel: ObservableObject {
     @Published var outputMP3URL: URL?
     @Published var quality: AudioExtractQualityPreset = .best
     @Published var installDependencies = true
+#if DEMOFLOW_EXTERNAL_CHANNEL
+    @Published var downloadVideo = false
+#endif
 
     @Published private(set) var isExtracting = false
     @Published private(set) var statusMessage: String = L10n.tr("audio.extract.status.idle")
     @Published private(set) var logs: [String] = []
     @Published private(set) var latestOutputDirectoryURL: URL?
     @Published private(set) var latestMP3URL: URL?
+#if DEMOFLOW_EXTERNAL_CHANNEL
+    @Published private(set) var latestVideoURL: URL?
+#endif
+    /// Security-scoped bookmark of `latestMP3URL`. Persists the sandbox grant
+    /// so the trim tab can re-read the extracted MP3 after the extraction
+    /// `OutputLocationAccessToken` has been released.
+    private var latestMP3Bookmark: Data?
 
     private let service = AudioExtractService()
     private var extractionTask: Task<Void, Never>?
@@ -158,8 +168,9 @@ final class AudioExtractViewModel: ObservableObject {
 
     func startExtraction() {
         guard let outputDirectoryURL = outputMP3URL else {
-            statusMessage = L10n.tr("output.audio.unset_toast")
-            appendLog("[error] \(statusMessage)")
+            pickOutputDirectory()
+            guard outputMP3URL != nil else { return }
+            startExtraction()
             return
         }
         guard canStart else {
@@ -185,6 +196,11 @@ final class AudioExtractViewModel: ObservableObject {
         let sourceURLString = sourceURLString
         let quality = quality
         let installDependencies = installDependencies
+#if DEMOFLOW_EXTERNAL_CHANNEL
+        let shouldDownloadVideo = sourceType == .onlineURL && downloadVideo
+#else
+        let shouldDownloadVideo = false
+#endif
         let resolvedOutputURL = outputDirectoryURL.appendingPathComponent(suggestedOutputFileName(), isDirectory: false)
 
         extractionTask?.cancel()
@@ -202,6 +218,7 @@ final class AudioExtractViewModel: ObservableObject {
                     sourceURLString: sourceURLString,
                     quality: quality,
                     outputMP3URL: resolvedOutputURL,
+                    downloadVideo: shouldDownloadVideo,
                     installDeps: installDependencies,
                     onLog: { [weak self] text in
                         Task { @MainActor in
@@ -211,7 +228,23 @@ final class AudioExtractViewModel: ObservableObject {
                 )
                 latestOutputDirectoryURL = result.outputDirectory
                 latestMP3URL = result.mp3URL
-                statusMessage = L10n.f("audio.extract.status.done", result.mp3URL.lastPathComponent)
+                latestMP3Bookmark = try? result.mp3URL.bookmarkData(
+                    options: [.withSecurityScope],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+#if DEMOFLOW_EXTERNAL_CHANNEL
+                latestVideoURL = result.videoURL
+#endif
+                if let videoURL = result.videoURL {
+                    statusMessage = L10n.f(
+                        "audio.extract.status.done_with_video",
+                        result.mp3URL.lastPathComponent,
+                        videoURL.lastPathComponent
+                    )
+                } else {
+                    statusMessage = L10n.f("audio.extract.status.done", result.mp3URL.lastPathComponent)
+                }
                 appendLog("[done] \(statusMessage)")
             } catch is CancellationError {
                 statusMessage = L10n.tr("audio.extract.status.cancelled")
@@ -266,6 +299,32 @@ final class AudioExtractViewModel: ObservableObject {
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+
+    /// Returns a security-scoped URL for the most recent extract output so the
+    /// trim tab can keep reading it after the extraction access token has been
+    /// released. Returns nil if no bookmark is available (the user has not
+    /// extracted anything this launch).
+    func latestMP3SecurityScopedURL() -> URL? {
+        guard let bookmark = latestMP3Bookmark else { return nil }
+        var stale = false
+        return try? URL(
+            resolvingBookmarkData: bookmark,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &stale
+        )
+    }
+
+#if DEMOFLOW_EXTERNAL_CHANNEL
+    func revealLatestVideo() {
+        guard let url = latestVideoURL else {
+            statusMessage = L10n.tr("audio.extract.status.no_video_yet")
+            appendLog("[output] \(statusMessage)")
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+#endif
 
     func clearLogs() {
         logs.removeAll()

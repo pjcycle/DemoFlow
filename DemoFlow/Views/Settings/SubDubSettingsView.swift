@@ -5,6 +5,24 @@ import CoreGraphics
 import SwiftUI
 import UniformTypeIdentifiers
 
+private let subDubConfigurationContentWidth: CGFloat = 330
+
+/// Single source of truth for the right-column video preview so all four
+/// panels (video dubbing / video conversion / subtitle burn / audio
+/// replacement) keep the same size when the user switches tabs.
+private let subDubVideoPreviewMaxWidth: CGFloat = 520
+private let subDubVideoPreviewMaxHeight: CGFloat = 320
+private let subDubVideoPreviewPlaceholder: CGSize = CGSize(width: 520, height: 292.5)
+
+func subDubVideoPreviewSize(for sourceSize: CGSize) -> CGSize {
+    guard sourceSize.width > 0, sourceSize.height > 0 else {
+        return subDubVideoPreviewPlaceholder
+    }
+    let aspectRatio = sourceSize.width / sourceSize.height
+    let width = min(subDubVideoPreviewMaxWidth, subDubVideoPreviewMaxHeight * aspectRatio)
+    return CGSize(width: width, height: width / aspectRatio)
+}
+
 struct SubDubSettingsView: View {
     @ObservedObject var viewModel: SubDubViewModel
 
@@ -20,6 +38,15 @@ struct SubDubSettingsView: View {
                     onImportVideo: viewModel.importVideoByPanel,
                     onImportDroppedProviders: viewModel.importDroppedProviders,
                     onRemoveVideo: viewModel.removeSharedVideo
+                )
+            case .videoConversion:
+                VideoConversionPanel(
+                    viewModel: viewModel.videoConversionViewModel,
+                    watermarkViewModel: viewModel.watermarkRemovalViewModel,
+                    onImportVideo: viewModel.importVideoForConversionByPanel,
+                    onImportDroppedProviders: viewModel.importDroppedProviders,
+                    onRemoveVideo: viewModel.removeSharedVideo,
+                    onLoadConvertedVideo: viewModel.importConvertedVideoIntoSharedSession
                 )
             case .subtitleBurning:
                 SubtitleBurnPanel(
@@ -112,6 +139,973 @@ struct SubDubSettingsView: View {
     }
 }
 
+private struct VideoConversionPanel: View {
+    @ObservedObject var viewModel: VideoConvertViewModel
+    @ObservedObject var watermarkViewModel: WatermarkRemovalViewModel
+    let onImportVideo: () -> Void
+    let onImportDroppedProviders: ([NSItemProvider]) -> Void
+    let onRemoveVideo: () -> Void
+    let onLoadConvertedVideo: () -> Void
+
+    private let dropTypes = [
+        UTType.fileURL.identifier,
+        UTType.movie.identifier,
+        UTType.mpeg4Movie.identifier,
+        UTType.quickTimeMovie.identifier,
+        UTType.data.identifier
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if viewModel.hasSource {
+                HStack(alignment: .top, spacing: 14) {
+                    controls
+                    activeVideoPreview
+                        .frame(
+                            minHeight: conversionConfigurationContentHeight,
+                            alignment: .topLeading
+                        )
+                }
+                activeAudioTrack
+            } else {
+                emptyState
+            }
+            statusText(activeStatusMessage)
+        }
+        .padding(16)
+        .background(cardBackground)
+        .sheet(isPresented: $watermarkViewModel.isWatermarkLibraryPresented) {
+            WatermarkReplacementLibrarySheet(viewModel: watermarkViewModel)
+        }
+        .onDrop(of: dropTypes, isTargeted: nil) { providers in
+            onImportDroppedProviders(providers)
+            return true
+        }
+    }
+
+    private var activeStatusMessage: String {
+        viewModel.selectedMode == .watermarkRemoval
+            ? watermarkViewModel.statusMessage
+            : viewModel.statusMessage
+    }
+
+    private var sourceHeader: some View {
+        HStack(spacing: 10) {
+            Label(viewModel.sourceName, systemImage: "film")
+                .lineLimit(1)
+            Spacer()
+            Text(L10n.f("subdub.video_conversion.source_duration", viewModel.sourceDuration))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            iconButton(
+                systemName: "arrow.triangle.2.circlepath",
+                help: L10n.tr("subdub.action.reselect_video"),
+                action: onImportVideo,
+                isDisabled: viewModel.state.isBusy || watermarkViewModel.state.isBusy
+            )
+            iconButton(
+                systemName: "xmark.circle",
+                help: L10n.tr("subdub.action.remove_video"),
+                action: onRemoveVideo,
+                isDisabled: viewModel.state.isBusy || watermarkViewModel.state.isBusy
+            )
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Picker("", selection: $viewModel.selectedMode) {
+                ForEach(VideoConversionMode.allCases) { mode in
+                    Text(L10n.tr(mode.titleKey)).tag(mode)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .disabled(viewModel.state.isBusy || watermarkViewModel.state.isBusy)
+
+            ScrollView(.vertical, showsIndicators: true) {
+                if viewModel.selectedMode == .formatConversion {
+                    formatConversionControls
+                } else {
+                    watermarkControls
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(
+            width: subDubConfigurationContentWidth,
+            height: conversionConfigurationContentHeight,
+            alignment: .topLeading
+        )
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private var formatConversionControls: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Text(L10n.tr("subdub.video_conversion.current_format"))
+                    .font(.headline)
+                Text(viewModel.sourceFormatTitle)
+                    .font(.headline.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.tr("subdub.video_conversion.output_format"))
+                    .font(.headline)
+                Picker("", selection: $viewModel.selectedFormat) {
+                    ForEach(VideoConversionFormat.allCases) { format in
+                        Text(L10n.tr(format.titleKey)).tag(format)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            DisclosureGroup(L10n.tr("subdub.video_conversion.advanced")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(L10n.tr("subdub.video_conversion.quality"))
+                        .font(.headline)
+                    Picker("", selection: $viewModel.selectedQuality) {
+                        ForEach(VideoConversionQualityPreset.allCases) { quality in
+                            Text(L10n.tr(quality.titleKey)).tag(quality)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    viewModel.startConversion()
+                } label: {
+                    Label(
+                        L10n.tr("subdub.video_conversion.action.start"),
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.state.isBusy)
+
+                if viewModel.state.isBusy {
+                    Button {
+                        viewModel.cancelCurrentTask()
+                    } label: {
+                        Label(
+                            L10n.tr("subdub.video_conversion.action.stop"),
+                            systemImage: "stop.fill"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if viewModel.outputURL != nil {
+                    Button {
+                        viewModel.revealOutput()
+                    } label: {
+                        Label(
+                            L10n.tr("subdub.video_conversion.action.reveal"),
+                            systemImage: "folder"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+
+                    if viewModel.selectedFormat != .webm {
+                        Button {
+                            onLoadConvertedVideo()
+                        } label: {
+                            Label(
+                                L10n.tr("subdub.video_conversion.action.load_shared"),
+                                systemImage: "rectangle.stack.badge.plus"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+
+            if viewModel.state.isBusy || viewModel.progress > 0 {
+                ProgressView(value: viewModel.progress)
+                    .progressViewStyle(.linear)
+                Text(L10n.f("subdub.video_conversion.progress", Int(viewModel.progress * 100)))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var watermarkControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if watermarkViewModel.hasSource {
+                HStack(spacing: 8) {
+                    Text(L10n.tr("subdub.watermark.regions"))
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        watermarkViewModel.openWatermarkLibrary()
+                    } label: {
+                        Label(
+                            L10n.tr("subdub.watermark.library.action.manage"),
+                            systemImage: "photo.stack"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(watermarkViewModel.selectedRegionID == nil || watermarkViewModel.state.isBusy)
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        watermarkViewModel.addRegion()
+                    } label: {
+                        Label(L10n.tr("subdub.watermark.action.add_region"), systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(watermarkViewModel.state.isBusy)
+
+                    Button {
+                        watermarkViewModel.deleteSelectedRegion()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .help(L10n.tr("subdub.watermark.action.delete_region"))
+                    .disabled(watermarkViewModel.selectedRegionID == nil || watermarkViewModel.state.isBusy)
+
+                    Button {
+                        watermarkViewModel.clearRegions()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .help(L10n.tr("subdub.watermark.action.clear_regions"))
+                    .disabled(watermarkViewModel.regions.isEmpty || watermarkViewModel.state.isBusy)
+                }
+
+                if !watermarkViewModel.regions.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(Array(watermarkViewModel.regions.enumerated()), id: \.element.id) { index, region in
+                                Button {
+                                    watermarkViewModel.selectRegionAndOpenLibrary(region.id)
+                                } label: {
+                                    Text(L10n.f("subdub.watermark.region_item", index + 1))
+                                        .font(.caption.weight(region.id == watermarkViewModel.selectedRegionID ? .semibold : .regular))
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(region.id == watermarkViewModel.selectedRegionID ? .accentColor : .secondary)
+                            }
+                        }
+                    }
+                }
+
+                DisclosureGroup(L10n.tr("subdub.video_conversion.advanced")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(L10n.tr("subdub.video_conversion.quality"))
+                            .font(.headline)
+                        Picker("", selection: $watermarkViewModel.selectedQuality) {
+                            ForEach(VideoConversionQualityPreset.allCases) { quality in
+                                Text(L10n.tr(quality.titleKey)).tag(quality)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(L10n.tr("subdub.watermark.repair.label"))
+                            .font(.headline)
+                        Picker("", selection: $watermarkViewModel.selectedRepairPreset) {
+                            ForEach(WatermarkRepairPreset.allCases) { preset in
+                                Text(L10n.tr(preset.titleKey)).tag(preset)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .disabled(watermarkViewModel.state.isBusy)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 8) {
+                    Button {
+                        watermarkViewModel.previewCurrentFrame()
+                    } label: {
+                        Label(L10n.tr("subdub.watermark.action.preview_frame"), systemImage: "photo")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!watermarkViewModel.canPreviewFrame)
+
+                    if watermarkViewModel.previewImage != nil {
+                        Button {
+                            watermarkViewModel.clearFramePreview()
+                        } label: {
+                            Image(systemName: "arrow.uturn.backward")
+                        }
+                        .buttonStyle(.bordered)
+                        .help(L10n.tr("subdub.watermark.action.show_original"))
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        watermarkViewModel.startRemoval()
+                    } label: {
+                        Label(L10n.tr("subdub.watermark.action.start"), systemImage: "wand.and.stars")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!watermarkViewModel.canProcess)
+
+                    if watermarkViewModel.state.isBusy {
+                        Button {
+                            watermarkViewModel.cancelCurrentTask()
+                        } label: {
+                            Label(L10n.tr("subdub.video_conversion.action.stop"), systemImage: "stop.fill")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    if watermarkViewModel.outputURL != nil {
+                        Button {
+                            watermarkViewModel.revealOutput()
+                        } label: {
+                            Label(
+                                L10n.tr("subdub.video_conversion.action.reveal"),
+                                systemImage: "folder"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+
+                if watermarkViewModel.state.isBusy || watermarkViewModel.progress > 0 {
+                    ProgressView(value: watermarkViewModel.progress)
+                        .progressViewStyle(.linear)
+                    Text(L10n.f("subdub.video_conversion.progress", Int(watermarkViewModel.progress * 100)))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text(L10n.tr("subdub.watermark.webm_unavailable"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var conversionVideoSurfaceHeight: CGFloat {
+        // Keep both modes at the same height so toggling between format
+        // conversion and watermark removal does not jump the preview size.
+        return 320
+    }
+
+    private var conversionConfigurationContentHeight: CGFloat {
+        subDubVideoPreviewSize(for: watermarkViewModel.sourceVideoSize).height + 53
+    }
+
+    private var conversionVideoPreviewSize: CGSize {
+        subDubVideoPreviewSize(for: watermarkViewModel.sourceVideoSize)
+    }
+
+    @ViewBuilder
+    private var activeVideoPreview: some View {
+        if viewModel.selectedMode == .watermarkRemoval {
+            watermarkVideoPreview
+        } else {
+            formatVideoPreview
+        }
+    }
+
+    private var formatVideoPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(
+                    viewModel.sourceURL?.lastPathComponent ?? L10n.tr("subdub.empty.no_video"),
+                    systemImage: "film"
+                )
+                .lineLimit(1)
+                Spacer()
+                Text(viewModel.playbackPositionText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            ZStack {
+                if viewModel.isPlayerReady {
+                    SubDubPlayerView(player: viewModel.player)
+                } else {
+                    Color.black.opacity(0.86)
+                    Label(
+                        L10n.tr("subdub.video_conversion.preview.unavailable"),
+                        systemImage: "film"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(20)
+                }
+            }
+            .frame(
+                width: conversionVideoPreviewSize.width,
+                height: conversionVideoPreviewSize.height,
+                alignment: .leading
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contextMenu {
+                Button(L10n.tr("subdub.action.remove_video")) {
+                    onRemoveVideo()
+                }
+                Button(L10n.tr("subdub.action.reselect_video")) {
+                    onImportVideo()
+                }
+            }
+
+            HStack(spacing: 8) {
+                iconButton(
+                    systemName: viewModel.isPreviewPlaying ? "pause.fill" : "play.fill",
+                    help: viewModel.isPreviewPlaying
+                        ? L10n.tr("subdub.action.pause")
+                        : L10n.tr("subdub.action.play"),
+                    action: viewModel.togglePlayback,
+                    isDisabled: !viewModel.isPlayerReady
+                )
+                Slider(
+                    value: Binding(
+                        get: { viewModel.playbackPosition },
+                        set: { viewModel.seek(to: $0) }
+                    ),
+                    in: 0...max(viewModel.sourceDuration, 0.1)
+                )
+                .disabled(!viewModel.isPlayerReady)
+            }
+        }
+        .frame(width: 520, alignment: .topLeading)
+    }
+
+    private var watermarkVideoPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(watermarkViewModel.sourceName, systemImage: "film")
+                    .lineLimit(1)
+                Spacer()
+                Text(watermarkViewModel.playbackPositionText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            WatermarkVideoSurface(viewModel: watermarkViewModel)
+                .frame(width: conversionVideoPreviewSize.width, height: conversionVideoPreviewSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contextMenu {
+                    Button(L10n.tr("subdub.action.remove_video")) { onRemoveVideo() }
+                    Button(L10n.tr("subdub.action.reselect_video")) { onImportVideo() }
+                }
+
+            HStack(spacing: 8) {
+                iconButton(
+                    systemName: watermarkViewModel.isPreviewPlaying ? "pause.fill" : "play.fill",
+                    help: watermarkViewModel.isPreviewPlaying ? L10n.tr("subdub.action.pause") : L10n.tr("subdub.action.play"),
+                    action: watermarkViewModel.togglePlayback,
+                    isDisabled: !watermarkViewModel.isPlayerReady || watermarkViewModel.state.isBusy
+                )
+                Slider(
+                    value: Binding(
+                        get: { watermarkViewModel.playbackPosition },
+                        set: { watermarkViewModel.seek(to: $0) }
+                    ),
+                    in: 0...max(watermarkViewModel.sourceDuration, 0.1)
+                )
+                .disabled(!watermarkViewModel.isPlayerReady || watermarkViewModel.state.isBusy)
+            }
+        }
+        .frame(width: 520, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private var activeAudioTrack: some View {
+        if viewModel.selectedMode == .watermarkRemoval {
+            watermarkAudioTrack
+        } else {
+            formatAudioTrack
+        }
+    }
+
+    private var formatAudioTrack: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(
+                    L10n.tr("subdub.video_conversion.audio_track"),
+                    systemImage: "waveform"
+                )
+                .font(.headline)
+                Spacer()
+                Text(viewModel.audioTrackMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            SubtitleBurnTimelineView(
+                duration: viewModel.sourceDuration,
+                position: viewModel.playbackPosition,
+                sourceSamples: viewModel.sourceWaveformSamples,
+                cues: [],
+                selectedCueID: nil,
+                onSeek: viewModel.seek
+            )
+        }
+    }
+
+    private var watermarkAudioTrack: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(L10n.tr("subdub.video_conversion.audio_track"), systemImage: "waveform")
+                    .font(.headline)
+                Spacer()
+                Text(watermarkViewModel.audioTrackMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            SubtitleBurnTimelineView(
+                duration: watermarkViewModel.sourceDuration,
+                position: watermarkViewModel.playbackPosition,
+                sourceSamples: watermarkViewModel.sourceWaveformSamples,
+                cues: [],
+                selectedCueID: nil,
+                onSeek: watermarkViewModel.seek
+            )
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(
+                L10n.tr("subdub.video_conversion.title"),
+                systemImage: "arrow.triangle.2.circlepath"
+            )
+            .font(.headline)
+            Text(L10n.tr("subdub.video_conversion.placeholder"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            dropZone(
+                icon: "film",
+                text: L10n.tr("subdub.action.drop_video"),
+                action: onImportVideo
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+    }
+}
+
+private struct WatermarkReplacementLibrarySheet: View {
+    private enum Section: String, CaseIterable, Identifiable {
+        case images
+        case text
+
+        var id: String { rawValue }
+
+        var titleKey: String {
+            switch self {
+            case .images: return "subdub.watermark.library.section.images"
+            case .text: return "subdub.watermark.library.section.text"
+            }
+        }
+    }
+
+    @ObservedObject var viewModel: WatermarkRemovalViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedSection: Section = .images
+    @State private var selectedTextStyleID: UUID?
+    @State private var editingTextStyle: WatermarkLibraryTextStyle?
+    @State private var isDeleteImageConfirmationPresented = false
+    @State private var imageToDelete: WatermarkLibraryImage?
+    @State private var isDeleteTextConfirmationPresented = false
+    @State private var textStyleToDelete: WatermarkLibraryTextStyle?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.f("subdub.watermark.library.title", viewModel.selectedRegionIndex ?? 0))
+                        .font(.title3.weight(.semibold))
+                    Text(L10n.tr("subdub.watermark.library.subtitle"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    viewModel.isWatermarkLibraryPresented = false
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.bordered)
+                .help(L10n.tr("subdub.action.close"))
+            }
+
+            if !viewModel.watermarkLibraryAvailable {
+                ContentUnavailableView(
+                    L10n.tr("subdub.watermark.library.workspace_title"),
+                    systemImage: "externaldrive.badge.exclamationmark",
+                    description: Text(L10n.tr("subdub.watermark.library.workspace_missing"))
+                )
+            } else {
+                Group {
+                    Picker("", selection: $selectedSection) {
+                        ForEach(Section.allCases) { section in
+                            Text(L10n.tr(section.titleKey)).tag(section)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+
+                    if selectedSection == .images {
+                        imageLibrary
+                    } else {
+                        textLibrary
+                    }
+                }
+                .disabled(viewModel.state.isBusy)
+            }
+        }
+        .padding(20)
+        .frame(width: 680, height: 570, alignment: .topLeading)
+        .onAppear { viewModel.reloadWatermarkLibrary() }
+        .confirmationDialog(
+            L10n.tr("subdub.watermark.library.delete_image.title"),
+            isPresented: $isDeleteImageConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button(L10n.tr("subdub.action.delete"), role: .destructive) {
+                if let imageToDelete { viewModel.deleteLibraryImage(imageToDelete.id) }
+            }
+        } message: {
+            Text(L10n.tr("subdub.watermark.library.delete_image.message"))
+        }
+        .confirmationDialog(
+            L10n.tr("subdub.watermark.library.delete_text.title"),
+            isPresented: $isDeleteTextConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button(L10n.tr("subdub.action.delete"), role: .destructive) {
+                if let textStyleToDelete { viewModel.deleteTextStyle(textStyleToDelete.id) }
+            }
+        } message: {
+            Text(L10n.tr("subdub.watermark.library.delete_text.message"))
+        }
+    }
+
+    private var imageLibrary: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Button {
+                    viewModel.importLibraryPNG()
+                } label: {
+                    Label(L10n.tr("subdub.watermark.library.action.import_image"), systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    viewModel.revealWatermarkLibrary()
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .buttonStyle(.bordered)
+                .help(L10n.tr("subdub.watermark.library.action.reveal"))
+                if viewModel.selectedRegion?.imageLibraryID != nil {
+                    Button(L10n.tr("subdub.watermark.library.action.remove_from_region")) {
+                        viewModel.removeLibraryImageFromSelectedRegion()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Spacer()
+            }
+
+            if viewModel.watermarkLibrary.images.isEmpty {
+                ContentUnavailableView(
+                    L10n.tr("subdub.watermark.library.images_empty"),
+                    systemImage: "photo.on.rectangle.angled",
+                    description: Text(L10n.tr("subdub.watermark.library.images_empty_hint"))
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 12)], spacing: 12) {
+                        ForEach(viewModel.watermarkLibrary.images) { image in
+                            imageCard(image)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+    }
+
+    private func imageCard(_ image: WatermarkLibraryImage) -> some View {
+        let isApplied = viewModel.selectedRegion?.imageLibraryID == image.id
+        return VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                Color(nsColor: .windowBackgroundColor)
+                if let url = viewModel.imageLibraryURL(for: image),
+                   let previewImage = NSImage(contentsOf: url) {
+                    Image(nsImage: previewImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(8)
+                } else {
+                    Image(systemName: "photo")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(height: 84)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+            Text(image.displayName)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+
+            HStack(spacing: 6) {
+                Button(isApplied ? L10n.tr("subdub.watermark.library.applied") : L10n.tr("subdub.watermark.library.action.apply")) {
+                    viewModel.applyLibraryImage(image.id)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isApplied)
+                Button(role: .destructive) {
+                    imageToDelete = image
+                    isDeleteImageConfirmationPresented = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(L10n.tr("subdub.watermark.library.action.delete_image"))
+            }
+        }
+        .padding(8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isApplied ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: isApplied ? 2 : 1)
+        }
+    }
+
+    private var textLibrary: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(L10n.tr("subdub.watermark.library.text_styles"))
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        editingTextStyle = newTextStyle()
+                        selectedTextStyleID = nil
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .help(L10n.tr("subdub.watermark.library.action.new_text"))
+                }
+
+                List(selection: $selectedTextStyleID) {
+                    ForEach(Array(viewModel.watermarkLibrary.textStyles), id: \.id) { style in
+                        WatermarkTextStyleRow(
+                            style: style,
+                            isApplied: viewModel.selectedRegion?.textStyleID == style.id
+                        )
+                        .tag(style.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedTextStyleID = style.id
+                            editingTextStyle = style
+                        }
+                    }
+                }
+                .frame(width: 245, height: 370)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                if let draft = editingTextStyle {
+                    textEditor(style: draft)
+                } else {
+                    ContentUnavailableView(
+                        L10n.tr("subdub.watermark.library.text_empty"),
+                        systemImage: "textformat",
+                        description: Text(L10n.tr("subdub.watermark.library.text_empty_hint"))
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private func textEditor(style: WatermarkLibraryTextStyle) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextField(L10n.tr("subdub.watermark.library.text_style_name"), text: textBinding(style.id, \.name))
+                .textFieldStyle(.roundedBorder)
+            TextField(L10n.tr("subdub.watermark.text.placeholder"), text: textBinding(style.id, \.text))
+                .textFieldStyle(.roundedBorder)
+            Picker(L10n.tr("subdub.watermark.text.font"), selection: textBinding(style.id, \.font)) {
+                ForEach(WatermarkTextFont.allCases) { font in
+                    Text(L10n.tr(font.titleKey)).tag(font)
+                }
+            }
+            HStack(spacing: 8) {
+                Text(L10n.tr("subdub.watermark.text.color")).font(.caption)
+                ColorPicker("", selection: colorBinding(style.id), supportsOpacity: true)
+                    .labelsHidden()
+                Text(L10n.tr("subdub.watermark.text.opacity")).font(.caption)
+                Slider(value: opacityBinding(style.id), in: 0...1)
+            }
+            Toggle(L10n.tr("subdub.watermark.text.outline"), isOn: textBinding(style.id, \.outlineEnabled))
+            if editingTextStyle?.outlineEnabled == true {
+                labeledSlider(L10n.tr("subdub.watermark.text.outline_width"), value: textBinding(style.id, \.outlineScale), range: 0.001...0.012)
+            }
+            Toggle(L10n.tr("subdub.watermark.text.shadow"), isOn: textBinding(style.id, \.shadowEnabled))
+            if editingTextStyle?.shadowEnabled == true {
+                labeledSlider(L10n.tr("subdub.watermark.text.shadow_offset"), value: textBinding(style.id, \.shadowOffsetScale), range: 0.001...0.02)
+            }
+
+            HStack(spacing: 8) {
+                Button(L10n.tr("subdub.watermark.library.action.save_new_text")) {
+                    guard let draft = editingTextStyle else { return }
+                    var copy = draft
+                    copy = WatermarkLibraryTextStyle(
+                        name: copy.name,
+                        text: copy.text,
+                        font: copy.font,
+                        color: copy.color,
+                        outlineEnabled: copy.outlineEnabled,
+                        outlineScale: copy.outlineScale,
+                        shadowEnabled: copy.shadowEnabled,
+                        shadowOffsetScale: copy.shadowOffsetScale
+                    )
+                    viewModel.saveTextStyle(copy)
+                    selectedTextStyleID = copy.id
+                    self.editingTextStyle = copy
+                }
+                .buttonStyle(.bordered)
+
+                Button(L10n.tr("subdub.watermark.library.action.update_text")) {
+                    guard let editingTextStyle, viewModel.watermarkLibrary.textStyles.contains(where: { $0.id == editingTextStyle.id }) else { return }
+                    viewModel.saveTextStyle(editingTextStyle, replacingID: editingTextStyle.id)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!viewModel.watermarkLibrary.textStyles.contains(where: { $0.id == style.id }))
+
+                Button(L10n.tr("subdub.watermark.library.action.apply")) {
+                    guard let editingTextStyle else { return }
+                    viewModel.applyTextStyle(editingTextStyle.id)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!viewModel.watermarkLibrary.textStyles.contains(where: { $0.id == style.id }))
+
+                Spacer()
+                if viewModel.watermarkLibrary.textStyles.contains(where: { $0.id == style.id }) {
+                    Button(role: .destructive) {
+                        textStyleToDelete = style
+                        isDeleteTextConfirmationPresented = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .help(L10n.tr("subdub.watermark.library.action.delete_text"))
+                }
+            }
+            if viewModel.selectedRegion?.textStyleID != nil {
+                Button(L10n.tr("subdub.watermark.library.action.remove_from_region")) {
+                    viewModel.removeTextStyleFromSelectedRegion()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func labeledSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.caption)
+            Slider(value: value, in: range)
+        }
+    }
+
+    private func textBinding<Value>(_ id: UUID, _ keyPath: WritableKeyPath<WatermarkLibraryTextStyle, Value>) -> Binding<Value> {
+        Binding(
+            get: { editingTextStyle?[keyPath: keyPath] ?? newTextStyle()[keyPath: keyPath] },
+            set: { value in editingTextStyle?[keyPath: keyPath] = value }
+        )
+    }
+
+    private func opacityBinding(_ id: UUID) -> Binding<Double> {
+        Binding(
+            get: { editingTextStyle?.color.opacity ?? 1 },
+            set: { value in editingTextStyle?.color.opacity = min(max(value, 0), 1) }
+        )
+    }
+
+    private func colorBinding(_ id: UUID) -> Binding<Color> {
+        Binding(
+            get: {
+                let color = editingTextStyle?.color ?? .white
+                return Color(red: color.red, green: color.green, blue: color.blue, opacity: color.opacity)
+            },
+            set: { color in
+                guard let resolved = NSColor(color).usingColorSpace(.sRGB) else { return }
+                editingTextStyle?.color = SubtitleThemeColor(
+                    red: Double(resolved.redComponent),
+                    green: Double(resolved.greenComponent),
+                    blue: Double(resolved.blueComponent),
+                    opacity: Double(resolved.alphaComponent)
+                )
+            }
+        )
+    }
+
+    private func newTextStyle() -> WatermarkLibraryTextStyle {
+        WatermarkLibraryTextStyle(name: L10n.tr("subdub.watermark.library.new_text_name"), text: "")
+    }
+}
+
+private struct WatermarkTextStyleRow: View {
+    let style: WatermarkLibraryTextStyle
+    let isApplied: Bool
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(style.name)
+                    .lineLimit(1)
+                Text(style.text)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if isApplied {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+    }
+}
+
 private struct VideoDubbingPanel: View {
     @ObservedObject var viewModel: VideoDubbingViewModel
     let onImportVideo: () -> Void
@@ -126,117 +1120,13 @@ private struct VideoDubbingPanel: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             if viewModel.hasSource {
-                HStack {
-                    Label(viewModel.sourceURL?.lastPathComponent ?? "", systemImage: "film")
-                        .lineLimit(1)
-                    Spacer()
-                    Text(viewModel.playbackPositionText)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 14) {
+                    dubbingControls
+                    videoPreview
                 }
-
-                SubDubPlayerView(player: viewModel.player)
-                    .frame(minHeight: 280, maxHeight: 420)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .contextMenu {
-                        Button(L10n.tr("subdub.action.remove_video")) {
-                            onRemoveVideo()
-                        }
-                        Button(L10n.tr("subdub.action.reselect_video")) {
-                            onImportVideo()
-                        }
-                    }
-
                 dubbingTimeline
-
-                selectionControls
-
-                HStack(spacing: 10) {
-                    iconButton(
-                        systemName: "mic",
-                        help: L10n.tr("subdub.action.prepare"),
-                        action: viewModel.prepareDubbing,
-                        isDisabled: viewModel.state.isBusy
-                    )
-
-                    if viewModel.state == .ready || viewModel.state == .failed {
-                        iconButton(
-                            systemName: "record.circle",
-                            help: viewModel.selectedDubbingRange == nil
-                                ? L10n.tr("subdub.action.start_recording")
-                                : L10n.tr("subdub.action.replace_selection"),
-                            action: viewModel.startRecording
-                        )
-                    }
-
-                    if viewModel.state == .finished || viewModel.state == .succeeded {
-                        iconButton(
-                            systemName: "record.circle",
-                            help: viewModel.selectedDubbingRange == nil
-                                ? L10n.tr("subdub.action.start_recording")
-                                : L10n.tr("subdub.action.replace_selection"),
-                            action: viewModel.startRecording
-                        )
-                    }
-
-                    if viewModel.state == .recording {
-                        iconButton(
-                            systemName: "pause.fill",
-                            help: L10n.tr("subdub.action.pause_recording"),
-                            action: viewModel.pauseRecording
-                        )
-                        iconButton(
-                            systemName: "stop.fill",
-                            help: L10n.tr("subdub.action.stop_recording"),
-                            action: viewModel.stopRecording
-                        )
-                    }
-
-                    if viewModel.state == .paused {
-                        iconButton(
-                            systemName: "play.fill",
-                            help: L10n.tr("subdub.action.resume_recording"),
-                            action: viewModel.continueRecording
-                        )
-                        iconButton(
-                            systemName: "stop.fill",
-                            help: L10n.tr("subdub.action.stop_recording"),
-                            action: viewModel.stopRecording
-                        )
-                    }
-
-                    iconButton(
-                        systemName: "arrow.counterclockwise",
-                        help: L10n.tr("subdub.action.rerecord"),
-                        action: viewModel.resetRecording,
-                        isDisabled: viewModel.state.isBusy
-                    )
-
-                    if viewModel.hasAudio {
-                        iconButton(
-                            systemName: viewModel.isPreviewPlaying ? "pause.fill" : "play.fill",
-                            help: viewModel.isPreviewPlaying
-                                ? L10n.tr("subdub.action.pause_dubbed_video")
-                                : L10n.tr("subdub.action.play_dubbed_video"),
-                            action: viewModel.toggleRecordedPreview
-                        )
-                        iconButton(
-                            systemName: "arrow.down.circle",
-                            help: L10n.tr("subdub.action.save_audio"),
-                            action: viewModel.saveAudio
-                        )
-                        iconButtonWithBadge(
-                            systemName: "waveform.and.mic",
-                            help: L10n.tr("subdub.action.replace_audio"),
-                            action: viewModel.exportVideo,
-                            badge: L10n.tr("subscription.membership.vip"),
-                            isDisabled: viewModel.state.isBusy
-                        )
-                    }
-                    Spacer(minLength: 0)
-                }
             } else {
                 dropZone(
                     icon: "film",
@@ -253,6 +1143,176 @@ private struct VideoDubbingPanel: View {
         }
         .padding(16)
         .background(cardBackground)
+    }
+
+    private var dubbingControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Spacer(minLength: 0)
+
+            HStack(spacing: 8) {
+                Label(
+                    viewModel.sourceURL?.lastPathComponent ?? L10n.tr("subdub.empty.no_video"),
+                    systemImage: "mic.and.signal.meter"
+                )
+                .lineLimit(1)
+                Spacer(minLength: 0)
+                iconButton(
+                    systemName: "arrow.triangle.2.circlepath",
+                    help: L10n.tr("subdub.action.reselect_video"),
+                    action: onImportVideo,
+                    isDisabled: viewModel.state.isBusy
+                )
+                iconButton(
+                    systemName: "xmark.circle",
+                    help: L10n.tr("subdub.action.remove_video"),
+                    action: onRemoveVideo,
+                    isDisabled: viewModel.state.isBusy
+                )
+            }
+
+            dubbingActions
+            selectionControls
+        }
+        .frame(
+            width: subDubConfigurationContentWidth,
+            height: dubbingConfigurationContentHeight,
+            alignment: .bottomLeading
+        )
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private var dubbingActions: some View {
+        HStack(spacing: 8) {
+            iconButton(
+                systemName: "mic",
+                help: L10n.tr("subdub.action.prepare"),
+                action: viewModel.prepareDubbing,
+                isDisabled: viewModel.state.isBusy
+            )
+
+            if viewModel.state == .ready || viewModel.state == .failed ||
+                viewModel.state == .finished || viewModel.state == .succeeded {
+                iconButton(
+                    systemName: "record.circle",
+                    help: viewModel.selectedDubbingRange == nil
+                        ? L10n.tr("subdub.action.start_recording")
+                        : L10n.tr("subdub.action.replace_selection"),
+                    action: viewModel.startRecording
+                )
+            }
+
+            if viewModel.state == .recording {
+                iconButton(
+                    systemName: "pause.fill",
+                    help: L10n.tr("subdub.action.pause_recording"),
+                    action: viewModel.pauseRecording
+                )
+                iconButton(
+                    systemName: "stop.fill",
+                    help: L10n.tr("subdub.action.stop_recording"),
+                    action: viewModel.stopRecording
+                )
+            }
+
+            if viewModel.state == .paused {
+                iconButton(
+                    systemName: "play.fill",
+                    help: L10n.tr("subdub.action.resume_recording"),
+                    action: viewModel.continueRecording
+                )
+                iconButton(
+                    systemName: "stop.fill",
+                    help: L10n.tr("subdub.action.stop_recording"),
+                    action: viewModel.stopRecording
+                )
+            }
+
+            iconButton(
+                systemName: "arrow.counterclockwise",
+                help: L10n.tr("subdub.action.rerecord"),
+                action: viewModel.resetRecording,
+                isDisabled: viewModel.state.isBusy
+            )
+
+            if viewModel.hasAudio {
+                iconButton(
+                    systemName: viewModel.isPreviewPlaying ? "pause.fill" : "play.fill",
+                    help: viewModel.isPreviewPlaying
+                        ? L10n.tr("subdub.action.pause_dubbed_video")
+                        : L10n.tr("subdub.action.play_dubbed_video"),
+                    action: viewModel.toggleRecordedPreview
+                )
+                iconButton(
+                    systemName: "arrow.down.circle",
+                    help: L10n.tr("subdub.action.save_audio"),
+                    action: viewModel.saveAudio
+                )
+                iconButtonWithBadge(
+                    systemName: "waveform.and.mic",
+                    help: L10n.tr("subdub.action.replace_audio"),
+                    action: viewModel.exportVideo,
+                    badge: L10n.tr("subscription.membership.vip"),
+                    isDisabled: viewModel.state.isBusy
+                )
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var videoPreview: some View {
+        let previewSize = subDubVideoPreviewSize(for: viewModel.sourceVideoSize)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(viewModel.sourceURL?.lastPathComponent ?? "", systemImage: "film")
+                    .lineLimit(1)
+                Spacer()
+                Text(viewModel.playbackPositionText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            SubDubPlayerView(player: viewModel.player)
+                .frame(width: previewSize.width, height: previewSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contextMenu {
+                    Button(L10n.tr("subdub.action.remove_video")) {
+                        onRemoveVideo()
+                    }
+                    Button(L10n.tr("subdub.action.reselect_video")) {
+                        onImportVideo()
+                    }
+                }
+
+            HStack(spacing: 8) {
+                iconButton(
+                    systemName: viewModel.player.timeControlStatus == .playing ? "pause.fill" : "play.fill",
+                    help: viewModel.player.timeControlStatus == .playing
+                        ? L10n.tr("subdub.action.pause")
+                        : L10n.tr("subdub.action.play"),
+                    action: viewModel.togglePlayback,
+                    isDisabled: !viewModel.isPlayerReady || viewModel.state == .recording || viewModel.state == .paused
+                )
+                Slider(
+                    value: Binding(
+                        get: { viewModel.playbackPosition },
+                        set: { viewModel.seek(to: $0) }
+                    ),
+                    in: 0...max(viewModel.sourceDuration, 0.1)
+                )
+                .disabled(!viewModel.isPlayerReady || viewModel.state == .recording || viewModel.state == .paused)
+            }
+        }
+        .frame(width: 520, alignment: .topLeading)
+    }
+
+    private var dubbingConfigurationContentHeight: CGFloat {
+        subDubVideoPreviewSize(for: viewModel.sourceVideoSize).height + 47
     }
 
     private var dubbingTimeline: some View {
@@ -372,36 +1432,35 @@ private struct SubtitleBurnPanel: View {
 
     private var subtitleEditor: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 4) {
                 Label(
                     L10n.tr("subdub.subtitle_burn.editor"),
                     systemImage: "list.bullet.rectangle"
                 )
-                .font(.headline)
+                .font(.subheadline)
+                .lineLimit(1)
                 Spacer()
-                Button {
-                    viewModel.addCue()
-                } label: {
-                    Image(systemName: "plus")
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.plain)
-                .help(L10n.tr("subdub.action.add_subtitle"))
-                .disabled(!viewModel.hasSource || viewModel.state.isBusy)
-                .opacity(!viewModel.hasSource || viewModel.state.isBusy ? 0.38 : 1)
-                iconButton(
+                compactIconButton(
+                    systemName: "plus",
+                    help: L10n.tr("subdub.action.add_subtitle"),
+                    action: viewModel.addCue,
+                    isDisabled: !viewModel.hasSource || viewModel.state.isBusy
+                )
+                compactIconButton(
                     systemName: "arrow.down.doc",
                     help: L10n.tr("subdub.action.import_timeline_json"),
                     action: viewModel.importTimelineJSONByPanel,
                     isDisabled: !viewModel.hasSource || viewModel.state.isBusy
                 )
-                iconButton(
+                compactIconButton(
                     systemName: "arrow.up.doc",
                     help: L10n.tr("subdub.action.export_timeline_json"),
                     action: viewModel.exportTimelineJSONByPanel,
                     isDisabled: !viewModel.hasSource || viewModel.cues.isEmpty || viewModel.state.isBusy
                 )
+                previewPositionMenu
                 subtitleStyleMenu
+                subtitleThemeColorPicker
             }
 
             if viewModel.cues.isEmpty {
@@ -436,7 +1495,7 @@ private struct SubtitleBurnPanel: View {
                 }
             }
         }
-        .frame(width: 330, height: subtitleEditorHeight, alignment: .topLeading)
+        .frame(width: subDubConfigurationContentWidth, height: subtitleEditorHeight, alignment: .topLeading)
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -461,12 +1520,90 @@ private struct SubtitleBurnPanel: View {
                 }
             }
         } label: {
-            Image(systemName: "textformat")
-                .frame(width: 32, height: 32)
+            Image(systemName: "captions.bubble.fill")
+                .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .help(L10n.tr("subdub.subtitle_style.label"))
+        .disabled(!viewModel.hasSource || viewModel.state.isBusy)
+        .opacity(!viewModel.hasSource || viewModel.state.isBusy ? 0.38 : 1)
+    }
+
+    @State private var isThemeColorPopoverPresented = false
+
+    private var subtitleThemeColorPicker: some View {
+        let color = Color(
+            red: viewModel.subtitleThemeColor.red,
+            green: viewModel.subtitleThemeColor.green,
+            blue: viewModel.subtitleThemeColor.blue,
+            opacity: viewModel.subtitleThemeColor.opacity
+        )
+        return Button {
+            isThemeColorPopoverPresented = true
+        } label: {
+            ZStack {
+                // Background grid for transparency preview.
+                Image(systemName: "circle.grid.cross.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color(nsColor: .controlBackgroundColor))
+                Circle()
+                    .fill(color)
+                    .frame(width: 14, height: 14)
+            }
+            .frame(width: 26, height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(L10n.tr("subdub.subtitle_style.theme_color"))
+        .disabled(!viewModel.hasSource || viewModel.state.isBusy)
+        .opacity(!viewModel.hasSource || viewModel.state.isBusy ? 0.38 : 1)
+        .popover(isPresented: $isThemeColorPopoverPresented, arrowEdge: .bottom) {
+            ColorPicker(
+                "",
+                selection: Binding(
+                    get: { color },
+                    set: { newColor in
+                        guard let resolved = NSColor(newColor).usingColorSpace(.sRGB) else { return }
+                        viewModel.updateSubtitleThemeColor(
+                            SubtitleThemeColor(
+                                red: Double(resolved.redComponent),
+                                green: Double(resolved.greenComponent),
+                                blue: Double(resolved.blueComponent),
+                                opacity: Double(resolved.alphaComponent)
+                            )
+                        )
+                    }
+                ),
+                supportsOpacity: true
+            )
+            .labelsHidden()
+            .padding(12)
+            .frame(width: 240)
+        }
+    }
+
+    private var previewPositionMenu: some View {
+        Menu {
+            ForEach(SubtitlePreviewPosition.allCases) { position in
+                Button {
+                    viewModel.updatePreviewPosition(position)
+                } label: {
+                    HStack {
+                        Text(L10n.tr(position.titleKey))
+                        if position == viewModel.previewPosition {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "eye")
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .help(L10n.tr("subdub.subtitle_preview.label"))
         .disabled(!viewModel.hasSource || viewModel.state.isBusy)
         .opacity(!viewModel.hasSource || viewModel.state.isBusy ? 0.38 : 1)
     }
@@ -500,17 +1637,19 @@ private struct SubtitleBurnPanel: View {
                     ZStack {
                         SubDubPlayerView(player: viewModel.player)
 
-                        if let cue = viewModel.activeCue {
+                        if let cue = viewModel.activeCue,
+                           viewModel.previewPosition != .hidden {
                             let style = viewModel.subtitleStyle
                             let fontSize = style.previewFontSize(forVideoHeight: contentRect.height)
                             let horizontalPadding = max(8, fontSize * 0.65)
                             let verticalPadding = max(4, fontSize * 0.25)
                             let bottomMargin = max(6, contentRect.height * style.marginScale)
+                            let overlayAlignment: Alignment = viewModel.previewPosition == .center ? .center : .bottom
                             Text(cue.text.trimmingCharacters(in: .whitespacesAndNewlines))
                                 .font(.custom(style.fontName, size: fontSize))
                                 .fontWeight(style.isBold ? .bold : .medium)
                                 .multilineTextAlignment(.center)
-                                .foregroundStyle(.white)
+                                .foregroundStyle(subtitleThemeColor)
                                 .lineLimit(2)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: min(max(contentRect.width - 32, 1), 360))
@@ -527,11 +1666,11 @@ private struct SubtitleBurnPanel: View {
                                     x: style == .outline ? 1 : 0,
                                     y: style == .outline ? 1 : 0
                                 )
-                                .padding(.bottom, bottomMargin)
+                                .padding(.bottom, viewModel.previewPosition == .center ? 0 : bottomMargin)
                                 .frame(
                                     width: max(contentRect.width, 1),
                                     height: max(contentRect.height, 1),
-                                    alignment: .bottom
+                                    alignment: overlayAlignment
                                 )
                                 .position(x: contentRect.midX, y: contentRect.midY)
                                 .allowsHitTesting(false)
@@ -602,21 +1741,21 @@ private struct SubtitleBurnPanel: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(width: 520, alignment: .topLeading)
+    }
+
+    private var subtitleThemeColor: Color {
+        let color = viewModel.subtitleThemeColor
+        return Color(
+            red: color.red,
+            green: color.green,
+            blue: color.blue,
+            opacity: color.opacity
+        )
     }
 
     private var videoPreviewSize: CGSize {
-        let sourceSize = viewModel.sourceVideoSize
-        guard sourceSize.width > 0, sourceSize.height > 0 else {
-            return CGSize(width: 520, height: 292.5)
-        }
-
-        let aspectRatio = sourceSize.width / sourceSize.height
-        let maxWidth: CGFloat = 520
-        let maxHeight: CGFloat = 320
-        let width = min(maxWidth, maxHeight * aspectRatio)
-        let height = width / aspectRatio
-        return CGSize(width: width, height: height)
+        subDubVideoPreviewSize(for: viewModel.sourceVideoSize)
     }
 
     private func labeledAction(
@@ -627,7 +1766,6 @@ private struct SubtitleBurnPanel: View {
     ) -> some View {
         Button(action: action) {
             Label(title, systemImage: icon)
-                .font(.caption)
         }
         .buttonStyle(.bordered)
         .disabled(isDisabled)
@@ -655,7 +1793,6 @@ private struct SubtitleBurnPanel: View {
                     .background(Color.orange.opacity(0.16))
                     .clipShape(Capsule())
             }
-            .font(.caption)
         }
         .buttonStyle(.bordered)
         .help(help)
@@ -696,7 +1833,7 @@ private struct AudioReplacementPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if viewModel.hasSource {
-                HStack(alignment: .bottom, spacing: 14) {
+                HStack(alignment: .top, spacing: 14) {
                     subtitleEditor
                     videoPreview
                 }
@@ -715,7 +1852,7 @@ private struct AudioReplacementPanel: View {
             }
             statusText(viewModel.statusMessage)
         }
-        .padding(12)
+        .padding(16)
         .background(cardBackground)
         .onDrop(of: [
             UTType.fileURL.identifier,
@@ -769,7 +1906,7 @@ private struct AudioReplacementPanel: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
+        .padding(16)
     }
 
     private var subtitleEditor: some View {
@@ -816,7 +1953,11 @@ private struct AudioReplacementPanel: View {
                 .padding(4)
             }
         }
-        .frame(width: 330, height: 430, alignment: .topLeading)
+        .frame(
+            width: subDubConfigurationContentWidth,
+            height: audioReplacementEditorHeight,
+            alignment: .topLeading
+        )
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -936,19 +2077,16 @@ private struct AudioReplacementPanel: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(width: 520, alignment: .topLeading)
     }
 
     private var previewSize: CGSize {
-        let sourceSize = viewModel.sourceVideoSize
-        guard sourceSize.width > 0, sourceSize.height > 0 else {
-            return CGSize(width: 520, height: 292.5)
-        }
-        let aspectRatio = sourceSize.width / sourceSize.height
-        let maxWidth: CGFloat = 520
-        let maxHeight: CGFloat = 300
-        let width = min(maxWidth, maxHeight * aspectRatio)
-        return CGSize(width: width, height: width / aspectRatio)
+        subDubVideoPreviewSize(for: viewModel.sourceVideoSize)
+    }
+
+    private var audioReplacementEditorHeight: CGFloat {
+        // Keep the left editor card visually aligned with the full preview column.
+        previewSize.height + 150
     }
 
     private var audioPreviewControl: some View {
@@ -1581,6 +2719,340 @@ private struct SubDubPlayerView: NSViewRepresentable {
     }
 }
 
+private struct WatermarkVideoSurface: View {
+    @ObservedObject var viewModel: WatermarkRemovalViewModel
+    @State private var dragStartRect: CGRect?
+    @State private var activeRegionID: UUID?
+    @State private var activeHandle: VideoCropHandle?
+    @State private var activeLayer: WatermarkReplacementLayer?
+
+    var body: some View {
+        GeometryReader { proxy in
+            let bounds = CGRect(origin: .zero, size: proxy.size)
+            let fitRect = VideoCropGeometry.aspectFitRect(
+                contentSize: viewModel.sourceVideoSize,
+                boundingSize: proxy.size
+            )
+            ZStack {
+                if let previewImage = viewModel.previewImage {
+                    Image(nsImage: previewImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: bounds.width, height: bounds.height)
+                        .background(Color.black)
+                } else {
+                    SubDubPlayerView(player: viewModel.player)
+                        .frame(width: bounds.width, height: bounds.height)
+                        .background(Color.black)
+                }
+
+                if viewModel.previewImage == nil {
+                    ForEach(viewModel.regions) { region in
+                        watermarkRegionOverlay(
+                            region: region,
+                            fitRect: fitRect
+                        )
+                        watermarkReplacementOverlays(
+                            region: region,
+                            fitRect: fitRect
+                        )
+                    }
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .background(Color.black)
+    }
+
+    private func watermarkRegionOverlay(
+        region: WatermarkRegion,
+        fitRect: CGRect
+    ) -> some View {
+        let normalized = VideoCropGeometry.clampNormalizedRect(region.rectNormalized.cgRect)
+        let frame = CGRect(
+            x: fitRect.minX + fitRect.width * normalized.minX,
+            y: fitRect.minY + fitRect.height * normalized.minY,
+            width: fitRect.width * normalized.width,
+            height: fitRect.height * normalized.height
+        )
+        let isSelected = region.id == viewModel.selectedRegionID
+
+        return ZStack {
+            Rectangle()
+                .fill(Color.red.opacity(isSelected ? 0.15 : 0.08))
+                .frame(width: frame.width, height: frame.height)
+                .overlay {
+                    Rectangle()
+                        .stroke(isSelected ? Color.orange : Color.red.opacity(0.8), lineWidth: isSelected ? 2 : 1.5)
+                }
+                .overlay(alignment: .topLeading) {
+                    Text(L10n.f("subdub.watermark.region_item", regionIndex(region.id)))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(Color.red.opacity(0.8))
+                }
+                .contentShape(Rectangle())
+                .position(x: frame.midX, y: frame.midY)
+                .gesture(dragGesture(region: region, frame: frame, fitRect: fitRect))
+
+            if isSelected {
+                ForEach(watermarkHandlePoints(frame), id: \.0) { _, point in
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 8, height: 8)
+                        .overlay(Circle().stroke(Color.orange, lineWidth: 1))
+                        .position(point)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onTapGesture { viewModel.selectRegion(region.id) }
+    }
+
+    @ViewBuilder
+    private func watermarkReplacementOverlays(
+        region: WatermarkRegion,
+        fitRect: CGRect
+    ) -> some View {
+        if let image = region.imageReplacement {
+            watermarkImageOverlay(region: region, replacement: image, fitRect: fitRect)
+        }
+        if let text = region.textReplacement, text.isEnabled {
+            watermarkTextOverlay(region: region, replacement: text, fitRect: fitRect)
+        }
+    }
+
+    private func watermarkImageOverlay(
+        region: WatermarkRegion,
+        replacement: WatermarkImageReplacement,
+        fitRect: CGRect
+    ) -> some View {
+        let frame = displayFrame(for: replacement.rectNormalized, fitRect: fitRect)
+        return replacementLayerOverlay(
+            region: region,
+            layer: .image,
+            frame: frame,
+            fitRect: fitRect,
+            stroke: .cyan,
+            label: L10n.tr("subdub.watermark.layer.png"),
+            content: AnyView(
+                Image(nsImage: NSImage(contentsOf: replacement.assetURL) ?? NSImage())
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: frame.width, height: frame.height)
+            )
+        )
+    }
+
+    private func watermarkTextOverlay(
+        region: WatermarkRegion,
+        replacement: WatermarkTextReplacement,
+        fitRect: CGRect
+    ) -> some View {
+        let frame = displayFrame(for: replacement.rectNormalized, fitRect: fitRect)
+        let color = Color(
+            red: replacement.color.red,
+            green: replacement.color.green,
+            blue: replacement.color.blue,
+            opacity: replacement.color.opacity
+        )
+        return replacementLayerOverlay(
+            region: region,
+            layer: .text,
+            frame: frame,
+            fitRect: fitRect,
+            stroke: .purple,
+            label: L10n.tr("subdub.watermark.layer.text"),
+            content: AnyView(
+                Text(replacement.text)
+                    .font(.custom(previewFontName(for: replacement.font), size: max(9, frame.height)))
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.2)
+                    .frame(width: frame.width, height: frame.height, alignment: .leading)
+            )
+        )
+    }
+
+    private func replacementLayerOverlay(
+        region: WatermarkRegion,
+        layer: WatermarkReplacementLayer,
+        frame: CGRect,
+        fitRect: CGRect,
+        stroke: Color,
+        label: String,
+        content: AnyView
+    ) -> some View {
+        let selected = region.id == viewModel.selectedRegionID
+        return ZStack {
+            content
+                .overlay {
+                    Rectangle()
+                        .stroke(stroke.opacity(selected ? 1 : 0.78), lineWidth: selected ? 2 : 1.25)
+                }
+                .overlay(alignment: .topLeading) {
+                    Text(label)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(stroke.opacity(0.85))
+                }
+                .contentShape(Rectangle())
+                .position(x: frame.midX, y: frame.midY)
+                .gesture(replacementDragGesture(
+                    region: region,
+                    layer: layer,
+                    frame: frame,
+                    fitRect: fitRect
+                ))
+
+            if selected {
+                ForEach(watermarkHandlePoints(frame), id: \.0) { _, point in
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 7, height: 7)
+                        .overlay(Circle().stroke(stroke, lineWidth: 1))
+                        .position(point)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onTapGesture { viewModel.selectRegion(region.id) }
+    }
+
+    private func dragGesture(
+        region: WatermarkRegion,
+        frame: CGRect,
+        fitRect: CGRect
+    ) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if activeRegionID == nil && activeLayer == nil {
+                    activeRegionID = region.id
+                    viewModel.selectRegion(region.id)
+                    activeHandle = handle(at: value.startLocation, frame: frame)
+                        ?? .move
+                    dragStartRect = region.rectNormalized.cgRect
+                }
+                guard activeRegionID == region.id,
+                      let dragStartRect,
+                      let activeHandle else { return }
+                viewModel.updateRegion(
+                    id: region.id,
+                    startingRect: dragStartRect,
+                    handle: activeHandle,
+                    translation: value.translation,
+                    displaySize: fitRect.size
+                )
+            }
+            .onEnded { _ in
+                activeRegionID = nil
+                activeHandle = nil
+                dragStartRect = nil
+            }
+    }
+
+    private func replacementDragGesture(
+        region: WatermarkRegion,
+        layer: WatermarkReplacementLayer,
+        frame: CGRect,
+        fitRect: CGRect
+    ) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if activeRegionID == nil {
+                    activeRegionID = region.id
+                    activeLayer = layer
+                    viewModel.selectRegion(region.id)
+                    activeHandle = handle(at: value.startLocation, frame: frame) ?? .move
+                    dragStartRect = replacementRect(for: region, layer: layer)
+                }
+                guard activeRegionID == region.id,
+                      activeLayer == layer,
+                      let dragStartRect,
+                      let activeHandle else { return }
+                viewModel.updateReplacementLayer(
+                    regionID: region.id,
+                    layer: layer,
+                    startingRect: dragStartRect,
+                    handle: activeHandle,
+                    translation: value.translation,
+                    displaySize: fitRect.size
+                )
+            }
+            .onEnded { _ in
+                activeRegionID = nil
+                activeLayer = nil
+                activeHandle = nil
+                dragStartRect = nil
+            }
+    }
+
+    private func displayFrame(for rect: VideoCropRect, fitRect: CGRect) -> CGRect {
+        let normalized = VideoCropGeometry.clampNormalizedRect(rect.cgRect)
+        return CGRect(
+            x: fitRect.minX + fitRect.width * normalized.minX,
+            y: fitRect.minY + fitRect.height * normalized.minY,
+            width: fitRect.width * normalized.width,
+            height: fitRect.height * normalized.height
+        )
+    }
+
+    private func replacementRect(for region: WatermarkRegion, layer: WatermarkReplacementLayer) -> CGRect? {
+        switch layer {
+        case .image: return region.imageReplacement?.rectNormalized.cgRect
+        case .text: return region.textReplacement?.rectNormalized.cgRect
+        }
+    }
+
+    private func previewFontName(for font: WatermarkTextFont) -> String {
+        switch font {
+        case .hiraginoSansGB: return "Hiragino Sans GB"
+        case .helvetica: return "Helvetica"
+        case .newYork: return "New York"
+        }
+    }
+
+    private func handle(at location: CGPoint, frame: CGRect) -> VideoCropHandle? {
+        let radius: CGFloat = 24
+        let points: [(VideoCropHandle, CGPoint)] = [
+            (.topLeft, CGPoint(x: frame.minX, y: frame.minY)),
+            (.top, CGPoint(x: frame.midX, y: frame.minY)),
+            (.topRight, CGPoint(x: frame.maxX, y: frame.minY)),
+            (.left, CGPoint(x: frame.minX, y: frame.midY)),
+            (.right, CGPoint(x: frame.maxX, y: frame.midY)),
+            (.bottomLeft, CGPoint(x: frame.minX, y: frame.maxY)),
+            (.bottom, CGPoint(x: frame.midX, y: frame.maxY)),
+            (.bottomRight, CGPoint(x: frame.maxX, y: frame.maxY))
+        ]
+        return points.first { point in
+            hypot(location.x - point.1.x, location.y - point.1.y) <= radius
+        }?.0
+    }
+
+    private func watermarkHandlePoints(_ frame: CGRect) -> [(VideoCropHandle, CGPoint)] {
+        [
+            (.topLeft, CGPoint(x: frame.minX, y: frame.minY)),
+            (.top, CGPoint(x: frame.midX, y: frame.minY)),
+            (.topRight, CGPoint(x: frame.maxX, y: frame.minY)),
+            (.left, CGPoint(x: frame.minX, y: frame.midY)),
+            (.right, CGPoint(x: frame.maxX, y: frame.midY)),
+            (.bottomLeft, CGPoint(x: frame.minX, y: frame.maxY)),
+            (.bottom, CGPoint(x: frame.midX, y: frame.maxY)),
+            (.bottomRight, CGPoint(x: frame.maxX, y: frame.maxY))
+        ]
+    }
+
+    private func regionIndex(_ id: UUID) -> Int {
+        (viewModel.regions.firstIndex { $0.id == id } ?? 0) + 1
+    }
+}
+
 private struct SubDubTimelineRuler: View {
     let duration: Double
 
@@ -1835,6 +3307,23 @@ private func iconButton(
     Button(action: action) {
         Image(systemName: systemName)
             .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .help(help)
+    .disabled(isDisabled)
+    .opacity(isDisabled ? 0.38 : 1)
+}
+
+private func compactIconButton(
+    systemName: String,
+    help: String,
+    action: @escaping () -> Void,
+    isDisabled: Bool = false
+) -> some View {
+    Button(action: action) {
+        Image(systemName: systemName)
+            .frame(width: 26, height: 26)
             .contentShape(Rectangle())
     }
     .buttonStyle(.plain)

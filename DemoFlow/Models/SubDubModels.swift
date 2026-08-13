@@ -5,6 +5,7 @@ import Foundation
 
 enum SubDubTab: String, CaseIterable, Identifiable {
     case videoDubbing
+    case videoConversion
     case subtitleBurning
     case audioReplacement
 
@@ -13,6 +14,7 @@ enum SubDubTab: String, CaseIterable, Identifiable {
     var titleKey: String {
         switch self {
         case .videoDubbing: return "subdub.tab.video_dubbing"
+        case .videoConversion: return "subdub.tab.video_conversion"
         case .subtitleBurning: return "subdub.tab.subtitle_burning"
         case .audioReplacement: return "subdub.tab.audio_replacement"
         }
@@ -21,10 +23,302 @@ enum SubDubTab: String, CaseIterable, Identifiable {
     var iconName: String {
         switch self {
         case .videoDubbing: return "mic.and.signal.meter"
+        case .videoConversion: return "arrow.triangle.2.circlepath"
         case .subtitleBurning: return "captions.bubble"
         case .audioReplacement: return "waveform.badge.plus"
         }
     }
+}
+
+enum VideoConversionMode: String, CaseIterable, Identifiable {
+    case formatConversion
+    case watermarkRemoval
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .formatConversion: return "subdub.video_conversion.mode.format"
+        case .watermarkRemoval: return "subdub.video_conversion.mode.watermark"
+        }
+    }
+}
+
+enum WatermarkTextFont: String, Codable, CaseIterable, Identifiable, Equatable {
+    case hiraginoSansGB
+    case helvetica
+    case newYork
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .hiraginoSansGB: return "subdub.watermark.text.font.hiragino"
+        case .helvetica: return "subdub.watermark.text.font.helvetica"
+        case .newYork: return "subdub.watermark.text.font.new_york"
+        }
+    }
+
+    var fileURL: URL {
+        switch self {
+        case .hiraginoSansGB:
+            return URL(fileURLWithPath: "/System/Library/Fonts/Hiragino Sans GB.ttc")
+        case .helvetica:
+            return URL(fileURLWithPath: "/System/Library/Fonts/Helvetica.ttc")
+        case .newYork:
+            return URL(fileURLWithPath: "/System/Library/Fonts/NewYork.ttf")
+        }
+    }
+}
+
+struct WatermarkImageReplacement: Equatable {
+    var assetURL: URL
+    var aspectRatio: CGFloat
+    var rectNormalized: VideoCropRect
+
+    init(assetURL: URL, aspectRatio: CGFloat, rectNormalized: VideoCropRect) {
+        self.assetURL = assetURL
+        self.aspectRatio = max(aspectRatio, 0.0001)
+        self.rectNormalized = rectNormalized
+    }
+}
+
+struct WatermarkTextReplacement: Equatable {
+    var text: String
+    var rectNormalized: VideoCropRect
+    var font: WatermarkTextFont
+    var color: SubtitleThemeColor
+    var outlineEnabled: Bool
+    var outlineScale: Double
+    var shadowEnabled: Bool
+    var shadowOffsetScale: Double
+
+    init(
+        text: String = "",
+        rectNormalized: VideoCropRect,
+        font: WatermarkTextFont = .hiraginoSansGB,
+        color: SubtitleThemeColor = .white,
+        outlineEnabled: Bool = true,
+        outlineScale: Double = 0.002,
+        shadowEnabled: Bool = true,
+        shadowOffsetScale: Double = 0.004
+    ) {
+        self.text = text
+        self.rectNormalized = rectNormalized
+        self.font = font
+        self.color = color
+        self.outlineEnabled = outlineEnabled
+        self.outlineScale = max(0, outlineScale)
+        self.shadowEnabled = shadowEnabled
+        self.shadowOffsetScale = max(0, shadowOffsetScale)
+    }
+
+    var isEnabled: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+struct WatermarkLibraryImage: Identifiable, Codable, Equatable {
+    let id: UUID
+    var displayName: String
+    var fileName: String
+    var aspectRatio: Double
+    var createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        displayName: String,
+        fileName: String,
+        aspectRatio: Double,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.fileName = fileName
+        self.aspectRatio = max(aspectRatio, 0.0001)
+        self.createdAt = createdAt
+    }
+}
+
+struct WatermarkLibraryTextStyle: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    var text: String
+    var font: WatermarkTextFont
+    var color: SubtitleThemeColor
+    var outlineEnabled: Bool
+    var outlineScale: Double
+    var shadowEnabled: Bool
+    var shadowOffsetScale: Double
+    var createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        text: String,
+        font: WatermarkTextFont = .hiraginoSansGB,
+        color: SubtitleThemeColor = .white,
+        outlineEnabled: Bool = true,
+        outlineScale: Double = 0.002,
+        shadowEnabled: Bool = true,
+        shadowOffsetScale: Double = 0.004,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.text = text
+        self.font = font
+        self.color = color
+        self.outlineEnabled = outlineEnabled
+        self.outlineScale = max(0, outlineScale)
+        self.shadowEnabled = shadowEnabled
+        self.shadowOffsetScale = max(0, shadowOffsetScale)
+        self.createdAt = createdAt
+    }
+
+    var isEnabled: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+enum WatermarkReplacementLayer: Hashable {
+    case image
+    case text
+}
+
+struct WatermarkRegion: Identifiable, Equatable {
+    let id: UUID
+    var rectNormalized: VideoCropRect
+    var imageReplacement: WatermarkImageReplacement?
+    var textReplacement: WatermarkTextReplacement?
+    var imageLibraryID: UUID?
+    var textStyleID: UUID?
+
+    init(
+        id: UUID = UUID(),
+        rectNormalized: VideoCropRect,
+        imageReplacement: WatermarkImageReplacement? = nil,
+        textReplacement: WatermarkTextReplacement? = nil,
+        imageLibraryID: UUID? = nil,
+        textStyleID: UUID? = nil
+    ) {
+        self.id = id
+        self.rectNormalized = rectNormalized
+        self.imageReplacement = imageReplacement
+        self.textReplacement = textReplacement
+        self.imageLibraryID = imageLibraryID
+        self.textStyleID = textStyleID
+    }
+
+    var hasReplacementLayer: Bool {
+        imageReplacement != nil || textReplacement?.isEnabled == true
+    }
+}
+
+enum WatermarkRemovalState: Equatable {
+    case idle
+    case ready
+    case previewing
+    case processing
+    case succeeded
+    case failed
+
+    var isBusy: Bool {
+        switch self {
+        case .previewing, .processing: return true
+        default: return false
+        }
+    }
+}
+
+enum WatermarkRepairPreset: String, CaseIterable, Identifiable {
+    case precise
+    case balanced
+    case stronger
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .precise: return "subdub.watermark.repair.precise"
+        case .balanced: return "subdub.watermark.repair.balanced"
+        case .stronger: return "subdub.watermark.repair.stronger"
+        }
+    }
+
+    var paddingScale: CGFloat {
+        switch self {
+        case .precise: return 0
+        case .balanced: return 0.008
+        case .stronger: return 0.016
+        }
+    }
+
+}
+
+enum VideoConversionFormat: String, CaseIterable, Identifiable {
+    case mp4
+    case mov
+    case webm
+
+    var id: String { rawValue }
+    var fileExtension: String { rawValue }
+    var titleKey: String {
+        switch self {
+        case .mp4: return "subdub.video_conversion.format.mp4"
+        case .mov: return "subdub.video_conversion.format.mov"
+        case .webm: return "subdub.video_conversion.format.webm"
+        }
+    }
+}
+
+enum VideoConversionQualityPreset: String, CaseIterable, Identifiable {
+    case small
+    case balanced
+    case highQuality
+
+    var id: String { rawValue }
+    var videoBitrateMbps: Int {
+        switch self {
+        case .small: return 4
+        case .balanced: return 8
+        case .highQuality: return 16
+        }
+    }
+
+    var audioBitrateKbps: Int {
+        switch self {
+        case .small: return 128
+        case .balanced: return 192
+        case .highQuality: return 256
+        }
+    }
+
+    var titleKey: String {
+        switch self {
+        case .small: return "subdub.video_conversion.quality.small"
+        case .balanced: return "subdub.video_conversion.quality.balanced"
+        case .highQuality: return "subdub.video_conversion.quality.high_quality"
+        }
+    }
+
+    var detailKey: String {
+        switch self {
+        case .small: return "subdub.video_conversion.quality.small_detail"
+        case .balanced: return "subdub.video_conversion.quality.balanced_detail"
+        case .highQuality: return "subdub.video_conversion.quality.high_quality_detail"
+        }
+    }
+}
+
+enum VideoConversionState: Equatable {
+    case idle
+    case ready
+    case converting
+    case succeeded
+    case failed
+
+    var isBusy: Bool { self == .converting }
 }
 
 enum SubDubSessionState: Equatable {
@@ -180,21 +474,68 @@ enum SubtitleStylePreset: String, Codable, CaseIterable, Identifiable, Equatable
     }
 }
 
+struct SubtitleThemeColor: Codable, Equatable, Hashable {
+    var red: Double
+    var green: Double
+    var blue: Double
+    var opacity: Double
+
+    nonisolated static let white = SubtitleThemeColor(red: 1, green: 1, blue: 1, opacity: 1)
+
+    init(red: Double, green: Double, blue: Double, opacity: Double = 1) {
+        self.red = Self.clamp(red)
+        self.green = Self.clamp(green)
+        self.blue = Self.clamp(blue)
+        self.opacity = Self.clamp(opacity)
+    }
+
+    var assColour: String {
+        let alpha = Int(((1 - opacity) * 255).rounded())
+        let red = Int((red * 255).rounded())
+        let green = Int((green * 255).rounded())
+        let blue = Int((blue * 255).rounded())
+        return String(format: "&H%02X%02X%02X%02X", alpha, blue, green, red)
+    }
+
+    private static func clamp(_ value: Double) -> Double {
+        min(max(value, 0), 1)
+    }
+}
+
+enum SubtitlePreviewPosition: String, Codable, CaseIterable, Identifiable, Equatable, Hashable {
+    case `default`
+    case hidden
+    case center
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .default: return "subdub.subtitle_preview.default"
+        case .hidden:  return "subdub.subtitle_preview.hidden"
+        case .center:  return "subdub.subtitle_preview.center"
+        }
+    }
+}
+
 struct SubtitleTimelineDocument: Codable, Equatable {
     let schemaVersion: Int
     let sourceDuration: Double
     var style: SubtitleStylePreset
+    var themeColor: SubtitleThemeColor
     var cues: [SubtitleTimelineCue]
 
     init(
-        schemaVersion: Int = 2,
+        schemaVersion: Int = 3,
         sourceDuration: Double,
         style: SubtitleStylePreset = .standard,
+        themeColor: SubtitleThemeColor = .white,
         cues: [SubtitleTimelineCue] = []
     ) {
         self.schemaVersion = schemaVersion
         self.sourceDuration = sourceDuration
         self.style = style
+        self.themeColor = themeColor
         self.cues = cues
     }
 
@@ -202,6 +543,7 @@ struct SubtitleTimelineDocument: Codable, Equatable {
         case schemaVersion
         case sourceDuration
         case style
+        case themeColor
         case cues
     }
 
@@ -210,6 +552,7 @@ struct SubtitleTimelineDocument: Codable, Equatable {
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
         sourceDuration = try container.decode(Double.self, forKey: .sourceDuration)
         style = try container.decodeIfPresent(SubtitleStylePreset.self, forKey: .style) ?? .standard
+        themeColor = try container.decodeIfPresent(SubtitleThemeColor.self, forKey: .themeColor) ?? .white
         cues = try container.decode([SubtitleTimelineCue].self, forKey: .cues)
     }
 }

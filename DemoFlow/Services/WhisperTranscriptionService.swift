@@ -106,7 +106,11 @@ nonisolated final class WhisperRunner {
             "-l", "auto",
             // CPU mode is more reliable for a sandboxed helper across Macs;
             // Metal allocation can fail even when the app itself has a GPU.
-            "-ng"
+            "-ng",
+            // Cap each whisper segment at ~60 characters so long passages get
+            // split into more natural-sized chunks before punctuation-aware
+            // post-processing below.
+            "-ml", "60"
         ]
 
         let stderr = Pipe()
@@ -166,7 +170,8 @@ struct WhisperTranscriptionService {
             outputBaseURL: outputBase
         )
         let result = try WhisperJSONParser.parse(data)
-        return ChineseSimplifiedNormalizer.normalize(result)
+        let normalized = ChineseSimplifiedNormalizer.normalize(result)
+        return SubtitlePostProcessor.splitByPunctuation(normalized)
     }
 }
 
@@ -245,5 +250,134 @@ private enum ChineseSimplifiedNormalizer {
             ) ?? cue.text
             return normalized
         }
+    }
+}
+
+@MainActor
+enum SubtitlePostProcessor {
+    private static let strongPunctuation: Set<Character> = [
+        ".", "?", "!", "。", "？", "！"
+    ]
+    private static let weakPunctuation: Set<Character> = [
+        ",", ";", ":", "，", "；", "："
+    ]
+    private static let maxCharactersPerCue = 50
+    private static let minCharactersForStrongCut = 8
+    private static let minCharactersForWeakCut = 20
+    private static let minPieceDuration: Double = 1.0
+
+    /// Splits each cue into multiple shorter cues at natural punctuation
+    /// boundaries so subtitles read like sentences instead of long
+    /// whisper.cpp default segments. Time is allocated proportionally to the
+    /// character count within the original cue.
+    static func splitByPunctuation(_ cues: [SubtitleTimelineCue]) -> [SubtitleTimelineCue] {
+        cues.flatMap { split(cue: $0) }
+    }
+
+    private static func split(cue: SubtitleTimelineCue) -> [SubtitleTimelineCue] {
+        let trimmed = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count > maxCharactersPerCue else {
+            return trimmed.isEmpty ? [] : [cue]
+        }
+
+        let chars = Array(trimmed)
+        let totalChars = chars.count
+        let totalDuration = cue.endTime - cue.startTime
+        guard totalChars > 0, totalDuration > 0 else {
+            return [cue]
+        }
+        let charDuration = totalDuration / Double(totalChars)
+
+        var pieces: [(text: String, charStart: Int)] = []
+        var currentChars: [Character] = []
+        var currentStart = 0
+
+        for i in 0..<totalChars {
+            let c = chars[i]
+            currentChars.append(c)
+            let isLast = i == totalChars - 1
+            let isStrong = strongPunctuation.contains(c)
+            let isWeak = weakPunctuation.contains(c)
+            let exceedsMax = currentChars.count >= maxCharactersPerCue
+
+            let shouldCut = isLast
+                || (isStrong && currentChars.count >= minCharactersForStrongCut)
+                || (isWeak && currentChars.count >= minCharactersForWeakCut)
+                || exceedsMax
+
+            if shouldCut {
+                let pieceText = String(currentChars)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !pieceText.isEmpty {
+                    pieces.append((pieceText, currentStart))
+                }
+                currentStart = i + 1
+                currentChars = []
+            }
+        }
+
+        let mergedPieces = mergeShortPieces(
+            pieces: pieces,
+            charDuration: charDuration,
+            cueStartTime: cue.startTime,
+            cueEndTime: cue.endTime,
+            minPieceDuration: minPieceDuration
+        )
+
+        return mergedPieces.map { piece in
+            let startOffset = Double(piece.charStart) * charDuration
+            let endOffset = Double(piece.charStart + piece.text.count) * charDuration
+            return SubtitleTimelineCue(
+                startTime: cue.startTime + startOffset,
+                endTime: min(cue.startTime + endOffset, cue.endTime),
+                text: piece.text
+            )
+        }
+    }
+
+    /// Merges any piece whose duration is shorter than `minPieceDuration`
+    /// into its predecessor so every emitted cue lasts at least the
+    /// minimum. Whitespace between merged pieces is preserved.
+    private static func mergeShortPieces(
+        pieces: [(text: String, charStart: Int)],
+        charDuration: Double,
+        cueStartTime: Double,
+        cueEndTime: Double,
+        minPieceDuration: Double
+    ) -> [(text: String, charStart: Int)] {
+        guard !pieces.isEmpty else { return pieces }
+        var merged: [(text: String, charStart: Int)] = []
+        for piece in pieces {
+            if let last = merged.indices.last,
+               let lastPiece = merged.indices.last.map({ merged[$0] }),
+               pieceDuration(charStart: lastPiece.charStart,
+                             textLength: lastPiece.text.count,
+                             charDuration: charDuration) < minPieceDuration {
+                merged[last] = (
+                    text: lastPiece.text + " " + piece.text,
+                    charStart: lastPiece.charStart
+                )
+            } else if pieceDuration(charStart: piece.charStart,
+                                    textLength: piece.text.count,
+                                    charDuration: charDuration) < minPieceDuration,
+                      !merged.isEmpty {
+                let lastIdx = merged.count - 1
+                merged[lastIdx] = (
+                    text: merged[lastIdx].text + " " + piece.text,
+                    charStart: merged[lastIdx].charStart
+                )
+            } else {
+                merged.append(piece)
+            }
+        }
+        return merged
+    }
+
+    private static func pieceDuration(
+        charStart: Int,
+        textLength: Int,
+        charDuration: Double
+    ) -> Double {
+        Double(textLength) * charDuration
     }
 }

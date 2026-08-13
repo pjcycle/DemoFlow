@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency AVAudioRecorderDelegate {
     @Published private(set) var sourceURL: URL?
+    @Published private(set) var sourceVideoSize: CGSize = .zero
     @Published private(set) var sourceDuration: Double = 0
     @Published private(set) var playbackPosition: Double = 0
     @Published private(set) var audioURL: URL?
@@ -37,6 +38,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var meteringTimer: Timer?
+    private var sourceAudioTask: Task<Void, Never>?
     private weak var subscriptionViewModel: SubscriptionViewModel?
     private var onRequireSubscription: (() -> Void)?
     private let waveformSampleCount = 512
@@ -73,6 +75,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     }
 
     deinit {
+        sourceAudioTask?.cancel()
         meteringTimer?.invalidate()
         if let timeObserverToken { player.removeTimeObserver(timeObserverToken) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
@@ -111,6 +114,8 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     }
 
     func importVideo(from url: URL) {
+        sourceAudioTask?.cancel()
+        sourceAudioTask = nil
         Task { await loadVideo(from: url) }
     }
 
@@ -132,6 +137,8 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             return
         }
 
+        sourceAudioTask?.cancel()
+        sourceAudioTask = nil
         recorder?.stop()
         recorder = nil
         pendingTakeValidation = false
@@ -175,6 +182,8 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     }
 
     private func clearVideoState(deleteSession: Bool) {
+        sourceAudioTask?.cancel()
+        sourceAudioTask = nil
         recorder?.stop()
         recorder = nil
         pendingTakeValidation = false
@@ -192,6 +201,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         }
         sessionDirectory = nil
         sourceURL = nil
+        sourceVideoSize = .zero
         sourceAudioURL = nil
         sourceDuration = 0
         playbackPosition = 0
@@ -245,10 +255,39 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     }
 
     func prepareDubbing() {
-        guard sourceURL != nil else {
+        guard let sourceURL else {
             statusMessage = L10n.tr("subdub.error.input_missing")
             return
         }
+        if sourceAudioURL == nil, let sessionDirectory {
+            sourceAudioTask?.cancel()
+            state = .preparing
+            statusMessage = L10n.tr("subdub.subtitle_burn.status.extracting_audio")
+            sourceAudioTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let sourceAudioCandidate = sessionDirectory.appendingPathComponent("SourceAudio.m4a")
+                    guard try await exportService.extractAudioTrack(
+                        from: sourceURL,
+                        outputURL: sourceAudioCandidate
+                    ) else {
+                        throw SubDubError.audioValidationFailed
+                    }
+                    guard !Task.isCancelled, self.sourceURL == sourceURL else { return }
+                    sourceAudioURL = sourceAudioCandidate
+                    finishPreparingDubbing()
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    state = .failed
+                    statusMessage = L10n.f("subdub.status.import_failed", error.localizedDescription)
+                }
+            }
+            return
+        }
+        finishPreparingDubbing()
+    }
+
+    private func finishPreparingDubbing() {
         recorder?.stop()
         recorder = nil
         pendingTakeValidation = false
@@ -338,6 +377,54 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             statusMessage = sourceURL == nil
             ? L10n.tr("subdub.video.status.idle")
             : L10n.tr("subdub.video.status.ready")
+    }
+
+    func togglePlayback() {
+        guard isPlayerReady,
+              state != .recording,
+              state != .paused,
+              state != .preparing else { return }
+        if hasAudio {
+            toggleRecordedPreview()
+            return
+        }
+        if player.timeControlStatus == .playing {
+            player.pause()
+            isPreviewPlaying = false
+            return
+        }
+        if playbackPosition >= max(sourceDuration - 0.1, 0) {
+            player.seek(to: .zero)
+            playbackPosition = 0
+        }
+        player.isMuted = false
+        player.play()
+        isPreviewPlaying = true
+    }
+
+    func stopPlaybackForSourceReplacement() {
+        recorder?.stop()
+        recorder = nil
+        pendingTakeValidation = false
+        activeRecordingRange = nil
+        stopMetering()
+        player.pause()
+        player.isMuted = false
+        isPreviewPlaying = false
+    }
+
+    func seek(to seconds: Double) {
+        guard isPlayerReady,
+              sourceDuration > 0,
+              state != .recording,
+              state != .paused else { return }
+        let target = min(max(seconds, 0), sourceDuration)
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        playbackPosition = target
     }
 
     func toggleRecordedPreview() {
@@ -438,6 +525,11 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             sessionDirectory = session
             // Direct imports still own their temporary directory. Shared imports are adopted above.
             sourceURL = persistedURL
+            if let track = try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .video) {
+                sourceVideoSize = (try? await AVAssetAsyncLoaders.orientedSize(of: track)) ?? .zero
+            } else {
+                sourceVideoSize = .zero
+            }
             sourceDuration = duration.seconds
             playbackPosition = 0
             sourceAudioURL = nil

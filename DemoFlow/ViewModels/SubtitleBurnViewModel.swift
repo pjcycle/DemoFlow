@@ -12,12 +12,15 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
     @Published private(set) var sourceWaveformSamples: [Double] = []
     @Published var cues: [SubtitleTimelineCue] = []
     @Published var subtitleStyle: SubtitleStylePreset = .standard
+    @Published var subtitleThemeColor: SubtitleThemeColor = .white
+    @Published var previewPosition: SubtitlePreviewPosition = .default
     @Published var selectedCueID: UUID?
     @Published private(set) var state: SubtitleBurnState = .idle
     @Published private(set) var statusMessage: String = L10n.tr("subdub.subtitle_burn.status.idle")
     @Published private(set) var isPlayerReady = false
 
     let player = AVPlayer()
+    var onVideoImportResult: ((URL, Result<Void, Error>) -> Void)?
 
     private let timelineSession: SubDubTimelineSession
     private let workspace = SubDubWorkspaceService()
@@ -29,6 +32,8 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
     private var timeObserverToken: Any?
     private var timelineCancellable: AnyCancellable?
     private var activeTask: Task<Void, Never>?
+    private var waveformTask: Task<Void, Never>?
+    private var retainedVideoImportAccessToken: OutputLocationAccessToken?
     private weak var subscriptionViewModel: SubscriptionViewModel?
     private var onRequireSubscription: (() -> Void)?
 
@@ -54,6 +59,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
 
     deinit {
         activeTask?.cancel()
+        waveformTask?.cancel()
         if let timeObserverToken {
             player.removeTimeObserver(timeObserverToken)
         }
@@ -139,6 +145,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
             let document = SubtitleTimelineDocument(
                 sourceDuration: sourceDuration,
                 style: subtitleStyle,
+                themeColor: subtitleThemeColor,
                 cues: cues
             )
             let encoder = JSONEncoder()
@@ -152,9 +159,19 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
     }
 
     func importVideo(from url: URL) {
+        importVideo(from: url, retainingAccessToken: nil)
+    }
+
+    func importVideo(
+        from url: URL,
+        retainingAccessToken accessToken: OutputLocationAccessToken?
+    ) {
         activeTask?.cancel()
+        waveformTask?.cancel()
+        retainedVideoImportAccessToken?.stop()
+        retainedVideoImportAccessToken = accessToken
         activeTask = Task { [weak self] in
-            await self?.loadVideo(from: url)
+            await self?.loadVideo(from: url, retainingAccessToken: accessToken)
         }
     }
 
@@ -197,6 +214,10 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
     func removeVideo() {
         activeTask?.cancel()
         activeTask = nil
+        waveformTask?.cancel()
+        waveformTask = nil
+        retainedVideoImportAccessToken?.stop()
+        retainedVideoImportAccessToken = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         if let sessionDirectory {
@@ -211,6 +232,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
         sourceWaveformSamples = []
         cues = []
         subtitleStyle = .standard
+        subtitleThemeColor = .white
         selectedCueID = nil
         isPlayerReady = false
         state = .idle
@@ -266,6 +288,11 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
         statusMessage = L10n.tr("subdub.subtitle_burn.status.cancelled")
     }
 
+    func stopPlaybackForSourceReplacement() {
+        player.pause()
+        playbackPosition = 0
+    }
+
     func importSubtitleAndReplace(from url: URL) {
         importSubtitle(from: url)
     }
@@ -304,6 +331,15 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
     func updateSubtitleStyle(_ style: SubtitleStylePreset) {
         subtitleStyle = style
         persistCuesIfPossible()
+    }
+
+    func updateSubtitleThemeColor(_ color: SubtitleThemeColor) {
+        subtitleThemeColor = color
+        persistCuesIfPossible()
+    }
+
+    func updatePreviewPosition(_ position: SubtitlePreviewPosition) {
+        previewPosition = position
     }
 
     func addCue() {
@@ -381,6 +417,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
 
         let exportCues = cues
         let exportStyle = subtitleStyle
+        let exportThemeColor = subtitleThemeColor
         let exportVideoSize = sourceVideoSize
         let exportDuration = sourceDuration
         state = .exporting
@@ -395,7 +432,8 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
                     duration: exportDuration,
                     sessionDirectory: sessionDirectory,
                     videoSize: exportVideoSize,
-                    style: exportStyle
+                    style: exportStyle,
+                    themeColor: exportThemeColor
                 )
                 state = .succeeded
                 statusMessage = L10n.f("subdub.status.exported", outputURL.lastPathComponent)
@@ -415,7 +453,18 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func loadVideo(from url: URL) async {
+    private func loadVideo(
+        from url: URL,
+        retainingAccessToken accessToken: OutputLocationAccessToken?
+    ) async {
+        defer {
+            if let accessToken {
+                accessToken.stop()
+                if retainedVideoImportAccessToken === accessToken {
+                    retainedVideoImportAccessToken = nil
+                }
+            }
+        }
         state = .preparing
         statusMessage = L10n.tr("subdub.status.importing")
         let previousSession = sessionDirectory
@@ -453,20 +502,53 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
             sourceWaveformSamples = []
             cues = []
             subtitleStyle = .standard
+            subtitleThemeColor = .white
             selectedCueID = nil
             isPlayerReady = true
             state = .ready
             statusMessage = L10n.f("subdub.status.imported", persistedURL.lastPathComponent)
+            onVideoImportResult?(url, .success(()))
             if let previousSession, previousSession != session {
                 try? FileManager.default.removeItem(at: previousSession)
             }
-            _ = try? await prepareSourceAudio(in: session)
+            waveformTask?.cancel()
+            let waveformURL = session.appendingPathComponent(
+                "SourceWaveform-\(UUID().uuidString).pcm"
+            )
+            waveformTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let samples = try await exportService.extractWaveformSamples(
+                        from: persistedURL,
+                        outputURL: waveformURL
+                    )
+                    guard !Task.isCancelled,
+                          self.sourceURL == persistedURL,
+                          self.sessionDirectory == session else { return }
+                    timelineSession.updateSourceWaveform(
+                        samples: samples,
+                        hasAudioTrack: true
+                    )
+                    sourceWaveformSamples = samples
+                } catch {
+                    guard !Task.isCancelled,
+                          self.sourceURL == persistedURL,
+                          self.sessionDirectory == session else { return }
+                    timelineSession.updateSourceWaveform(
+                        samples: [],
+                        hasAudioTrack: false
+                    )
+                    sourceWaveformSamples = []
+                }
+            }
         } catch is CancellationError {
             state = hasSource ? .ready : .idle
             statusMessage = L10n.tr("subdub.subtitle_burn.status.cancelled")
+            onVideoImportResult?(url, .failure(CancellationError()))
         } catch {
             state = .failed
             statusMessage = L10n.f("subdub.status.import_failed", error.localizedDescription)
+            onVideoImportResult?(url, .failure(error))
         }
     }
 
@@ -515,7 +597,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
             }
             let data = try Data(contentsOf: resolvedURL)
             let document = try JSONDecoder().decode(SubtitleTimelineDocument.self, from: data)
-            guard document.schemaVersion == 1 || document.schemaVersion == 2 else {
+            guard (1...3).contains(document.schemaVersion) else {
                 throw SubDubError.subtitleBurnValidationFailed(
                     L10n.tr("subdub.error.timeline_schema")
                 )
@@ -553,6 +635,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
 
             cues = importedCues
             subtitleStyle = document.style
+            subtitleThemeColor = document.themeColor
             selectedCueID = cues.first?.id
             try persistCues()
             state = .ready
@@ -606,6 +689,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
         let document = SubtitleTimelineDocument(
             sourceDuration: sourceDuration,
             style: subtitleStyle,
+            themeColor: subtitleThemeColor,
             cues: cues
         )
         try timelineSession.updateDocument(document)
@@ -639,6 +723,9 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
         }
         if subtitleStyle != document.style {
             subtitleStyle = document.style
+        }
+        if subtitleThemeColor != document.themeColor {
+            subtitleThemeColor = document.themeColor
         }
     }
 
