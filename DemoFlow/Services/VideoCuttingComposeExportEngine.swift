@@ -50,6 +50,121 @@ final class VideoCuttingComposeExportEngine {
         return try await compose(request: request, sourceAsset: asset, sourceVideoTrack: videoTrack)
     }
 
+    func exportTimeline(project: VideoTimelineFFmpegProject) async throws -> URL {
+        guard !project.clips.isEmpty else { throw ComposeError.emptyTimeline }
+
+        let composition = AVMutableComposition()
+        guard let videoCompTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ComposeError.compositionTrackFailed
+        }
+
+        let audioCompTrack = project.clips.contains(where: \.hasAudioTrack)
+            ? composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            )
+            : nil
+        let normalizedCrop = VideoCropGeometry.clampNormalizedRect(project.cropRectNormalized.cgRect)
+        let renderSize = project.renderSize ?? CGSize(width: 1920, height: 1080)
+        var instructions: [AVVideoCompositionInstruction] = []
+        let starts = project.clips.indices.map { index in
+            max(0, project.clipStartSeconds.indices.contains(index) ? project.clipStartSeconds[index] : 0)
+        }
+        let ordered = project.clips.indices.sorted { starts[$0] < starts[$1] }
+
+        for index in ordered {
+            let clip = project.clips[index]
+            let asset = AVAssetAsyncLoaders.makeURLAsset(clip.sourceURL)
+            guard let sourceVideoTrack = try await AVAssetAsyncLoaders.firstTrack(
+                in: asset,
+                mediaType: .video
+            ) else {
+                throw ComposeError.sourceVideoUnavailable(clip.displayName)
+            }
+
+            let sourceRange = CMTimeRange(
+                start: CMTime(seconds: clip.sourceStartSeconds, preferredTimescale: 600),
+                duration: CMTime(seconds: clip.durationSeconds, preferredTimescale: 600)
+            )
+            let timeline = CMTime(seconds: starts[index], preferredTimescale: 600)
+            try videoCompTrack.insertTimeRange(sourceRange, of: sourceVideoTrack, at: timeline)
+
+            if clip.hasAudioTrack,
+               let sourceAudioTrack = try await AVAssetAsyncLoaders.firstTrack(
+                   in: asset,
+                   mediaType: .audio
+               ) {
+                try audioCompTrack?.insertTimeRange(sourceRange, of: sourceAudioTrack, at: timeline)
+            }
+
+            let orientedSize = try await AVAssetAsyncLoaders.orientedSize(of: sourceVideoTrack)
+            let cropPixels = cropRectPixels(normalized: normalizedCrop, orientedSize: orientedSize)
+            let preferredTransform = try await AVAssetAsyncLoaders.preferredTransform(of: sourceVideoTrack)
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoCompTrack)
+            layerInstruction.setTransform(
+                cropTransform(
+                    sourcePreferredTransform: preferredTransform,
+                    cropPixels: cropPixels,
+                    renderSize: renderSize
+                ),
+                at: timeline
+            )
+
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: timeline, duration: sourceRange.duration)
+            instruction.layerInstructions = [layerInstruction]
+            instructions.append(instruction)
+        }
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.renderSize = renderSize
+        videoComposition.instructions = instructions
+
+        let audioMix: AVAudioMix?
+        if let audioCompTrack, project.audioProcessingConfig.hasAnyProcessing {
+            do {
+                audioMix = try audioProcessingEngine.makeAudioMixIfNeeded(
+                    track: audioCompTrack,
+                    config: project.audioProcessingConfig
+                )
+            } catch {
+                throw ComposeError.audioProcessingFailed(error.localizedDescription)
+            }
+        } else {
+            audioMix = nil
+        }
+
+        try removeFileIfExists(at: project.outputURL)
+        guard let exporter = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            throw ComposeError.exportSessionFailed
+        }
+        exporter.outputURL = project.outputURL
+        exporter.outputFileType = .mp4
+        exporter.videoComposition = videoComposition
+        exporter.audioMix = audioMix
+        exporter.shouldOptimizeForNetworkUse = true
+
+        do {
+            try await AVAssetAsyncLoaders.export(
+                exporter,
+                outputURL: project.outputURL,
+                outputFileType: .mp4
+            )
+        } catch is CancellationError {
+            throw ComposeError.exportCancelled
+        } catch {
+            throw ComposeError.exportFailed
+        }
+        return project.outputURL
+    }
+
     private func compose(
         request: ComposeRequest,
         sourceAsset: AVAsset,
@@ -219,9 +334,11 @@ extension VideoCuttingComposeExportEngine {
     enum ComposeError: LocalizedError {
         case missingVideoTrack
         case emptyKeepRanges
+        case emptyTimeline
         case invalidCropRect
         case invalidRenderSize
         case compositionTrackFailed
+        case sourceVideoUnavailable(String)
         case exportSessionFailed
         case audioProcessingFailed(String)
         case exportFailed
@@ -233,12 +350,16 @@ extension VideoCuttingComposeExportEngine {
                 return L10n.tr("legacy.key_175")
             case .emptyKeepRanges:
                 return L10n.tr("legacy.key_172")
+            case .emptyTimeline:
+                return L10n.tr("video.cut.timeline.empty")
             case .invalidCropRect:
                 return L10n.tr("legacy.key_195")
             case .invalidRenderSize:
                 return L10n.tr("legacy.key_196")
             case .compositionTrackFailed:
                 return L10n.tr("legacy.key_22")
+            case let .sourceVideoUnavailable(name):
+                return L10n.f("video.cut.timeline.source_unavailable", name)
             case .exportSessionFailed:
                 return L10n.tr("legacy.key_23")
             case let .audioProcessingFailed(message):

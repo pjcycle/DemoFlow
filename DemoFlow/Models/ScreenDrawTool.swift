@@ -12,7 +12,7 @@ enum ScreenDrawTool: String, CaseIterable, Identifiable {
     case arrow
     case rectangle
     case ellipse
-    case cross
+    case text
     case check
 
     var id: String { rawValue }
@@ -27,8 +27,8 @@ enum ScreenDrawTool: String, CaseIterable, Identifiable {
             return L10n.tr("legacy.key_152")
         case .ellipse:
             return L10n.tr("legacy.key_41")
-        case .cross:
-            return L10n.tr("legacy.key_216")
+        case .text:
+            return L10n.tr("draw.text.tool.title")
         case .check:
             return L10n.tr("legacy.key_47")
         }
@@ -44,8 +44,8 @@ enum ScreenDrawTool: String, CaseIterable, Identifiable {
             return "rectangle"
         case .ellipse:
             return "circle"
-        case .cross:
-            return "xmark"
+        case .text:
+            return "ellipsis.bubble"
         case .check:
             return "checkmark"
         }

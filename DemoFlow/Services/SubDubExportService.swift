@@ -49,11 +49,6 @@ struct SubDubExportService {
     }
 
     func extractAudioForTranscription(from videoURL: URL, outputURL: URL) async throws {
-        let asset = AVAssetAsyncLoaders.makeURLAsset(videoURL)
-        guard try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .audio) != nil else {
-            throw SubDubError.audioValidationFailed
-        }
-
         let tools = try binaryService.ensureReady()
         try prepareOutput(outputURL)
         let command = FFmpegCommand(
@@ -66,13 +61,15 @@ struct SubDubExportService {
                 "-ac", "1", "-ar", "16000",
                 "-af", "aresample=async=1:first_pts=0",
                 "-avoid_negative_ts", "make_zero",
-                "-c:a", "pcm_s16le", outputURL.path
+                "-c:a", "pcm_s16le",
+                "-f", "wav",
+                outputURL.path
             ],
             expectedDurationSeconds: nil
         )
         do {
             _ = try await runner.run(command: command)
-            try await validateAudio(outputURL)
+            try await validateTranscriptionAudio(outputURL)
         } catch {
             try? fileManager.removeItem(at: outputURL)
             throw SubDubError.serviceFailed(error.localizedDescription)
@@ -367,6 +364,27 @@ struct SubDubExportService {
 
     func validateAudio(_ url: URL) async throws {
         try await validateMedia(url, requireVideo: false)
+    }
+
+    func validateTranscriptionAudio(_ url: URL) throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path),
+              let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let fileSize = attributes[.size] as? NSNumber,
+              fileSize.int64Value > 44 else {
+            throw SubDubError.audioValidationFailed
+        }
+
+        // Whisper receives a local PCM WAV produced by FFmpeg. Do not ask
+        // AVFoundation to rediscover the source video's audio track here;
+        // some downloaded MP4 containers expose that track inconsistently.
+        let audioFile = try AVAudioFile(forReading: url)
+        let format = audioFile.processingFormat
+        guard audioFile.length > 0,
+              format.sampleRate > 0,
+              format.channelCount > 0 else {
+            throw SubDubError.audioValidationFailed
+        }
     }
 
     func validateVideo(_ url: URL) async throws -> Double {

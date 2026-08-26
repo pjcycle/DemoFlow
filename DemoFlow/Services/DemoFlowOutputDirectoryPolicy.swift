@@ -45,6 +45,67 @@ final class OutputLocationAccessToken {
     }
 }
 
+/// 用户可见导出的统一命名规则：`<功能代号><yyyyMMddHHmmss>.<扩展名>`。
+enum DemoFlowExportFileNamer {
+    nonisolated static func fileName(
+        prefix: String,
+        fileExtension: String,
+        date: Date = Date()
+    ) -> String {
+        "\(fileStem(prefix: prefix, date: date)).\(normalizedExtension(fileExtension))"
+    }
+
+    nonisolated static func fileStem(prefix: String, date: Date = Date()) -> String {
+        "\(prefix.lowercased())\(timestamp(from: date))"
+    }
+
+    nonisolated static func availableOutputURL(
+        in directory: URL,
+        prefix: String,
+        fileExtension: String,
+        reservedExtensions: [String] = [],
+        date: Date = Date(),
+        fileManager: FileManager = .default
+    ) -> URL {
+        let baseStem = fileStem(prefix: prefix, date: date)
+        let extensions = Set(([fileExtension] + reservedExtensions).map(normalizedExtension))
+
+        for duplicateIndex in 0..<1_000 {
+            let suffix = duplicateIndex == 0 ? "" : String(format: "-%02d", duplicateIndex)
+            let stem = "\(baseStem)\(suffix)"
+            let isAvailable = extensions.allSatisfy { fileExtension in
+                !fileManager.fileExists(
+                    atPath: directory
+                        .appendingPathComponent(stem)
+                        .appendingPathExtension(fileExtension)
+                        .path
+                )
+            }
+            if isAvailable {
+                return directory
+                    .appendingPathComponent(stem)
+                    .appendingPathExtension(normalizedExtension(fileExtension))
+            }
+        }
+
+        return directory
+            .appendingPathComponent("\(baseStem)-999")
+            .appendingPathExtension(normalizedExtension(fileExtension))
+    }
+
+    nonisolated private static func normalizedExtension(_ value: String) -> String {
+        value.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
+    }
+
+    nonisolated private static func timestamp(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMddHHmmss"
+        return formatter.string(from: date)
+    }
+}
+
 struct DemoFlowOutputDirectoryPolicy {
     private static let workspaceRootFolderName = "DemoFlow"
     private static let recordingsFolderName = "Recoding"

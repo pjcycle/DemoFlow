@@ -8,11 +8,10 @@
 import CoreGraphics
 import Foundation
 
-final class AudioWaveformService {
-    nonisolated private let ffmpegBinaryService = FFmpegBinaryService()
-    nonisolated private let fileManager = FileManager.default
+final class AudioWaveformService: @unchecked Sendable {
+    private let ffmpegBinaryService = FFmpegBinaryService()
 
-    nonisolated func loadWaveformSamples(from url: URL, sampleCount: Int = 180) async throws -> [CGFloat] {
+    func loadWaveformSamples(from url: URL, sampleCount: Int = 180) async throws -> [CGFloat] {
         let targetCount = max(sampleCount, 60)
         let task = Task.detached(priority: .userInitiated) { [self] in
             let tools = try await MainActor.run { try self.ffmpegBinaryService.ensureReady() }
@@ -27,7 +26,7 @@ final class AudioWaveformService {
 
             let pcmURL = try self.makeTemporaryPCMURL()
             defer {
-                try? self.fileManager.removeItem(at: pcmURL)
+                try? FileManager.default.removeItem(at: pcmURL)
             }
 
             let process = Process()
@@ -93,9 +92,10 @@ final class AudioWaveformService {
     }
 
     nonisolated private func makeTemporaryPCMURL() throws -> URL {
-        let directory = fileManager.temporaryDirectory
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory
             .appendingPathComponent("demoflow-audio-waveforms", isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("f32")
     }
 

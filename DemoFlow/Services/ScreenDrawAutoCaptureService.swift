@@ -63,7 +63,11 @@ struct ScreenDrawAutoCaptureService {
         guard let directory = DemoFlowOutputDirectoryPolicy.screenDrawAutoCaptureBookmarkedDirectory() else {
             throw ScreenDrawAutoCaptureError.outputDirectoryAccessFailed
         }
-        let outputURL = directory.appendingPathComponent(fileName(), isDirectory: false)
+        let outputURL = DemoFlowExportFileNamer.availableOutputURL(
+            in: directory,
+            prefix: "d",
+            fileExtension: "png"
+        )
         try writePNG(from: composed, to: outputURL)
         try cleanupExpiredFiles(in: directory)
         return outputURL
@@ -129,12 +133,6 @@ struct ScreenDrawAutoCaptureService {
                 try? fileManager.removeItem(at: url)
             }
         }
-    }
-
-    private func fileName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
-        return "draw_capture_\(formatter.string(from: Date())).png"
     }
 
     private func captureDisplayImage(screen: NSScreen) async throws -> CGImage {

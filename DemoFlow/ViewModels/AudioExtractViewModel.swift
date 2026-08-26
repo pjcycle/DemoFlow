@@ -201,7 +201,12 @@ final class AudioExtractViewModel: ObservableObject {
 #else
         let shouldDownloadVideo = false
 #endif
-        let resolvedOutputURL = outputDirectoryURL.appendingPathComponent(suggestedOutputFileName(), isDirectory: false)
+        let resolvedOutputURL = DemoFlowExportFileNamer.availableOutputURL(
+            in: outputDirectoryURL,
+            prefix: "e",
+            fileExtension: "mp3",
+            reservedExtensions: shouldDownloadVideo ? ["mp4", "mov", "webm"] : []
+        )
 
         extractionTask?.cancel()
         extractionTask = Task {

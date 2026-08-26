@@ -47,6 +47,152 @@ final class VideoCuttingFFmpegExportEngine {
         }
         return project.outputURL
     }
+
+    func exportTimeline(
+        project: VideoTimelineFFmpegProject,
+        onProgress: ((Double) -> Void)? = nil
+    ) async throws -> URL {
+        let tools = try binaryService.ensureReady()
+        guard !project.clips.isEmpty else {
+            throw FFmpegComposeError.emptyTimeline
+        }
+
+        let starts = project.clips.indices.map { index in
+            max(0, project.clipStartSeconds.indices.contains(index) ? project.clipStartSeconds[index] : 0)
+        }
+        let ordered = project.clips.indices.sorted { starts[$0] < starts[$1] }
+        let totalDuration = project.clips.indices.reduce(0) { partial, index in
+            max(partial, starts[index] + project.clips[index].durationSeconds)
+        }
+        guard totalDuration > 0.0005 else {
+            throw FFmpegComposeError.emptyTimeline
+        }
+
+        var arguments: [String] = [
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-progress", "pipe:1"
+        ]
+        for clip in project.clips {
+            arguments.append(contentsOf: ["-i", clip.sourceURL.path])
+        }
+
+        let crop = VideoCropGeometry.clampNormalizedRect(project.cropRectNormalized.cgRect)
+        let hasAudio = project.clips.contains(where: \.hasAudioTrack)
+        let renderWidth = project.renderSize.map { max(2, Int($0.width.rounded())) }
+        let renderHeight = project.renderSize.map { max(2, Int($0.height.rounded())) }
+        let blankWidth = renderWidth ?? 1920
+        let blankHeight = renderHeight ?? 1080
+        var filters: [String] = []
+        var videoLabels: [String] = []
+        var audioLabels: [String] = []
+        var timelineCursor = 0.0
+        var sequenceIndex = 0
+
+        for index in ordered {
+            let clip = project.clips[index]
+            let clipStart = starts[index]
+            let gapDuration = clipStart - timelineCursor
+            if gapDuration > 0.0005 {
+                filters.append(
+                    "color=c=black:s=\(blankWidth)x\(blankHeight):r=30:d=\(formatTime(gapDuration))[vgap\(sequenceIndex)]"
+                )
+                videoLabels.append("[vgap\(sequenceIndex)]")
+                if hasAudio {
+                    filters.append(
+                        "anullsrc=r=48000:cl=stereo,atrim=duration=\(formatTime(gapDuration))[agap\(sequenceIndex)]"
+                    )
+                    audioLabels.append("[agap\(sequenceIndex)]")
+                }
+                sequenceIndex += 1
+                timelineCursor = clipStart
+            }
+
+            let start = formatTime(clip.sourceStartSeconds)
+            let end = formatTime(clip.sourceEndSeconds)
+            var videoChain = "[\(index):v:0]trim=start=\(start):end=\(end),setpts=PTS-STARTPTS"
+            if crop.width < 0.9995 || crop.height < 0.9995 {
+                videoChain += ",crop=w=iw*\(formatFilterNumber(crop.width)):h=ih*\(formatFilterNumber(crop.height)):x=iw*\(formatFilterNumber(crop.minX)):y=ih*\(formatFilterNumber(crop.minY))"
+            }
+            if let renderWidth, let renderHeight {
+                videoChain += ",scale=\(renderWidth):\(renderHeight):force_original_aspect_ratio=decrease"
+                videoChain += ",pad=\(renderWidth):\(renderHeight):(ow-iw)/2:(oh-ih)/2"
+            }
+            videoChain += ",setsar=1,fps=30[v\(index)]"
+            filters.append(videoChain)
+            videoLabels.append("[v\(index)]")
+            timelineCursor = max(timelineCursor, clipStart + clip.durationSeconds)
+
+            guard hasAudio else { continue }
+            if clip.hasAudioTrack {
+                filters.append(
+                    "[\(index):a:0]atrim=start=\(start):end=\(end),asetpts=PTS-STARTPTS,aresample=48000[a\(index)]"
+                )
+            } else {
+                filters.append(
+                    "anullsrc=r=48000:cl=stereo,atrim=duration=\(formatTime(clip.durationSeconds))[a\(index)]"
+                )
+            }
+            audioLabels.append("[a\(index)]")
+            sequenceIndex += 1
+        }
+
+        if hasAudio {
+            let concatInputs = videoLabels.indices.map { index in
+                videoLabels[index] + audioLabels[index]
+            }.joined()
+            filters.append(
+                "\(concatInputs)concat=n=\(videoLabels.count):v=1:a=1[vconcat][aconcat]"
+            )
+        } else {
+            filters.append(
+                "\(videoLabels.joined())concat=n=\(videoLabels.count):v=1:a=0[vconcat]"
+            )
+        }
+
+        let audioOutputLabel: String?
+        if hasAudio, let audioFilter = buildAudioFilterChain(config: project.audioProcessingConfig) {
+            filters.append("[aconcat]\(audioFilter)[aout]")
+            audioOutputLabel = "[aout]"
+        } else {
+            audioOutputLabel = hasAudio ? "[aconcat]" : nil
+        }
+
+        arguments.append(contentsOf: [
+            "-filter_complex", filters.joined(separator: ";"),
+            "-map", "[vconcat]",
+            "-c:v", "libx264",
+            "-preset", videoEncodeSettings(for: project.performanceProfile).preset,
+            "-crf", videoEncodeSettings(for: project.performanceProfile).crf,
+            "-pix_fmt", "yuv420p"
+        ])
+        if let threadLimit = videoEncodeSettings(for: project.performanceProfile).threadLimit {
+            arguments.append(contentsOf: ["-threads", String(threadLimit)])
+        }
+        if let audioOutputLabel {
+            arguments.append(contentsOf: ["-map", audioOutputLabel, "-c:a", "aac", "-b:a", "192k"])
+        } else {
+            arguments.append("-an")
+        }
+        arguments.append(contentsOf: ["-movflags", "+faststart", project.outputURL.path])
+
+        try removeFileIfExists(at: project.outputURL)
+        _ = try await runner.run(
+            command: FFmpegCommand(
+                executableURL: tools.ffmpegURL,
+                arguments: arguments,
+                expectedDurationSeconds: totalDuration
+            ),
+            onProgress: onProgress
+        )
+
+        guard fileManager.fileExists(atPath: project.outputURL.path) else {
+            throw FFmpegComposeError.outputMissing
+        }
+        onProgress?(1)
+        return project.outputURL
+    }
 }
 
 private extension VideoCuttingFFmpegExportEngine {
@@ -795,6 +941,10 @@ private extension VideoCuttingFFmpegExportEngine {
         String(format: "%.6f", max(0, seconds))
     }
 
+    func formatFilterNumber(_ value: Double) -> String {
+        String(format: "%.6f", max(0, min(1, value)))
+    }
+
     func videoEncodeSettings(
         for profile: VideoCuttingFFmpegProject.PerformanceProfile
     ) -> (preset: String, crf: String, threadLimit: Int?) {
@@ -861,6 +1011,7 @@ extension VideoCuttingFFmpegExportEngine {
     enum FFmpegComposeError: LocalizedError {
         case missingVideoTrack
         case emptyKeepRanges
+        case emptyTimeline
         case invalidCropRect
         case invalidRenderSize
         case outputMissing
@@ -871,6 +1022,8 @@ extension VideoCuttingFFmpegExportEngine {
                 return L10n.tr("legacy.key_175")
             case .emptyKeepRanges:
                 return L10n.tr("legacy.key_172")
+            case .emptyTimeline:
+                return L10n.tr("video.cut.timeline.empty")
             case .invalidCropRect:
                 return L10n.tr("legacy.key_195")
             case .invalidRenderSize:

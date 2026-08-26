@@ -106,11 +106,13 @@ final class ScreenDrawCanvasWindowController: NSObject {
         dismissalCompletionTask?.cancel()
         dismissalCompletionTask = nil
         sessionStore.cancelActivePointerInteraction()
+        canvasView?.cancelTextInput()
         panel?.orderOut(nil)
         onVisibilityChanged?(false)
     }
 
     func hideWithDismissalAnimation(completion: (() -> Void)? = nil) {
+        canvasView?.cancelTextInput()
         guard isVisible else {
             completion?()
             return
@@ -141,6 +143,7 @@ final class ScreenDrawCanvasWindowController: NSObject {
     }
 
     func clearCanvasWithDismissalAnimation(completion: (() -> Void)? = nil) {
+        canvasView?.cancelTextInput()
         guard isVisible else {
             sessionStore.clearCanvas()
             completion?()
@@ -179,10 +182,14 @@ final class ScreenDrawCanvasWindowController: NSObject {
     }
 
     func snapshotImage() -> NSImage? {
-        guard let view = panel?.contentView as? ScreenDrawCanvasView else {
+        guard let view = canvasView else {
             return nil
         }
         return view.exportSnapshotImage()
+    }
+
+    private var canvasView: ScreenDrawCanvasView? {
+        panel?.contentView as? ScreenDrawCanvasView
     }
 
     private func makePanel(on screen: NSScreen) -> ScreenDrawCanvasPanel {
@@ -392,8 +399,16 @@ private final class ScreenDrawCanvasPanel: NSPanel {
     var onCloseRequested: (() -> Void)?
     var visibilityHandler: ((Bool) -> Void)?
 
-    override var canBecomeKey: Bool { false }
+    // The canvas must be key while editing so keystrokes do not fall through to another app.
+    override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    func beginTextInput() {
+        NSApp.activate(ignoringOtherApps: true)
+        makeKeyAndOrderFront(nil)
+    }
+
+    func endTextInput() {}
 
     override func close() {
         onCloseRequested?()
@@ -405,9 +420,61 @@ private final class ScreenDrawCanvasPanel: NSPanel {
     }
 }
 
-private final class ScreenDrawCanvasView: NSView {
+private final class TextAnnotationInputView: NSView {
+    let textView: NSTextView
+
+    init(frame: CGRect, textColor: NSColor) {
+        let textView = NSTextView(frame: .zero)
+        self.textView = textView
+        super.init(frame: frame)
+
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.97).cgColor
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.65).cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = 8
+
+        let scrollView = NSScrollView(frame: bounds)
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        textView.font = .systemFont(ofSize: 22, weight: .semibold)
+        textView.textColor = textColor
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 8
+        textView.textContainerInset = CGSize(width: 6, height: 7)
+
+        scrollView.documentView = textView
+        addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            scrollView.topAnchor.constraint(equalTo: topAnchor, constant: 1),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+private final class ScreenDrawCanvasView: NSView, NSTextViewDelegate {
     private let sessionStore: ScreenDrawSessionStore
     private var cancellables: Set<AnyCancellable> = []
+    private var isExportingSnapshot = false
+    private var textInputContainer: TextAnnotationInputView?
 
     override var isFlipped: Bool { true }
 
@@ -444,6 +511,13 @@ private final class ScreenDrawCanvasView: NSView {
             draw(shape)
         }
 
+        if !isExportingSnapshot,
+           sessionStore.isShapeMoveModeEnabled,
+           let selectedShapeID = sessionStore.selectedShapeID,
+           let selectedShape = sessionStore.shapes.first(where: { $0.id == selectedShapeID }) {
+            drawSelectionOutline(for: selectedShape)
+        }
+
         if let previewShape = sessionStore.previewShape {
             draw(previewShape)
         }
@@ -451,16 +525,21 @@ private final class ScreenDrawCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if !sessionStore.beginShapeDragIfNeeded(at: point) {
+        if sessionStore.isShapeMoveModeEnabled {
+            sessionStore.beginShapeMoveInteraction(at: point)
+        } else if sessionStore.activeTool == .text {
+            beginTextInput(at: point)
+        } else {
             sessionStore.beginInteraction(at: point)
         }
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard textInputContainer == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
-        if sessionStore.isDraggingExistingShape {
-            sessionStore.continueShapeDrag(to: point)
+        if sessionStore.isShapeMoveModeEnabled {
+            sessionStore.continueShapeMoveInteraction(to: point)
         } else {
             sessionStore.continueInteraction(at: point)
         }
@@ -468,9 +547,10 @@ private final class ScreenDrawCanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard textInputContainer == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
-        if sessionStore.isDraggingExistingShape {
-            sessionStore.endShapeDrag(at: point)
+        if sessionStore.isShapeMoveModeEnabled {
+            sessionStore.endShapeMoveInteraction(at: point)
         } else {
             sessionStore.endInteraction(at: point)
         }
@@ -478,8 +558,29 @@ private final class ScreenDrawCanvasView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        guard textInputContainer == nil else { return }
         sessionStore.cancelActivePointerInteraction()
         needsDisplay = true
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:))
+            || commandSelector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)) {
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                return false
+            }
+            finishTextInput(commit: true)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            finishTextInput(commit: false)
+            return true
+        }
+        return false
+    }
+
+    func cancelTextInput() {
+        finishTextInput(commit: false)
     }
 
     private func registerObservers() {
@@ -504,6 +605,48 @@ private final class ScreenDrawCanvasView: NSView {
             .store(in: &cancellables)
     }
 
+    private func beginTextInput(at point: CGPoint) {
+        finishTextInput(commit: true)
+        guard !sessionStore.isDismissingWithAnimation else { return }
+
+        let fieldSize = CGSize(width: min(360, max(220, bounds.width - 24)), height: 68)
+        let fieldOrigin = CGPoint(
+            x: min(max(12, point.x), max(12, bounds.maxX - fieldSize.width - 12)),
+            y: min(max(12, point.y), max(12, bounds.maxY - fieldSize.height - 12))
+        )
+        let input = TextAnnotationInputView(
+            frame: CGRect(origin: fieldOrigin, size: fieldSize),
+            textColor: sessionStore.selectedColorPreset.color
+        )
+        input.textView.delegate = self
+        addSubview(input)
+        textInputContainer = input
+
+        (window as? ScreenDrawCanvasPanel)?.beginTextInput()
+        DispatchQueue.main.async { [weak self, weak input] in
+            guard let self, let input, self.textInputContainer === input else { return }
+            self.window?.makeFirstResponder(input.textView)
+            self.sessionStore.onSessionEvent?(L10n.tr("draw.text.focused"))
+        }
+    }
+
+    private func finishTextInput(commit: Bool) {
+        guard let input = textInputContainer else { return }
+        let text = input.textView.string
+        let point = input.frame.origin
+        input.textView.delegate = nil
+        input.removeFromSuperview()
+        textInputContainer = nil
+        (window as? ScreenDrawCanvasPanel)?.endTextInput()
+
+        if commit {
+            sessionStore.addTextAnnotation(text, at: point, fontSize: 24)
+        } else {
+            sessionStore.onSessionEvent?(L10n.tr("draw.text.placement_canceled"))
+        }
+        needsDisplay = true
+    }
+
     private func draw(_ shape: ScreenDrawShape) {
         let effectiveColor = shape.colorPreset.color
         effectiveColor.setStroke()
@@ -526,14 +669,40 @@ private final class ScreenDrawCanvasView: NSView {
         case .ellipse:
             path.appendOval(in: rect(from: shape.startPoint, to: shape.endPoint))
 
-        case .cross:
-            drawCross(shape, into: path)
+        case .text:
+            drawText(shape)
 
         case .check:
             drawCheck(shape, into: path)
         }
 
-        path.stroke()
+        if shape.type != .text {
+            path.stroke()
+        }
+    }
+
+    private func drawText(_ shape: ScreenDrawShape, alpha: CGFloat = 1) {
+        guard let text = shape.text, !text.isEmpty else { return }
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: shape.fontSize, weight: .semibold),
+            .foregroundColor: shape.colorPreset.color.withAlphaComponent(alpha),
+            .paragraphStyle: paragraphStyle
+        ]
+        (text as NSString).draw(
+            in: rect(from: shape.startPoint, to: shape.endPoint),
+            withAttributes: attributes
+        )
+    }
+
+    private func drawSelectionOutline(for shape: ScreenDrawShape) {
+        let selectionBounds = shapeBounds(shape).insetBy(dx: -8, dy: -8)
+        let selectionPath = NSBezierPath(roundedRect: selectionBounds, xRadius: 4, yRadius: 4)
+        selectionPath.lineWidth = 1.5
+        selectionPath.setLineDash([5, 4], count: 2, phase: 0)
+        NSColor.controlAccentColor.withAlphaComponent(0.95).setStroke()
+        selectionPath.stroke()
     }
 
     private func drawDismissalAnimatedShapes(
@@ -657,7 +826,7 @@ private final class ScreenDrawCanvasView: NSView {
             let minY = ys.min() ?? shape.startPoint.y
             let maxY = ys.max() ?? shape.endPoint.y
             return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
-        case .rectangle, .ellipse, .cross, .check:
+        case .rectangle, .ellipse, .text, .check:
             return rect(from: shape.startPoint, to: shape.endPoint)
         }
     }
@@ -680,13 +849,15 @@ private final class ScreenDrawCanvasView: NSView {
             path.appendRect(rect(from: shape.startPoint, to: shape.endPoint))
         case .ellipse:
             path.appendOval(in: rect(from: shape.startPoint, to: shape.endPoint))
-        case .cross:
-            drawCross(shape, into: path)
+        case .text:
+            drawText(shape, alpha: alpha)
         case .check:
             drawCheck(shape, into: path)
         }
 
-        path.stroke()
+        if shape.type != .text {
+            path.stroke()
+        }
     }
 
     private func fragmentSeed(_ index: Int) -> CGFloat {
@@ -881,35 +1052,6 @@ private final class ScreenDrawCanvasView: NSView {
         )
     }
 
-    private func drawCross(_ shape: ScreenDrawShape, into path: NSBezierPath) {
-        let bounds = rect(from: shape.startPoint, to: shape.endPoint)
-        guard bounds.width > 0.5, bounds.height > 0.5 else { return }
-
-        let jitter = handDrawnSeed(for: shape)
-        let intensity = max(0.0, min(sessionStore.handDrawnIntensity, 1.0))
-        let styleFactor: CGFloat = sessionStore.markStyle == .rounded ? 1.0 : 0.62
-        let swayX = bounds.width * (0.02 + intensity * 0.06 + jitter * 0.018) * styleFactor
-        let swayY = bounds.height * (0.02 + intensity * 0.06 + jitter * 0.018) * styleFactor
-
-        let aInset = sessionStore.markStyle == .rounded ? 0.10 : 0.07
-        let a1 = CGPoint(x: bounds.minX + bounds.width * aInset, y: bounds.minY + bounds.height * 0.12)
-        let a2 = CGPoint(x: bounds.maxX - bounds.width * 0.08, y: bounds.maxY - bounds.height * aInset)
-        let aControl1 = CGPoint(x: bounds.minX + bounds.width * 0.34 + swayX, y: bounds.minY + bounds.height * 0.28 - swayY)
-        let aControl2 = CGPoint(x: bounds.minX + bounds.width * 0.66 - swayX, y: bounds.minY + bounds.height * 0.72 + swayY)
-
-        path.move(to: a1)
-        path.curve(to: a2, controlPoint1: aControl1, controlPoint2: aControl2)
-
-        let bInset = sessionStore.markStyle == .rounded ? 0.10 : 0.07
-        let b1 = CGPoint(x: bounds.maxX - bounds.width * 0.08, y: bounds.minY + bounds.height * bInset)
-        let b2 = CGPoint(x: bounds.minX + bounds.width * bInset, y: bounds.maxY - bounds.height * 0.08)
-        let bControl1 = CGPoint(x: bounds.minX + bounds.width * 0.66 + swayX * 0.75, y: bounds.minY + bounds.height * 0.30 + swayY * 0.6)
-        let bControl2 = CGPoint(x: bounds.minX + bounds.width * 0.34 - swayX * 0.75, y: bounds.minY + bounds.height * 0.70 - swayY * 0.6)
-
-        path.move(to: b1)
-        path.curve(to: b2, controlPoint1: bControl1, controlPoint2: bControl2)
-    }
-
     private func drawCheck(_ shape: ScreenDrawShape, into path: NSBezierPath) {
         let bounds = rect(from: shape.startPoint, to: shape.endPoint)
         guard bounds.width > 0.5, bounds.height > 0.5 else { return }
@@ -958,6 +1100,8 @@ private final class ScreenDrawCanvasView: NSView {
         guard let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds) else {
             return nil
         }
+        isExportingSnapshot = true
+        defer { isExportingSnapshot = false }
         bitmapRep.size = bounds.size
         cacheDisplay(in: bounds, to: bitmapRep)
 

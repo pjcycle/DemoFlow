@@ -114,18 +114,31 @@ nonisolated final class WhisperRunner {
         ]
 
         let stderr = Pipe()
-        process.standardOutput = FileHandle.standardError
+        let outputCapture = WhisperProcessOutputCapture()
+        process.standardOutput = FileHandle.nullDevice
         process.standardError = stderr
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            outputCapture.append(String(decoding: data, as: UTF8.self))
+        }
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { process in
+                    stderr.fileHandleForReading.readabilityHandler = nil
+                    let remaining = stderr.fileHandleForReading.readDataToEndOfFile()
+                    if !remaining.isEmpty {
+                        outputCapture.append(String(decoding: remaining, as: UTF8.self))
+                    }
                     let errorText = String(
-                        decoding: stderr.fileHandleForReading.readDataToEndOfFile(),
-                        as: UTF8.self
+                        outputCapture.text().trimmingCharacters(in: .whitespacesAndNewlines)
                     )
                     guard process.terminationStatus == 0 else {
-                        continuation.resume(throwing: SubDubError.transcriptionFailed(errorText))
+                        let reason = errorText.isEmpty
+                            ? "Whisper exited with status \(process.terminationStatus)."
+                            : errorText
+                        continuation.resume(throwing: SubDubError.transcriptionFailed(reason))
                         return
                     }
 
@@ -151,6 +164,25 @@ nonisolated final class WhisperRunner {
     }
 }
 
+nonisolated private final class WhisperProcessOutputCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = ""
+    private let maxCharacters = 32_000
+
+    func append(_ text: String) {
+        lock.withLock {
+            value.append(text)
+            if value.count > maxCharacters {
+                value = String(value.suffix(maxCharacters))
+            }
+        }
+    }
+
+    func text() -> String {
+        lock.withLock { value }
+    }
+}
+
 @MainActor
 struct WhisperTranscriptionService {
     private let binaryService = WhisperBinaryService()
@@ -161,14 +193,18 @@ struct WhisperTranscriptionService {
         sessionDirectory: URL
     ) async throws -> [SubtitleTimelineCue] {
         let tools = try binaryService.ensureReady()
-        let outputBase = sessionDirectory.appendingPathComponent("WhisperTranscription")
-        try? FileManager.default.removeItem(at: outputBase.appendingPathExtension("json"))
+        let outputBase = sessionDirectory.appendingPathComponent(
+            "WhisperTranscription-\(UUID().uuidString)"
+        )
         let data = try await runner.run(
             executableURL: tools.executableURL,
             modelURL: tools.modelURL,
             audioURL: audioURL,
             outputBaseURL: outputBase
         )
+        defer {
+            try? FileManager.default.removeItem(at: outputBase.appendingPathExtension("json"))
+        }
         let result = try WhisperJSONParser.parse(data)
         let normalized = ChineseSimplifiedNormalizer.normalize(result)
         return SubtitlePostProcessor.splitByPunctuation(normalized)
@@ -220,8 +256,11 @@ private enum WhisperJSONParser {
 
     private static func parseTime(_ value: Any?) -> Double? {
         if let number = value as? NSNumber {
-            let raw = number.doubleValue
-            return raw > 10_000 ? raw / 1_000.0 : raw
+            // whisper.cpp's `offsets.from/to` are always emitted in
+            // milliseconds, so always normalize to seconds regardless of
+            // magnitude. The previous 10_000 threshold silently mangled any
+            // short clip whose offset sat below 10s.
+            return number.doubleValue / 1_000.0
         }
         guard let string = value as? String else { return nil }
         let normalized = string.replacingOccurrences(of: ",", with: ".")

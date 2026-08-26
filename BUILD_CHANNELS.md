@@ -11,9 +11,9 @@ DemoFlow supports two distribution channels via separate Xcode build configurati
 
 ## Why Dual Builds
 
-Apple MAS review requirement (error 90296): all Mach-O executables inside the app sandbox must be signed with `com.apple.security.app-sandbox` or `com.apple.security.inherit`.
+Apple MAS review requirement (error 90296): every embedded Mach-O executable must be signed with both `com.apple.security.app-sandbox=true` and `com.apple.security.inherit=true`.
 
-- `ffmpeg` / `ffprobe` can be signed with `com.apple.security.inherit` and run correctly
+- `ffmpeg` / `ffprobe` / `whisper-cli` are re-signed with both sandbox entitlements and run as child processes of DemoFlow
 - `yt-dlp` is a PyInstaller-packaged binary; `codesign` corrupts its internal offsets, causing exit code 133
 
 Therefore the MAS version cannot include `yt-dlp`, but the direct download version can. The online URL companion-video download is also restricted to the direct-download build.

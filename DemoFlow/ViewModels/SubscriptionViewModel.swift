@@ -47,6 +47,17 @@ final class SubscriptionViewModel: ObservableObject {
 
     private var hasBootstrapped = false
     private var transactionObserverTask: Task<Void, Never>?
+    private var automaticProductRetryTask: Task<Void, Never>?
+    private var automaticProductRetryIndex = 0
+
+    // StoreKit can become available a few seconds after a fresh install or a
+    // network transition. Retry the catalogue a limited number of times so a
+    // transient empty response does not leave the purchase window stranded.
+    private let automaticProductRetryDelays: [UInt64] = [
+        2_000_000_000,
+        6_000_000_000,
+        15_000_000_000
+    ]
 #if DEBUG
     private var localStoreKitSessionStatus: String {
         let hasInjectedURL = ProcessInfo.processInfo.environment["STOREKIT_CONFIGURATION_URL"] != nil
@@ -196,6 +207,10 @@ final class SubscriptionViewModel: ObservableObject {
 
     var isProUnlocked: Bool { activeEntitlement.isPro }
 
+    var shouldOfferProductReload: Bool {
+        !isProUnlocked && !isLoadingProducts && !isPurchasing && products.isEmpty
+    }
+
     var membershipBadgeText: String? {
         membershipLevel.badgeTextKey.map { L10n.tr($0) }
     }
@@ -308,7 +323,10 @@ final class SubscriptionViewModel: ObservableObject {
         defer { isLoadingProducts = false }
         let requestedProductIDs = SubscriptionPlan.allCases.map(\.productID)
         let totalProductCount = requestedProductIDs.count
-        var nextProducts: [SubscriptionPlan: Product] = [:]
+        // Preserve a previously loaded product if a later refresh is affected
+        // by a temporary StoreKit outage. A cached Product remains valid for
+        // the current app session and still drives the system purchase sheet.
+        var nextProducts = products
         var lastError: Error?
 
         diagnosticsLog("product load begin; requested=[\(requestedProductIDs.joined(separator: ", "))]")
@@ -320,7 +338,6 @@ final class SubscriptionViewModel: ObservableObject {
                 let debugURL = storeKitConfigurationDescription
                 diagnosticsLog("Product.products(for:) returned count=\(loaded.count); IDs=[\(loaded.map(\.id).sorted().joined(separator: ", "))]; storeKitURL=\(debugURL)")
                 lastError = nil
-                nextProducts.removeAll(keepingCapacity: true)
                 for product in loaded {
                     guard let plan = SubscriptionPlan(productID: product.id) else { continue }
                     nextProducts[plan] = product
@@ -361,6 +378,7 @@ final class SubscriptionViewModel: ObservableObject {
         }
 
         products = nextProducts
+        selectFirstAvailablePlanIfNeeded(from: nextProducts)
         #if DEBUG
         for plan in SubscriptionPlan.allCases where products[plan] != nil {
             syntheticProducts.removeValue(forKey: plan)
@@ -387,6 +405,7 @@ final class SubscriptionViewModel: ObservableObject {
         diagnosticsLog("product load end; products=\(nextProducts.count)/\(totalProductCount); lastError=\(lastError.map(diagnosticErrorDescription) ?? "none"); fallbackAllowed=\(diagnosticsFallbackAllowed); fallbackActive=\(isUsingDebugFallback)")
         if nextProducts.count == totalProductCount {
             isUsingDebugFallback = false
+            cancelAutomaticProductRetry()
             statusMessage = L10n.tr("subscription.status.products_loaded")
         } else if nextProducts.isEmpty {
             #if DEBUG
@@ -398,7 +417,8 @@ final class SubscriptionViewModel: ObservableObject {
                 statusMessage = productsUnavailableMessage(error: lastError)
             }
             #else
-            statusMessage = productsUnavailableMessage(error: lastError)
+            statusMessage = L10n.tr("subscription.status.products_connecting")
+            scheduleAutomaticProductRetryIfNeeded()
             #endif
         } else {
 #if DEBUG
@@ -412,8 +432,14 @@ final class SubscriptionViewModel: ObservableObject {
 #else
             isUsingDebugFallback = false
             statusMessage = L10n.tr("subscription.status.products_partial")
+            scheduleAutomaticProductRetryIfNeeded()
 #endif
         }
+    }
+
+    func reloadProducts() async {
+        cancelAutomaticProductRetry(resetAttemptCount: true)
+        await loadProductsIfNeeded(forceReload: true)
     }
 
     func displayPriceText(for plan: SubscriptionPlan) -> String {
@@ -425,6 +451,9 @@ final class SubscriptionViewModel: ObservableObject {
             return synthetic.displayPrice
         }
         #endif
+        if isLoadingProducts || products.isEmpty {
+            return L10n.tr("subscription.plan.price_loading")
+        }
         return L10n.tr("subscription.plan.price_unavailable")
     }
 
@@ -622,6 +651,7 @@ final class SubscriptionViewModel: ObservableObject {
 
     deinit {
         transactionObserverTask?.cancel()
+        automaticProductRetryTask?.cancel()
     }
 
     private func startTransactionObserverIfNeeded() {
@@ -649,6 +679,48 @@ final class SubscriptionViewModel: ObservableObject {
         activeEntitlement = SubscriptionEntitlementStatus(plan: plan)
         membershipLevel = SubscriptionMembershipLevel(activePlan: plan)
         selectedPlan = plan ?? .yearly
+    }
+
+    private func selectFirstAvailablePlanIfNeeded(from availableProducts: [SubscriptionPlan: Product]) {
+        guard activePlan == nil,
+              availableProducts[selectedPlan] == nil else {
+            return
+        }
+
+        let preferredOrder: [SubscriptionPlan] = [.yearly, .monthly, .lifetime]
+        if let availablePlan = preferredOrder.first(where: { availableProducts[$0] != nil }) {
+            selectedPlan = availablePlan
+        }
+    }
+
+    private func scheduleAutomaticProductRetryIfNeeded() {
+        guard automaticProductRetryTask == nil,
+              automaticProductRetryIndex < automaticProductRetryDelays.count else {
+            return
+        }
+
+        let delay = automaticProductRetryDelays[automaticProductRetryIndex]
+        automaticProductRetryIndex += 1
+        diagnosticsLog("product load retry scheduled; delayMs=\(delay / 1_000_000); retry=\(automaticProductRetryIndex)/\(automaticProductRetryDelays.count)")
+        automaticProductRetryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+
+            guard let self, !Task.isCancelled else { return }
+            self.automaticProductRetryTask = nil
+            await self.loadProductsIfNeeded(forceReload: true)
+        }
+    }
+
+    private func cancelAutomaticProductRetry(resetAttemptCount: Bool = true) {
+        automaticProductRetryTask?.cancel()
+        automaticProductRetryTask = nil
+        if resetAttemptCount {
+            automaticProductRetryIndex = 0
+        }
     }
 
     func planBadgeText(for plan: SubscriptionPlan) -> String? {
@@ -800,12 +872,26 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     func activateDebugSubscriptionTrial() {
-        let expiration = debugTrialExpirationDate()
+        let plan = selectedPlan
+        let expiration = debugTrialExpirationDate(for: plan)
+        persistDebugFallbackPlan(plan, expiration: expiration)
+        applyActivePlan(plan, expirationDate: expiration)
+        isUsingDebugFallback = true
+        statusMessage = L10n.tr("subscription.status.debug_bypass_activated")
+        diagnosticsLog("debug subscription trial activated; plan=\(plan.rawValue); expiration=\(expiration)")
+    }
+
+    /// Activates a fixed 100-day VIP trial regardless of the currently selected plan.
+    /// Used by the "Free 100-Day" debug entry point to give a stable purchase-style
+    /// activation that does not depend on which plan card the user has tapped.
+    func activateFixed100DayTrial() {
+        let expiration = Calendar.current.date(byAdding: .day, value: 100, to: Date())
+            ?? Date().addingTimeInterval(100 * 24 * 60 * 60)
         persistDebugFallbackPlan(.yearly, expiration: expiration)
         applyActivePlan(.yearly, expirationDate: expiration)
         isUsingDebugFallback = true
         statusMessage = L10n.tr("subscription.status.debug_bypass_activated")
-        diagnosticsLog("debug subscription trial activated; plan=yearly; expiration=\(expiration)")
+        diagnosticsLog("debug fixed 100-day trial activated; expiration=\(expiration)")
     }
 
     func clearDebugFallback() {
@@ -837,13 +923,14 @@ final class SubscriptionViewModel: ObservableObject {
               let plan = SubscriptionPlan(rawValue: rawValue) else {
             return nil
         }
-        if plan == .lifetime || UserDefaults.standard.bool(forKey: Self.legacyDebugBypassEnabledDefaultsKey) {
-            // Migrate historical permanent local bypasses to the bounded 100-day VIP trial.
-            let expiration = debugTrialExpirationDate()
+        // Migrate only legacy permanent local bypasses (one-shot). Newly
+        // activated `.lifetime` debug trials must stay `.lifetime`.
+        if UserDefaults.standard.bool(forKey: Self.legacyDebugBypassEnabledDefaultsKey) {
+            let expiration = debugTrialExpirationDate(for: .yearly)
             UserDefaults.standard.set(SubscriptionPlan.yearly.rawValue, forKey: Self.debugFallbackPlanDefaultsKey)
             UserDefaults.standard.set(expiration.timeIntervalSince1970, forKey: Self.debugFallbackExpirationDefaultsKey)
             UserDefaults.standard.removeObject(forKey: Self.legacyDebugBypassEnabledDefaultsKey)
-            diagnosticsLog("migrated legacy debug bypass to 100-day VIP trial; expiration=\(expiration)")
+            diagnosticsLog("migrated legacy debug bypass to yearly VIP trial; expiration=\(expiration)")
             return .yearly
         }
         return plan
@@ -865,9 +952,28 @@ final class SubscriptionViewModel: ObservableObject {
         diagnosticsLog("debug fallback activated; plan=\(plan.rawValue); expiration=\(expiration.description)")
     }
 
-    private func debugTrialExpirationDate() -> Date {
-        Calendar.current.date(byAdding: .day, value: 100, to: Date())
-            ?? Date().addingTimeInterval(100 * 24 * 60 * 60)
+    private func debugTrialExpirationDate(for plan: SubscriptionPlan) -> Date {
+        switch plan {
+        case .monthly:
+            return Calendar.current.date(byAdding: .day, value: 30, to: Date())
+                ?? Date().addingTimeInterval(30 * 24 * 60 * 60)
+        case .yearly:
+            return Calendar.current.date(byAdding: .day, value: 365, to: Date())
+                ?? Date().addingTimeInterval(365 * 24 * 60 * 60)
+        case .lifetime:
+            return .distantFuture
+        }
+    }
+
+    var debugTrialDaysLabel: String {
+        switch selectedPlan {
+        case .monthly:
+            return L10n.f("subscription.debug.trial_days", 30)
+        case .yearly:
+            return L10n.f("subscription.debug.trial_days", 365)
+        case .lifetime:
+            return L10n.tr("subscription.debug.trial_lifetime")
+        }
     }
     #endif
 }

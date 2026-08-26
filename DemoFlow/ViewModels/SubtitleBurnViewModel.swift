@@ -133,9 +133,9 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
             statusMessage = error.localizedDescription
             return
         }
-        guard let sourceURL,
+        guard sourceURL != nil,
               let outputURL = workspace.pickTimelineJSONOutputURL(
-                  suggestedName: "\(sourceURL.deletingPathExtension().lastPathComponent)-字幕.json"
+                  suggestedName: DemoFlowExportFileNamer.fileName(prefix: "s", fileExtension: "json")
               ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
             return
@@ -409,7 +409,7 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
             return
         }
         guard let outputURL = workspace.pickVideoOutputURL(
-            suggestedName: "\(sourceURL.deletingPathExtension().lastPathComponent)-字幕烧制.mp4"
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "s", fileExtension: "mp4")
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
             return
@@ -651,9 +651,17 @@ final class SubtitleBurnViewModel: NSObject, ObservableObject {
 
     private func prepareSourceAudio(in session: URL) async throws -> URL {
         if let existing = timelineSession.sourceAudioURL,
+           existing.pathExtension.lowercased() == "wav",
            FileManager.default.fileExists(atPath: existing.path) {
-            sourceWaveformSamples = timelineSession.sourceWaveformSamples
-            return existing
+            do {
+                try exportService.validateTranscriptionAudio(existing)
+                sourceWaveformSamples = timelineSession.sourceWaveformSamples
+                return existing
+            } catch {
+                // A previous extraction may have been interrupted or left a
+                // container AVFoundation cannot read. Recreate it with FFmpeg.
+                try? FileManager.default.removeItem(at: existing)
+            }
         }
         let audioURL = session.appendingPathComponent("SourceAudio-16k.wav")
         guard let videoURL = sourceURL ?? timelineSession.videoURL else {

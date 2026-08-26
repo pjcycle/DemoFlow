@@ -98,6 +98,7 @@ final class SubDubViewModel: ObservableObject {
             return
         }
         pendingWatermarkReloadURL = url.standardizedFileURL
+        watermarkRemovalViewModel.prepareForProcessedVideoReload()
         videoConversionViewModel.selectedMode = .formatConversion
         selectedTab = .videoConversion
         videoConversionViewModel.prepareForSharedImport()
@@ -186,7 +187,10 @@ final class SubDubViewModel: ObservableObject {
     private func handleVideoImportResult(url: URL, result: Result<Void, Error>) {
         guard url.standardizedFileURL == pendingWatermarkReloadURL else { return }
         pendingWatermarkReloadURL = nil
-        if case .failure = result {
+        switch result {
+        case .success:
+            watermarkRemovalViewModel.markCurrentVideoAsProcessed()
+        case .failure:
             watermarkRemovalViewModel.markReloadFailed()
         }
     }

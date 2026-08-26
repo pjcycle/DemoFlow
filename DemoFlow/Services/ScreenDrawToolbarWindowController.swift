@@ -102,7 +102,7 @@ final class ScreenDrawToolbarWindowController: NSObject {
 
     private func makePanel() -> ScreenDrawToolbarPanel {
         let panel = ScreenDrawToolbarPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 84),
+            contentRect: NSRect(x: 0, y: 0, width: 610, height: 84),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -421,6 +421,11 @@ private struct ScreenDrawToolbarView: View {
                     toolButton(tool)
                 }
             }
+
+            Divider()
+                .frame(height: 30)
+
+            moveAnnotationsButton
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -505,6 +510,40 @@ private struct ScreenDrawToolbarView: View {
         .help(tool.title)
     }
 
+    private var moveAnnotationsButton: some View {
+        let isSelected = sessionStore.isShapeMoveModeEnabled
+        return Button {
+            sessionStore.toggleShapeMoveMode()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(Color.clear)
+
+                if isSelected {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.16))
+                } else {
+                    Circle()
+                        .stroke(Color.primary.opacity(0.45), lineWidth: 1)
+                }
+
+                Image(systemName: "hand.draw.fill")
+                    .font(.system(size: 14, weight: isSelected ? .bold : .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+            }
+            .frame(width: 30, height: 30)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(
+            L10n.tr(
+                isSelected
+                    ? "draw.move.mode_disable_help"
+                    : "draw.move.mode_enable_help"
+            )
+        )
+    }
+
     @ViewBuilder
     private func toolIcon(_ tool: ScreenDrawTool) -> some View {
         let isSelected = sessionStore.activeTool == tool
@@ -517,7 +556,7 @@ private struct ScreenDrawToolbarView: View {
         case .arrow:
             Image(systemName: "arrow.turn.up.right")
                 .font(.system(size: isSelected ? 14 : 13, weight: isSelected ? selectedWeight : normalWeight))
-        case .cross:
+        case .text:
             Image(systemName: tool.symbolName)
                 .font(.caption.weight(isSelected ? selectedWeight : normalWeight))
         case .check:

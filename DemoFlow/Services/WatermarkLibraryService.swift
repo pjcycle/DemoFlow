@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 
 struct WatermarkLibrarySnapshot: Codable, Equatable {
     var images: [WatermarkLibraryImage] = []
@@ -7,6 +8,9 @@ struct WatermarkLibrarySnapshot: Codable, Equatable {
 }
 
 struct WatermarkLibraryService {
+    private static let maximumPNGFileByteCount = 10 * 1024 * 1024
+    private static let maximumPNGDimension = 4_096
+
     private let fileManager = FileManager.default
     private let libraryFileName = "watermark-library.json"
 
@@ -35,11 +39,28 @@ struct WatermarkLibraryService {
     }
 
     func importPNG(from sourceURL: URL) throws -> WatermarkLibraryImage {
-        guard sourceURL.pathExtension.lowercased() == "png",
-              let image = NSImage(contentsOf: sourceURL),
-              image.isValid,
-              image.size.width > 0,
-              image.size.height > 0 else {
+        guard sourceURL.pathExtension.lowercased() == "png" else {
+            throw WatermarkLibraryError.invalidPNG
+        }
+        let sourceAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if sourceAccess { sourceURL.stopAccessingSecurityScopedResource() }
+        }
+        guard let attributes = try? fileManager.attributesOfItem(atPath: sourceURL.path),
+              let byteCount = attributes[.size] as? NSNumber,
+              byteCount.int64Value > 0 else {
+            throw WatermarkLibraryError.invalidPNG
+        }
+        guard byteCount.int64Value <= Int64(Self.maximumPNGFileByteCount) else {
+            throw WatermarkLibraryError.pngFileTooLarge
+        }
+        guard let pixelSize = pngPixelSize(at: sourceURL) else {
+            throw WatermarkLibraryError.invalidPNG
+        }
+        guard max(pixelSize.width, pixelSize.height) <= CGFloat(Self.maximumPNGDimension) else {
+            throw WatermarkLibraryError.pngDimensionsTooLarge
+        }
+        guard let image = NSImage(contentsOf: sourceURL), image.isValid else {
             throw WatermarkLibraryError.invalidPNG
         }
 
@@ -49,10 +70,6 @@ struct WatermarkLibraryService {
         let fileName = "image-\(UUID().uuidString).png"
         let destination = directory.appendingPathComponent("Images", isDirectory: true)
             .appendingPathComponent(fileName)
-        let sourceAccess = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if sourceAccess { sourceURL.stopAccessingSecurityScopedResource() }
-        }
         do {
             try fileManager.copyItem(at: sourceURL, to: destination)
         } catch {
@@ -61,7 +78,7 @@ struct WatermarkLibraryService {
         return WatermarkLibraryImage(
             displayName: sourceURL.deletingPathExtension().lastPathComponent,
             fileName: fileName,
-            aspectRatio: Double(image.size.width / image.size.height)
+            aspectRatio: Double(pixelSize.width / pixelSize.height)
         )
     }
 
@@ -129,11 +146,25 @@ struct WatermarkLibraryService {
         }
         return token
     }
+
+    private func pngPixelSize(at url: URL) -> CGSize? {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+              width > 0,
+              height > 0 else {
+            return nil
+        }
+        return CGSize(width: width, height: height)
+    }
 }
 
 enum WatermarkLibraryError: LocalizedError {
     case workspaceMissing
     case invalidPNG
+    case pngFileTooLarge
+    case pngDimensionsTooLarge
     case copyFailed
     case persistenceFailed
 
@@ -143,6 +174,10 @@ enum WatermarkLibraryError: LocalizedError {
             return L10n.tr("subdub.watermark.library.workspace_missing")
         case .invalidPNG:
             return L10n.tr("subdub.watermark.error.invalid_png")
+        case .pngFileTooLarge:
+            return L10n.tr("subdub.watermark.error.png_file_too_large")
+        case .pngDimensionsTooLarge:
+            return L10n.tr("subdub.watermark.error.png_dimensions_too_large")
         case .copyFailed:
             return L10n.tr("subdub.watermark.error.png_copy")
         case .persistenceFailed:

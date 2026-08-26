@@ -275,7 +275,10 @@ final class AudioTranscodeViewModel: ObservableObject {
         panel.canCreateDirectories = true
         panel.allowedContentTypes = format.suggestedContentType.map { [$0] } ?? []
         panel.directoryURL = DemoFlowOutputDirectoryPolicy.audioOutputDirectoryBookmarkedURL()
-        panel.nameFieldStringValue = "\(asset.displayName)_converted.\(format.fileExtension)"
+        panel.nameFieldStringValue = DemoFlowExportFileNamer.fileName(
+            prefix: "c",
+            fileExtension: format.fileExtension
+        )
         panel.prompt = L10n.tr("audio.export.action.save")
         let response = panel.runModal()
         guard response == .OK, let url = panel.url else { return nil }

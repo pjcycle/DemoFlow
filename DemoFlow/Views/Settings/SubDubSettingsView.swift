@@ -197,6 +197,18 @@ private struct VideoConversionPanel: View {
             Text(L10n.f("subdub.video_conversion.source_duration", viewModel.sourceDuration))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
+            if watermarkViewModel.canExportCurrentVideo {
+                Button {
+                    watermarkViewModel.exportCurrentVideo()
+                } label: {
+                    Label(
+                        L10n.tr("subdub.watermark.action.export_current"),
+                        systemImage: "square.and.arrow.down"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .disabled(watermarkViewModel.isExportingCurrentVideo)
+            }
             iconButton(
                 systemName: "arrow.triangle.2.circlepath",
                 help: L10n.tr("subdub.action.reselect_video"),
@@ -351,9 +363,6 @@ private struct VideoConversionPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             if watermarkViewModel.hasSource {
                 HStack(spacing: 8) {
-                    Text(L10n.tr("subdub.watermark.regions"))
-                        .font(.headline)
-                    Spacer()
                     Button {
                         watermarkViewModel.openWatermarkLibrary()
                     } label: {
@@ -363,7 +372,8 @@ private struct VideoConversionPanel: View {
                         )
                     }
                     .buttonStyle(.bordered)
-                    .disabled(watermarkViewModel.selectedRegionID == nil || watermarkViewModel.state.isBusy)
+                    .disabled(watermarkViewModel.state.isBusy)
+                    Spacer()
                 }
 
                 HStack(spacing: 8) {
@@ -739,53 +749,91 @@ private struct WatermarkReplacementLibrarySheet: View {
     @State private var isDeleteTextConfirmationPresented = false
     @State private var textStyleToDelete: WatermarkLibraryTextStyle?
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(L10n.f("subdub.watermark.library.title", viewModel.selectedRegionIndex ?? 0))
-                        .font(.title3.weight(.semibold))
-                    Text(L10n.tr("subdub.watermark.library.subtitle"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    viewModel.isWatermarkLibraryPresented = false
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.bordered)
-                .help(L10n.tr("subdub.action.close"))
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 1.00, green: 0.44, blue: 0.40),
+                                     Color(red: 0.97, green: 0.63, blue: 0.20)],
+                            startPoint: .topLeading, endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 36, height: 36)
+                Image(systemName: "photo.stack.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
             }
 
-            if !viewModel.watermarkLibraryAvailable {
-                ContentUnavailableView(
-                    L10n.tr("subdub.watermark.library.workspace_title"),
-                    systemImage: "externaldrive.badge.exclamationmark",
-                    description: Text(L10n.tr("subdub.watermark.library.workspace_missing"))
-                )
-            } else {
-                Group {
-                    Picker("", selection: $selectedSection) {
-                        ForEach(Section.allCases) { section in
-                            Text(L10n.tr(section.titleKey)).tag(section)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(watermarkLibraryTitle)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text(L10n.tr("subdub.watermark.library.subtitle"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
+            Spacer()
+
+            Button {
+                viewModel.isWatermarkLibraryPresented = false
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(L10n.tr("subdub.action.close"))
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if !viewModel.watermarkLibraryAvailable {
+            ContentUnavailableView(
+                L10n.tr("subdub.watermark.library.workspace_title"),
+                systemImage: "externaldrive.badge.exclamationmark",
+                description: Text(L10n.tr("subdub.watermark.library.workspace_missing"))
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("", selection: $selectedSection) {
+                    ForEach(Section.allCases) { section in
+                        Text(L10n.tr(section.titleKey)).tag(section)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+
+                Group {
                     if selectedSection == .images {
                         imageLibrary
                     } else {
                         textLibrary
                     }
                 }
-                .disabled(viewModel.state.isBusy)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 20)
             }
         }
-        .padding(20)
-        .frame(width: 680, height: 570, alignment: .topLeading)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(width: 720, height: 580, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { viewModel.reloadWatermarkLibrary() }
         .confirmationDialog(
             L10n.tr("subdub.watermark.library.delete_image.title"),
@@ -837,6 +885,10 @@ private struct WatermarkReplacementLibrarySheet: View {
                 Spacer()
             }
 
+            Text(L10n.tr("subdub.watermark.library.image_limit_hint"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             if viewModel.watermarkLibrary.images.isEmpty {
                 ContentUnavailableView(
                     L10n.tr("subdub.watermark.library.images_empty"),
@@ -859,86 +911,84 @@ private struct WatermarkReplacementLibrarySheet: View {
 
     private func imageCard(_ image: WatermarkLibraryImage) -> some View {
         let isApplied = viewModel.selectedRegion?.imageLibraryID == image.id
-        return VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                Color(nsColor: .windowBackgroundColor)
-                if let url = viewModel.imageLibraryURL(for: image),
-                   let previewImage = NSImage(contentsOf: url) {
-                    Image(nsImage: previewImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .padding(8)
-                } else {
-                    Image(systemName: "photo")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(height: 84)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-            Text(image.displayName)
-                .font(.caption.weight(.medium))
-                .lineLimit(1)
-
-            HStack(spacing: 6) {
-                Button(isApplied ? L10n.tr("subdub.watermark.library.applied") : L10n.tr("subdub.watermark.library.action.apply")) {
-                    viewModel.applyLibraryImage(image.id)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(isApplied)
-                Button(role: .destructive) {
-                    imageToDelete = image
-                    isDeleteImageConfirmationPresented = true
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help(L10n.tr("subdub.watermark.library.action.delete_image"))
+        return ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            if let url = viewModel.imageLibraryURL(for: image),
+               let previewImage = NSImage(contentsOf: url) {
+                Image(nsImage: previewImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .padding(8)
+            } else {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(8)
+        .aspectRatio(1, contentMode: .fit)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isApplied ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: isApplied ? 2 : 1)
+                .stroke(isApplied ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: isApplied ? 4 : 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help(image.displayName)
+        .onTapGesture {
+            if isApplied {
+                viewModel.removeLibraryImageFromSelectedRegion()
+            } else {
+                viewModel.applyLibraryImage(image.id)
+            }
+        }
+        .onLongPressGesture(minimumDuration: 0.5) {
+            imageToDelete = image
+            isDeleteImageConfirmationPresented = true
         }
     }
 
     private var textLibrary: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(L10n.tr("subdub.watermark.library.text_styles"))
-                        .font(.headline)
-                    Spacer()
-                    Button {
-                        editingTextStyle = newTextStyle()
-                        selectedTextStyleID = nil
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .buttonStyle(.bordered)
-                    .help(L10n.tr("subdub.watermark.library.action.new_text"))
-                }
-
-                List(selection: $selectedTextStyleID) {
+                List {
                     ForEach(Array(viewModel.watermarkLibrary.textStyles), id: \.id) { style in
-                        WatermarkTextStyleRow(
-                            style: style,
-                            isApplied: viewModel.selectedRegion?.textStyleID == style.id
-                        )
-                        .tag(style.id)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedTextStyleID = style.id
-                            editingTextStyle = style
+                        Button {
+                            if viewModel.selectedRegion?.textStyleID == style.id {
+                                viewModel.removeTextStyleFromSelectedRegion()
+                                editingTextStyle = nil
+                                selectedTextStyleID = nil
+                            } else {
+                                viewModel.applyTextStyle(style.id)
+                                editingTextStyle = style
+                                selectedTextStyleID = style.id
+                            }
+                        } label: {
+                            WatermarkTextStyleRow(
+                                style: style,
+                                isApplied: viewModel.selectedRegion?.textStyleID == style.id,
+                                isSelected: selectedTextStyleID == style.id
+                            )
+                        }
+                        .buttonStyle(WatermarkThumbnailButtonStyle())
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .onLongPressGesture(minimumDuration: 0.5) {
+                            textStyleToDelete = style
+                            isDeleteTextConfirmationPresented = true
                         }
                     }
+
+                    WatermarkTextStyleAddCard {
+                        editingTextStyle = newTextStyle()
+                        selectedTextStyleID = nil
+                    }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
                 }
-                .frame(width: 245, height: 370)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .frame(width: 280, height: 400)
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -953,14 +1003,28 @@ private struct WatermarkReplacementLibrarySheet: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
 
     private func textEditor(style: WatermarkLibraryTextStyle) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField(L10n.tr("subdub.watermark.library.text_style_name"), text: textBinding(style.id, \.name))
-                .textFieldStyle(.roundedBorder)
+            WatermarkTextStyleRow(
+                style: style,
+                isApplied: false,
+                compact: true,
+                fontSize: 18
+            )
+            .frame(maxWidth: .infinity)
+            .frame(height: 150)
+
             TextField(L10n.tr("subdub.watermark.text.placeholder"), text: textBinding(style.id, \.text))
                 .textFieldStyle(.roundedBorder)
             Picker(L10n.tr("subdub.watermark.text.font"), selection: textBinding(style.id, \.font)) {
@@ -1011,13 +1075,6 @@ private struct WatermarkReplacementLibrarySheet: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!viewModel.watermarkLibrary.textStyles.contains(where: { $0.id == style.id }))
 
-                Button(L10n.tr("subdub.watermark.library.action.apply")) {
-                    guard let editingTextStyle else { return }
-                    viewModel.applyTextStyle(editingTextStyle.id)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!viewModel.watermarkLibrary.textStyles.contains(where: { $0.id == style.id }))
-
                 Spacer()
                 if viewModel.watermarkLibrary.textStyles.contains(where: { $0.id == style.id }) {
                     Button(role: .destructive) {
@@ -1037,6 +1094,13 @@ private struct WatermarkReplacementLibrarySheet: View {
                 .buttonStyle(.bordered)
             }
         }
+    }
+
+    private var watermarkLibraryTitle: String {
+        guard let regionIndex = viewModel.selectedRegionIndex else {
+            return L10n.tr("subdub.watermark.library.title.generic")
+        }
+        return L10n.f("subdub.watermark.library.title", regionIndex)
     }
 
     private func labeledSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
@@ -1085,24 +1149,105 @@ private struct WatermarkReplacementLibrarySheet: View {
 
 private struct WatermarkTextStyleRow: View {
     let style: WatermarkLibraryTextStyle
-    let isApplied: Bool
+    var isApplied: Bool = false
+    var isSelected: Bool = false
+    var compact: Bool = false
+    var fontSize: CGFloat? = nil
+
+    private var hasState: Bool { isApplied || isSelected }
+
+    private var strokeColor: Color {
+        if isApplied { return .green }
+        if isSelected { return .blue }
+        return Color(nsColor: .separatorColor)
+    }
+
+    private var strokeLineWidth: CGFloat { hasState ? 4 : 1 }
+
+    private var resolvedFontSize: CGFloat {
+        if let fontSize { return fontSize }
+        return compact ? 12 : 18
+    }
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(style.name)
-                    .lineLimit(1)
-                Text(style.text)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            if isApplied {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(Color.accentColor)
-            }
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            previewText
+                .lineLimit(compact ? 1 : 2)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, compact ? 8 : 10)
+                .padding(.vertical, compact ? 6 : 14)
         }
+        .frame(maxWidth: .infinity, minHeight: compact ? 30 : 60, alignment: .center)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(strokeColor, lineWidth: strokeLineWidth)
+        }
+    }
+
+    @ViewBuilder
+    private var previewText: some View {
+        let displayText = style.text.isEmpty
+            ? L10n.tr("subdub.watermark.text.placeholder")
+            : style.text
+        Text(displayText)
+            .font(.custom(style.font.fileURL.path, size: resolvedFontSize))
+            .foregroundStyle(textColor)
+            .shadow(
+                color: style.outlineEnabled ? Color.black.opacity(0.95) : .clear,
+                radius: max(style.outlineScale * 200, 0.6),
+                x: 0, y: 0
+            )
+            .shadow(
+                color: style.shadowEnabled ? Color.black.opacity(0.55) : .clear,
+                radius: 0.5,
+                x: max(style.shadowOffsetScale * 50, 0.5),
+                y: max(style.shadowOffsetScale * 50, 0.5)
+            )
+    }
+
+    private var textColor: Color {
+        Color(
+            red: style.color.red,
+            green: style.color.green,
+            blue: style.color.blue,
+            opacity: style.color.opacity
+        )
+    }
+}
+
+private struct WatermarkTextStyleAddCard: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 22, weight: .regular))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 60)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(WatermarkThumbnailButtonStyle())
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+}
+
+private struct WatermarkThumbnailButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .opacity(configuration.isPressed ? 0.88 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -2778,20 +2923,21 @@ private struct WatermarkVideoSurface: View {
         let isSelected = region.id == viewModel.selectedRegionID
 
         return ZStack {
-            Rectangle()
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.red.opacity(isSelected ? 0.15 : 0.08))
                 .frame(width: frame.width, height: frame.height)
                 .overlay {
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(isSelected ? Color.orange : Color.red.opacity(0.8), lineWidth: isSelected ? 2 : 1.5)
                 }
                 .overlay(alignment: .topLeading) {
                     Text(L10n.f("subdub.watermark.region_item", regionIndex(region.id)))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.red.opacity(0.8))
+                        .background(Color.red.opacity(0.85))
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 }
                 .contentShape(Rectangle())
                 .position(x: frame.midX, y: frame.midY)

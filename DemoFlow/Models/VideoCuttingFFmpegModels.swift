@@ -25,6 +25,17 @@ struct VideoCuttingFFmpegProject {
     let performanceProfile: PerformanceProfile
 }
 
+struct VideoTimelineFFmpegProject {
+    let clips: [VideoTimelineClip]
+    let clipStartSeconds: [Double]
+    let cropRectNormalized: VideoCropRect
+    let renderSize: CGSize?
+    let audioProcessingConfig: VideoCuttingAudioProcessingConfig
+    let isAudioMuted: Bool
+    let outputURL: URL
+    let performanceProfile: VideoCuttingFFmpegProject.PerformanceProfile
+}
+
 struct FFmpegToolPaths {
     let ffmpegURL: URL
     let ffprobeURL: URL

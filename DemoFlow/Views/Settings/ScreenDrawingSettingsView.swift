@@ -195,6 +195,7 @@ struct ScreenDrawingSettingsView: View {
                 }
             }
             .pickerStyle(.segmented)
+
         }
     }
 

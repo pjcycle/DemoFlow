@@ -13,7 +13,7 @@ enum ScreenDrawShapeType: String, CaseIterable, Identifiable {
     case arrow
     case rectangle
     case ellipse
-    case cross
+    case text
     case check
 
     var id: String { rawValue }
@@ -28,8 +28,8 @@ enum ScreenDrawShapeType: String, CaseIterable, Identifiable {
             return .rectangle
         case .ellipse:
             return .ellipse
-        case .cross:
-            return .cross
+        case .text:
+            return .text
         case .check:
             return .check
         }
@@ -42,6 +42,8 @@ struct ScreenDrawShape: Identifiable {
     var startPoint: CGPoint
     var endPoint: CGPoint
     var points: [CGPoint]
+    var text: String?
+    var fontSize: CGFloat
     var colorPreset: DrawColorPreset
     var lineWidth: CGFloat
 
@@ -51,6 +53,8 @@ struct ScreenDrawShape: Identifiable {
         startPoint: CGPoint,
         endPoint: CGPoint,
         points: [CGPoint] = [],
+        text: String? = nil,
+        fontSize: CGFloat = 24,
         colorPreset: DrawColorPreset,
         lineWidth: CGFloat = 4
     ) {
@@ -59,6 +63,8 @@ struct ScreenDrawShape: Identifiable {
         self.startPoint = startPoint
         self.endPoint = endPoint
         self.points = points
+        self.text = text
+        self.fontSize = fontSize
         self.colorPreset = colorPreset
         self.lineWidth = lineWidth
     }

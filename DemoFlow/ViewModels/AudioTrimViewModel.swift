@@ -316,12 +316,7 @@ final class AudioTrimViewModel: ObservableObject {
     }
 
     private func nextTrimmedBaseName() -> String {
-        let trimmed = draft.exportFileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let seed = trimmed.isEmpty ? (draft.selectedPreparedAsset?.displayName ?? "trimmed_audio") : trimmed
-        if seed.hasSuffix("_trimmed") {
-            return seed
-        }
-        return "\(seed)_trimmed"
+        DemoFlowExportFileNamer.fileStem(prefix: "t")
     }
 
     private func loadAudio(
@@ -347,7 +342,7 @@ final class AudioTrimViewModel: ObservableObject {
         draft.playheadTime = 0
         draft.preferredOutputFormat = outputFormat
         draft.originalFormatHint = preparedAsset.sourceFormatHint
-        draft.exportFileName = defaultExportName ?? "\(preparedAsset.displayName)_trimmed"
+        draft.exportFileName = defaultExportName ?? DemoFlowExportFileNamer.fileStem(prefix: "t")
         exportSucceeded = false
         previewStatus = .idle
         previewAnchor = 0

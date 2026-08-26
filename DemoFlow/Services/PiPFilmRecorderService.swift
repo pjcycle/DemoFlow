@@ -142,27 +142,12 @@ final class PiPFilmRecorderService: ObservableObject {
     }
 
     private func makeFinalOutputURL(in outputDirectory: URL) throws -> URL {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let timestamp = formatter.string(from: Date())
-
-        let baseName = "pip_\(timestamp)"
-        let initial = outputDirectory.appendingPathComponent("\(baseName).mp4")
-        if !fileManager.fileExists(atPath: initial.path) {
-            return initial
-        }
-
-        var index = 1
-        while index < 999 {
-            let candidate = outputDirectory.appendingPathComponent("\(baseName)_\(index).mp4")
-            if !fileManager.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-            index += 1
-        }
-
-        throw PiPFilmRecorderServiceError.fileNameExhausted
+        DemoFlowExportFileNamer.availableOutputURL(
+            in: outputDirectory,
+            prefix: "p",
+            fileExtension: "mp4",
+            fileManager: fileManager
+        )
     }
 
     private func validateOutput(_ outputURL: URL) throws {

@@ -16,6 +16,7 @@ final class ScreenDrawSessionStore: ObservableObject {
     @Published var selectedColorPreset: DrawColorPreset = .one
     @Published var handDrawnIntensity: CGFloat = 0.58
     @Published var markStyle: ScreenDrawMarkStyle = .rounded
+    @Published private(set) var isShapeMoveModeEnabled = false
     @Published var dismissalAnimationMode: DrawDismissalAnimationMode = .random
     @Published var dismissalAnimationFixedStyle: DrawDismissalAnimationStyle = .shatterDrop
     @Published private(set) var isDismissingWithAnimation = false
@@ -23,6 +24,7 @@ final class ScreenDrawSessionStore: ObservableObject {
     @Published private(set) var dismissalAnimationStartedAt: CFTimeInterval = 0
     @Published private(set) var shapes: [ScreenDrawShape] = []
     @Published private(set) var previewShape: ScreenDrawShape?
+    @Published private(set) var selectedShapeID: UUID?
 
     var onSessionEvent: ((String) -> Void)?
 
@@ -30,10 +32,12 @@ final class ScreenDrawSessionStore: ObservableObject {
     private let moveHitTolerance: CGFloat = 12
     private var lastDismissalStyle: DrawDismissalAnimationStyle?
     private var shapeDragState: ShapeDragState?
+    private var shapeMovePointerState: ShapeMovePointerState?
 
     func beginInteraction(at point: CGPoint) {
         guard !isDismissingWithAnimation else { return }
         shapeDragState = nil
+        guard activeTool != .text else { return }
         guard let shapeType = shapeType(for: activeTool) else { return }
         previewShape = ScreenDrawShape(
             type: shapeType,
@@ -81,6 +85,29 @@ final class ScreenDrawSessionStore: ObservableObject {
         previewShape = nil
     }
 
+    func addTextAnnotation(_ value: String, at point: CGPoint, fontSize: CGFloat = 24) {
+        guard !isDismissingWithAnimation else { return }
+        let text = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            onSessionEvent?(L10n.tr("draw.text.empty"))
+            return
+        }
+
+        let size = textSize(for: text, fontSize: fontSize)
+        let shape = ScreenDrawShape(
+            type: .text,
+            startPoint: point,
+            endPoint: CGPoint(x: point.x + size.width, y: point.y + size.height),
+            text: text,
+            fontSize: fontSize,
+            colorPreset: selectedColorPreset,
+            lineWidth: defaultLineWidth
+        )
+        shapes.append(shape)
+        onSessionEvent?(L10n.f("fmt.draw.text_added", text))
+    }
+
     func clearCanvas() {
         guard !isDismissingWithAnimation else { return }
         if shapes.isEmpty {
@@ -88,6 +115,8 @@ final class ScreenDrawSessionStore: ObservableObject {
             return
         }
         shapeDragState = nil
+        shapeMovePointerState = nil
+        selectedShapeID = nil
         shapes.removeAll(keepingCapacity: false)
         previewShape = nil
         onSessionEvent?(L10n.tr("legacy.key_181"))
@@ -95,14 +124,19 @@ final class ScreenDrawSessionStore: ObservableObject {
 
     func clearCanvasSilently() {
         shapeDragState = nil
+        shapeMovePointerState = nil
+        selectedShapeID = nil
         shapes.removeAll(keepingCapacity: false)
         previewShape = nil
     }
 
     func resetForNewSession() {
         shapeDragState = nil
+        shapeMovePointerState = nil
+        selectedShapeID = nil
         shapes.removeAll(keepingCapacity: false)
         previewShape = nil
+        isShapeMoveModeEnabled = false
         isDismissingWithAnimation = false
         activeDismissalStyle = nil
         dismissalAnimationStartedAt = 0
@@ -112,18 +146,47 @@ final class ScreenDrawSessionStore: ObservableObject {
         previewShape = nil
     }
 
-    @discardableResult
-    func beginShapeDragIfNeeded(at point: CGPoint) -> Bool {
-        guard !isDismissingWithAnimation else { return false }
-        guard previewShape == nil else { return false }
-        guard let shapeID = hitTestShapeID(at: point) else { return false }
-
-        bringShapeToFront(id: shapeID)
-        shapeDragState = ShapeDragState(shapeID: shapeID, lastPoint: point)
-        return true
+    func toggleShapeMoveMode() {
+        cancelActivePointerInteraction()
+        isShapeMoveModeEnabled.toggle()
+        if !isShapeMoveModeEnabled {
+            selectedShapeID = nil
+        }
+        onSessionEvent?(
+            L10n.tr(
+                isShapeMoveModeEnabled
+                    ? "draw.move.mode_enabled"
+                    : "draw.move.mode_disabled"
+            )
+        )
     }
 
-    func continueShapeDrag(to point: CGPoint) {
+    func beginShapeMoveInteraction(at point: CGPoint) {
+        guard !isDismissingWithAnimation else { return }
+        guard isShapeMoveModeEnabled else { return }
+        guard previewShape == nil else { return }
+        shapeDragState = nil
+        shapeMovePointerState = ShapeMovePointerState(
+            startPoint: point,
+            hitShapeIDs: hitTestShapeIDs(at: point)
+        )
+    }
+
+    func continueShapeMoveInteraction(to point: CGPoint) {
+        guard let pointerState = shapeMovePointerState else { return }
+        if shapeDragState == nil {
+            let distance = hypot(
+                point.x - pointerState.startPoint.x,
+                point.y - pointerState.startPoint.y
+            )
+            guard distance >= 2 else { return }
+            guard let selectedShapeID,
+                  pointerState.hitShapeIDs.contains(selectedShapeID) else {
+                return
+            }
+            shapeDragState = ShapeDragState(shapeID: selectedShapeID, lastPoint: pointerState.startPoint)
+        }
+
         guard var dragState = shapeDragState else { return }
         let delta = CGPoint(
             x: point.x - dragState.lastPoint.x,
@@ -136,13 +199,22 @@ final class ScreenDrawSessionStore: ObservableObject {
         shapeDragState = dragState
     }
 
-    func endShapeDrag(at point: CGPoint) {
-        guard shapeDragState != nil else { return }
-        continueShapeDrag(to: point)
-        let hasMoved = shapeDragState?.hasMoved == true
+    func endShapeMoveInteraction(at point: CGPoint) {
+        guard let pointerState = shapeMovePointerState else { return }
+        continueShapeMoveInteraction(to: point)
+
+        let dragState = shapeDragState
+        let hasMoved = dragState?.hasMoved == true
         shapeDragState = nil
+        shapeMovePointerState = nil
         if hasMoved {
+            if let shapeID = dragState?.shapeID {
+                bringShapeToFront(id: shapeID)
+                selectedShapeID = shapeID
+            }
             onSessionEvent?(L10n.tr("draw.move.finished"))
+        } else {
+            selectNextShape(from: pointerState.hitShapeIDs)
         }
     }
 
@@ -150,6 +222,7 @@ final class ScreenDrawSessionStore: ObservableObject {
         previewShape = nil
         let hasMoved = shapeDragState?.hasMoved == true
         shapeDragState = nil
+        shapeMovePointerState = nil
         if hasMoved {
             onSessionEvent?(L10n.tr("draw.move.finished"))
         }
@@ -170,16 +243,15 @@ final class ScreenDrawSessionStore: ObservableObject {
             return
         }
 
-        _ = shapes.removeLast()
+        let removedShape = shapes.removeLast()
+        if selectedShapeID == removedShape.id {
+            selectedShapeID = nil
+        }
         onSessionEvent?(L10n.tr("draw.undo.shape_removed"))
     }
 
     var hasDrawableContent: Bool {
         !shapes.isEmpty || previewShape != nil
-    }
-
-    var isDraggingExistingShape: Bool {
-        shapeDragState != nil
     }
 
     func beginDismissalAnimation() -> DrawDismissalAnimationStyle? {
@@ -191,6 +263,8 @@ final class ScreenDrawSessionStore: ObservableObject {
         activeDismissalStyle = style
         dismissalAnimationStartedAt = CACurrentMediaTime()
         shapeDragState = nil
+        shapeMovePointerState = nil
+        selectedShapeID = nil
         previewShape = nil
         return style
     }
@@ -215,8 +289,8 @@ final class ScreenDrawSessionStore: ObservableObject {
             return .rectangle
         case .ellipse:
             return .ellipse
-        case .cross:
-            return .cross
+        case .text:
+            return nil
         case .check:
             return .check
         }
@@ -255,13 +329,24 @@ final class ScreenDrawSessionStore: ObservableObject {
         return total
     }
 
-    private func hitTestShapeID(at point: CGPoint) -> UUID? {
-        for shape in shapes.reversed() {
-            if hitTest(shape, at: point) {
-                return shape.id
-            }
+    private func hitTestShapeIDs(at point: CGPoint) -> [UUID] {
+        shapes.reversed().compactMap { shape in
+            hitTest(shape, at: point) ? shape.id : nil
         }
-        return nil
+    }
+
+    private func selectNextShape(from hitShapeIDs: [UUID]) {
+        guard !hitShapeIDs.isEmpty else {
+            selectedShapeID = nil
+            return
+        }
+
+        guard let selectedShapeID,
+              let selectedIndex = hitShapeIDs.firstIndex(of: selectedShapeID) else {
+            self.selectedShapeID = hitShapeIDs[0]
+            return
+        }
+        self.selectedShapeID = hitShapeIDs[(selectedIndex + 1) % hitShapeIDs.count]
     }
 
     private func hitTest(_ shape: ScreenDrawShape, at point: CGPoint) -> Bool {
@@ -273,7 +358,7 @@ final class ScreenDrawSessionStore: ObservableObject {
                 return true
             }
             return expandedBounds(for: shape, tolerance: tolerance).contains(point)
-        case .rectangle, .ellipse, .cross, .check:
+        case .rectangle, .ellipse, .text, .check:
             return expandedBounds(for: shape, tolerance: tolerance).contains(point)
         }
     }
@@ -341,7 +426,7 @@ final class ScreenDrawSessionStore: ObservableObject {
                 width: max(1, maxX - minX),
                 height: max(1, maxY - minY)
             )
-        case .rectangle, .ellipse, .cross, .check:
+        case .rectangle, .ellipse, .text, .check:
             return CGRect(
                 x: min(shape.startPoint.x, shape.endPoint.x),
                 y: min(shape.startPoint.y, shape.endPoint.y),
@@ -356,6 +441,24 @@ final class ScreenDrawSessionStore: ObservableObject {
         guard index != shapes.count - 1 else { return }
         let shape = shapes.remove(at: index)
         shapes.append(shape)
+    }
+
+    private func textSize(for text: String, fontSize: CGFloat) -> CGSize {
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        let maximumWidth: CGFloat = 360
+        let longestLineWidth = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+            .max() ?? 0
+        let width = min(maximumWidth, max(1, ceil(longestLineWidth)))
+        let rect = (text as NSString).boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font, .paragraphStyle: paragraphStyle]
+        )
+        return CGSize(width: ceil(rect.width), height: ceil(rect.height))
     }
 
     private func moveShape(id: UUID, by delta: CGPoint) {
@@ -392,4 +495,9 @@ private struct ShapeDragState {
     let shapeID: UUID
     var lastPoint: CGPoint
     var hasMoved = false
+}
+
+private struct ShapeMovePointerState {
+    let startPoint: CGPoint
+    let hitShapeIDs: [UUID]
 }

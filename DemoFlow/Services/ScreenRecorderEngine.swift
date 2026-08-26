@@ -559,7 +559,11 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             guard let recordingsDirectory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
                 throw RecorderError.outputDirectoryNotConfigured
             }
-            screenRawURL = recordingsDirectory.appendingPathComponent("DemoFlow-\(timestamp).mp4")
+            screenRawURL = DemoFlowExportFileNamer.availableOutputURL(
+                in: recordingsDirectory,
+                prefix: "r",
+                fileExtension: "mp4"
+            )
         } else {
             screenRawURL = temporaryFolder.appendingPathComponent("screen-\(timestamp).mp4")
         }
@@ -576,9 +580,11 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         guard let folder = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
             throw RecorderError.outputDirectoryNotConfigured
         }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return folder.appendingPathComponent("DemoFlow-\(formatter.string(from: Date())).mp4")
+        return DemoFlowExportFileNamer.availableOutputURL(
+            in: folder,
+            prefix: "r",
+            fileExtension: "mp4"
+        )
     }
 
     private func makePausedSegmentURL() throws -> URL {

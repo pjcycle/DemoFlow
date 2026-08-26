@@ -453,7 +453,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             return
         }
         guard let outputURL = workspace.pickAudioOutputURL(
-            suggestedName: "Mixdown.m4a",
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "b", fileExtension: "m4a"),
             contentType: .mpeg4Audio
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
@@ -478,7 +478,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             return
         }
         guard let outputURL = workspace.pickVideoOutputURL(
-            suggestedName: "\(sourceURL.deletingPathExtension().lastPathComponent)-配音.mp4"
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "b", fileExtension: "mp4")
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
             return

@@ -121,10 +121,12 @@ final class VideoConvertViewModel: NSObject, ObservableObject {
 
         do {
             let outputDirectory = try DemoFlowOutputDirectoryPolicy.prepareVideoCutsDirectory()
-            let timestamp = Self.timestampFormatter.string(from: Date())
-            let baseName = sourceURL.deletingPathExtension().lastPathComponent
-            let fileName = "\(baseName)-converted-\(timestamp).\(selectedFormat.fileExtension)"
-            let finalURL = outputDirectory.appendingPathComponent(fileName)
+            let finalURL = DemoFlowExportFileNamer.availableOutputURL(
+                in: outputDirectory,
+                prefix: "f",
+                fileExtension: selectedFormat.fileExtension
+            )
+            let fileName = finalURL.lastPathComponent
             let temporaryURL = outputDirectory.appendingPathComponent(
                 ".\(fileName).partial-\(UUID().uuidString)"
             )
@@ -140,6 +142,15 @@ final class VideoConvertViewModel: NSObject, ObservableObject {
 
             let format = selectedFormat
             let quality = selectedQuality
+#if DEBUG
+            let onLog: (String) -> Void = { [weak self] line in
+                Task { @MainActor [weak self] in
+                    self?.statusMessage = line
+                }
+            }
+#else
+            let onLog: (String) -> Void = { _ in }
+#endif
             activeTask = Task { [weak self] in
                 guard let self else { return }
                 defer {
@@ -158,11 +169,7 @@ final class VideoConvertViewModel: NSObject, ObservableObject {
                                 self?.progress = value
                             }
                         },
-                        onLog: { [weak self] line in
-                            Task { @MainActor [weak self] in
-                                self?.statusMessage = line
-                            }
-                        }
+                        onLog: onLog
                     )
                     guard !Task.isCancelled else { throw VideoConversionError.cancelled }
                     try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
@@ -461,10 +468,4 @@ final class VideoConvertViewModel: NSObject, ObservableObject {
         }
     }
 
-    private static let timestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter
-    }()
 }

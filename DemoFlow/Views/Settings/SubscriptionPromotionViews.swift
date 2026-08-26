@@ -114,30 +114,31 @@ struct SubscriptionWindowView: View {
 
                     membershipStatusChip
 
-                    membershipValidityChip
+                    if let validity = subscriptionViewModel.membershipValidityText {
+                        Text(validity)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(SubscriptionPalette.inkPrimary)
+                    }
 
                     #if DEBUG
                     if !subscriptionViewModel.isProUnlocked,
                        subscriptionViewModel.isDebugSubscriptionTrialAvailable {
                         Button {
-                            subscriptionViewModel.activateDebugSubscriptionTrial()
+                            subscriptionViewModel.activateFixed100DayTrial()
                             onClose()
                         } label: {
-                            Label(
-                                L10n.tr("subscription.debug.mark_member"),
-                                systemImage: "checkmark.seal.fill"
-                            )
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(SubscriptionPalette.headerEnd)
-                            )
+                            Text(L10n.tr("subscription.debug.fixed_100_day"))
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(SubscriptionPalette.headerEnd)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
                         }
                         .buttonStyle(.plain)
-                        .help(L10n.tr("subscription.debug.mark_member_help"))
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(SubscriptionPalette.headerEnd.opacity(0.14))
+                        )
+                        .help(L10n.tr("subscription.debug.fixed_100_day"))
                         .disabled(subscriptionViewModel.isPurchasing)
                     }
 
@@ -214,6 +215,27 @@ struct SubscriptionWindowView: View {
             HStack(alignment: .center, spacing: 8) {
                 if !subscriptionViewModel.isProUnlocked {
                     statusPill(subscriptionViewModel.statusMessage ?? L10n.tr("subscription.status.loading"))
+
+                    if subscriptionViewModel.shouldOfferProductReload {
+                        Button(L10n.tr("subscription.paywall.reload")) {
+                            Task { @MainActor in
+                                await subscriptionViewModel.reloadProducts()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(SubscriptionPalette.headerEnd)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(0.78))
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.6), lineWidth: 1)
+                        )
+                    }
                 }
             }
 
@@ -311,25 +333,17 @@ struct SubscriptionWindowView: View {
                 #if DEBUG
                 if !subscriptionViewModel.isProUnlocked,
                    subscriptionViewModel.isDebugSubscriptionTrialAvailable {
-                    Button(L10n.tr("subscription.debug.skip")) {
-                        subscriptionViewModel.activateDebugSubscriptionTrial()
-                        onClose()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(SubscriptionPalette.inkPrimary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(SubscriptionPalette.secondaryButtonFill)
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
-                    )
-                    .disabled(subscriptionViewModel.isPurchasing)
-                    .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
+                    Text(subscriptionViewModel.debugTrialDaysLabel)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(SubscriptionPalette.inkPrimary)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            subscriptionViewModel.activateDebugSubscriptionTrial()
+                            onClose()
+                        }
+                        .help(L10n.tr("subscription.debug.skip_help"))
+                        .disabled(subscriptionViewModel.isPurchasing)
+                        .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
                 }
                 #endif
 
@@ -365,25 +379,6 @@ struct SubscriptionWindowView: View {
                 .background(
                     Capsule(style: .continuous)
                         .fill(SubscriptionPalette.headerEnd.opacity(0.14))
-                )
-        }
-    }
-
-    @ViewBuilder
-    private var membershipValidityChip: some View {
-        if let validityText = subscriptionViewModel.membershipValidityText {
-            Text(validityText)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(SubscriptionPalette.inkPrimary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(SubscriptionPalette.secondaryButtonFill)
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
                 )
         }
     }

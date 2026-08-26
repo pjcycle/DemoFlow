@@ -14,6 +14,19 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class VideoCuttingViewModel: ObservableObject {
+    private struct TimelineEditSnapshot {
+        let clips: [VideoTimelineClip]
+        let clipStarts: [UUID: Double]
+        let clipThumbnails: [UUID: [VideoTimelineThumbnail]]
+        let playbackPosition: Double
+        let isPlaying: Bool
+        let activeDeleteRange: CutRange?
+        let keepStartText: String
+        let keepEndText: String
+        let timelineDurationOverride: Double?
+        let selectedTimelineClipID: UUID?
+    }
+
     @Published var sourceURL: URL?
     @Published var sourceDuration: Double = 0
     @Published var keepStartText: String = "0"
@@ -35,6 +48,7 @@ final class VideoCuttingViewModel: ObservableObject {
     @Published private(set) var sourceVideoAspect: Double = 16.0 / 9.0
     @Published var cropRectNormalized: VideoCropRect = .full
     @Published var isApplyingCrop = false
+    @Published var isApplyingTimelineReload = false
     @Published var isNoiseReductionEnabled = false
     @Published var noiseReductionPercent: Double = 50
     @Published var selectedAudioEQPreset: VideoCuttingAudioEQPreset = .balanced
@@ -45,6 +59,13 @@ final class VideoCuttingViewModel: ObservableObject {
     @Published private(set) var isUsingBuiltinComposeFallback = false
     @Published private(set) var ffmpegStatusMessage: String = ""
     @Published private(set) var timelineThumbnails: [VideoTimelineThumbnail] = []
+    @Published private(set) var timelineClips: [VideoTimelineClip] = []
+    @Published private(set) var timelineClipThumbnails: [UUID: [VideoTimelineThumbnail]] = [:]
+    @Published private(set) var timelineClipStartSeconds: [UUID: Double] = [:]
+    @Published private(set) var selectedTimelineClipID: UUID?
+    @Published private(set) var isPlaybackMuted = false
+    @Published private(set) var canUndoTimelineEdit = false
+    @Published private(set) var canRedoTimelineEdit = false
 
     private let trimEngine: TrimExportEngine
     private let composeExportEngine = VideoCuttingComposeExportEngine()
@@ -57,7 +78,13 @@ final class VideoCuttingViewModel: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var timeObserverToken: Any?
     private var timelineThumbnailGenerationID = UUID()
+    private var timelineClipThumbnailGenerationID = UUID()
+    private var timelinePreviewGenerationID = UUID()
+    private var timelineUndoStack: [TimelineEditSnapshot] = []
+    private var timelineRedoStack: [TimelineEditSnapshot] = []
     private var pendingReloadPlaybackPosition: Double?
+    private var originalTimelineSourceDuration: Double = 0
+    private var timelineDurationOverride: Double?
     private let defaultFPS: Double = 30
     private let minimumFrameDuration: Double = 1.0 / 120.0
     private let maximumFrameDuration: Double = 1.0
@@ -93,7 +120,7 @@ final class VideoCuttingViewModel: ObservableObject {
         sourceURL != nil && !isBusy && sourceDuration > 0 && isExportSizeInputValid
     }
 
-    var canDeleteActiveRangeAndReload: Bool {
+    var canDeleteActiveRange: Bool {
         guard sourceURL != nil, !isBusy, sourceDuration > 0, let activeDeleteRange else { return false }
         let normalized = normalizeDeleteRanges([activeDeleteRange])
         guard !normalized.isEmpty else { return false }
@@ -115,14 +142,26 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     var canExecuteCrop: Bool {
-        guard sourceURL != nil, !isBusy, sourceDuration > 0 else { return false }
+        guard sourceURL != nil, !isBusy, !hasTimelineEdits, sourceDuration > 0 else { return false }
         let crop = normalizedCropRect
         guard crop.width > 0, crop.height > 0 else { return false }
         return !isCropNoOp
     }
 
     var isBusy: Bool {
-        isExporting || isApplyingCrop || isPreparingFFmpeg
+        isExporting || isApplyingCrop || isApplyingTimelineReload || isPreparingFFmpeg
+    }
+
+    var canCompleteTimelineEdits: Bool {
+        sourceURL != nil && hasTimelineEdits && !isBusy && !timelineClips.isEmpty
+    }
+
+    var canDeleteSelectedTimelineClip: Bool {
+        guard !isBusy, timelineClips.count > 1,
+              let selectedTimelineClipID else {
+            return false
+        }
+        return timelineClips.contains { $0.id == selectedTimelineClipID }
     }
 
     var audioProcessingConfig: VideoCuttingAudioProcessingConfig {
@@ -135,6 +174,20 @@ final class VideoCuttingViewModel: ObservableObject {
 
     var hasSource: Bool {
         sourceURL != nil
+    }
+
+    var canSplitAtPlayhead: Bool {
+        guard !isBusy, timelineClips.count > 0 else { return false }
+        let epsilon = max(frameDurationSeconds, 0.02)
+        return playbackPosition > epsilon && playbackPosition < sourceDuration - epsilon
+    }
+
+    var hasTimelineEdits: Bool {
+        guard let sourceURL else { return false }
+        return timelineClips.count != 1 || timelineClips.first?.sourceURL != sourceURL ||
+            abs((timelineClips.first?.durationSeconds ?? 0) - originalTimelineSourceDuration) > 0.0005 ||
+            abs(sourceDuration - originalTimelineSourceDuration) > 0.0005 ||
+            abs(timelineStartSeconds(for: timelineClips.first) ?? 0) > 0.0005
     }
 
     var ffmpegPermissionStateText: String {
@@ -202,6 +255,8 @@ final class VideoCuttingViewModel: ObservableObject {
 
         sourceURL = nil
         sourceDuration = 0
+        originalTimelineSourceDuration = 0
+        timelineDurationOverride = nil
         keepStartText = "0"
         keepEndText = "10"
         activeDeleteRange = nil
@@ -220,6 +275,15 @@ final class VideoCuttingViewModel: ObservableObject {
         cropRectNormalized = .full
         timelineThumbnails = []
         timelineThumbnailGenerationID = UUID()
+        timelineClips = []
+        timelineClipThumbnails = [:]
+        timelineClipThumbnailGenerationID = UUID()
+        timelineClipStartSeconds = [:]
+        selectedTimelineClipID = nil
+        timelinePreviewGenerationID = UUID()
+        clearTimelineEditHistory()
+        isPlaybackMuted = false
+        player.isMuted = false
         isNoiseReductionEnabled = false
         noiseReductionPercent = 50
         selectedAudioEQPreset = .balanced
@@ -228,6 +292,193 @@ final class VideoCuttingViewModel: ObservableObject {
         player.pause()
         player.replaceCurrentItem(with: nil)
         statusMessage = L10n.tr("video.cut.source.removed")
+    }
+
+    func togglePlaybackMute() {
+        guard hasSource else { return }
+        isPlaybackMuted.toggle()
+        player.isMuted = isPlaybackMuted
+        statusMessage = L10n.tr(
+            isPlaybackMuted
+                ? "video.cut.timeline.preview_muted"
+                : "video.cut.timeline.preview_unmuted"
+        )
+    }
+
+    func undoTimelineEdit() {
+        guard !isBusy, let snapshot = timelineUndoStack.popLast() else { return }
+        timelineRedoStack.append(makeTimelineEditSnapshot())
+        restoreTimelineEditSnapshot(snapshot)
+        updateTimelineEditHistoryState()
+        statusMessage = L10n.tr("video.cut.timeline.undo_done")
+    }
+
+    func redoTimelineEdit() {
+        guard !isBusy, let snapshot = timelineRedoStack.popLast() else { return }
+        timelineUndoStack.append(makeTimelineEditSnapshot())
+        restoreTimelineEditSnapshot(snapshot)
+        updateTimelineEditHistoryState()
+        statusMessage = L10n.tr("video.cut.timeline.redo_done")
+    }
+
+    func selectTimelineClip(_ clipID: UUID?) {
+        guard let clipID else {
+            selectedTimelineClipID = nil
+            return
+        }
+        guard timelineClips.contains(where: { $0.id == clipID }) else { return }
+        selectedTimelineClipID = clipID
+    }
+
+    func splitTimelineAtPlayhead() {
+        guard canSplitAtPlayhead else {
+            statusMessage = L10n.tr("video.cut.timeline.split_unavailable")
+            return
+        }
+
+        let splitSeconds = snapToFrame(playbackPosition)
+        guard let location = timelineLocation(at: splitSeconds),
+              location.localSeconds > 0.0005,
+              location.localSeconds < location.clip.durationSeconds - 0.0005 else {
+            statusMessage = L10n.tr("video.cut.timeline.split_unavailable")
+            return
+        }
+
+        let historySnapshot = makeTimelineEditSnapshot()
+
+        let cutSourceSeconds = location.clip.sourceStartSeconds + location.localSeconds
+        guard let leading = location.clip.clipped(to: location.clip.sourceStartSeconds, cutSourceSeconds),
+              let trailing = location.clip.clipped(to: cutSourceSeconds, location.clip.sourceEndSeconds) else {
+            statusMessage = L10n.tr("video.cut.timeline.split_unavailable")
+            return
+        }
+
+        let sourceThumbnails = timelineClipThumbnails[location.clip.id] ?? timelineThumbnails
+        let timelineStart = timelineStartSeconds(for: location.clip) ?? max(0, splitSeconds - location.localSeconds)
+        timelineClipStartSeconds.removeValue(forKey: location.clip.id)
+        timelineClipStartSeconds[leading.id] = timelineStart
+        timelineClipStartSeconds[trailing.id] = splitSeconds
+        timelineClipThumbnails.removeValue(forKey: location.clip.id)
+        if !sourceThumbnails.isEmpty {
+            timelineClipThumbnails[leading.id] = cachedTimelineThumbnails(
+                sourceThumbnails,
+                for: leading
+            )
+            timelineClipThumbnails[trailing.id] = cachedTimelineThumbnails(
+                sourceThumbnails,
+                for: trailing
+            )
+        }
+        timelineClips.replaceSubrange(location.index...location.index, with: [leading, trailing])
+        refreshTimelineAfterEdit(keepingPlaybackPosition: splitSeconds, rebuildPreview: false)
+        registerTimelineEdit(before: historySnapshot)
+        statusMessage = L10n.tr("video.cut.timeline.split_done")
+    }
+
+    func insertVideoAtPlayheadByPanel() {
+        guard !isBusy else { return }
+        guard let selectedURL = importPanelService.pickSourceURL() else { return }
+        do {
+            let persisted = try importService.persistImportedVideo(from: selectedURL)
+            insertVideoIntoTimeline(from: persisted, at: playbackPosition)
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func moveTimelineClip(_ clipID: UUID, before destinationID: UUID) {
+        moveTimelineClip(clipID, around: destinationID, insertAfter: false)
+    }
+
+    func moveTimelineClip(_ clipID: UUID, around destinationID: UUID, insertAfter: Bool) {
+        guard clipID != destinationID,
+              let sourceIndex = timelineClips.firstIndex(where: { $0.id == clipID }),
+              let destinationIndex = timelineClips.firstIndex(where: { $0.id == destinationID }) else {
+            return
+        }
+
+        let historySnapshot = makeTimelineEditSnapshot()
+        let clip = timelineClips.remove(at: sourceIndex)
+        var adjustedDestination = sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex
+        if insertAfter {
+            adjustedDestination += 1
+        }
+        timelineClips.insert(clip, at: max(0, min(adjustedDestination, timelineClips.count)))
+        reflowTimelineClipStarts()
+        refreshTimelineAfterEdit(keepingPlaybackPosition: playbackPosition, rebuildPreview: false)
+        registerTimelineEdit(before: historySnapshot)
+        statusMessage = L10n.tr("video.cut.timeline.reordered")
+    }
+
+    func moveTimelineClipToEnd(_ clipID: UUID, recordHistory: Bool = true) {
+        guard let sourceIndex = timelineClips.firstIndex(where: { $0.id == clipID }),
+              sourceIndex < timelineClips.count - 1 else {
+            return
+        }
+
+        let historySnapshot = recordHistory ? makeTimelineEditSnapshot() : nil
+        let clip = timelineClips.remove(at: sourceIndex)
+        timelineClipStartSeconds[clip.id] = sourceDuration
+        timelineClips.append(clip)
+        refreshTimelineAfterEdit(keepingPlaybackPosition: playbackPosition, rebuildPreview: false)
+        if let historySnapshot {
+            registerTimelineEdit(before: historySnapshot)
+        }
+        statusMessage = L10n.tr("video.cut.timeline.reordered")
+    }
+
+    /// Commits a direct horizontal drag from the visible clip strip. A drop in
+    /// an empty interval preserves that interval; a drop over another clip is
+    /// treated as a reorder so the composition never contains overlapping clips.
+    func finishTimelineClipDrag(_ clipID: UUID, desiredStartSeconds: Double) {
+        guard !isBusy,
+              timelineClips.count > 1,
+              let clip = timelineClips.first(where: { $0.id == clipID }) else {
+            return
+        }
+
+        let historySnapshot = makeTimelineEditSnapshot()
+        let duration = clip.durationSeconds
+        let timelineDuration = max(sourceDuration, duration)
+        let requestedStart = max(0, desiredStartSeconds)
+        if requestedStart >= timelineDuration - max(frameDurationSeconds, 0.05) ||
+            requestedStart + duration > timelineDuration {
+            moveTimelineClipToEnd(clipID, recordHistory: false)
+            registerTimelineEdit(before: historySnapshot)
+            return
+        }
+
+        let snappedStart = snapTimelineStart(requestedStart, duration: duration)
+        let otherClips = timelineClips.filter { $0.id != clipID }
+        let overlapsOtherClip = otherClips.contains { otherClip in
+            let otherStart = timelineStartSeconds(for: otherClip) ?? 0
+            let otherEnd = otherStart + otherClip.durationSeconds
+            return snappedStart < otherEnd - 0.0005 &&
+                snappedStart + duration > otherStart + 0.0005
+        }
+
+        if overlapsOtherClip {
+            let desiredCenter = snappedStart + duration / 2
+            let orderedOthers = otherClips.sorted {
+                (timelineStartSeconds(for: $0) ?? 0) < (timelineStartSeconds(for: $1) ?? 0)
+            }
+            let insertionIndex = orderedOthers.firstIndex { otherClip in
+                let otherStart = timelineStartSeconds(for: otherClip) ?? 0
+                return desiredCenter < otherStart + otherClip.durationSeconds / 2
+            } ?? orderedOthers.count
+            timelineClips = orderedOthers
+            timelineClips.insert(clip, at: insertionIndex)
+            reflowTimelineClipStarts()
+        } else {
+            timelineClipStartSeconds[clipID] = snappedStart
+            timelineClips.sort {
+                (timelineStartSeconds(for: $0) ?? 0) < (timelineStartSeconds(for: $1) ?? 0)
+            }
+        }
+
+        refreshTimelineAfterEdit(keepingPlaybackPosition: playbackPosition, rebuildPreview: false)
+        registerTimelineEdit(before: historySnapshot)
+        statusMessage = L10n.tr("video.cut.timeline.reordered")
     }
 
     func requestFFmpegPermissionFromMenu() {
@@ -388,65 +639,86 @@ final class VideoCuttingViewModel: ObservableObject {
         }
     }
 
-    func deleteActiveRangeAndReload() {
-        guard let sourceURL else {
+    func deleteActiveRange() {
+        guard sourceURL != nil else {
             statusMessage = L10n.tr("legacy.key_26")
             return
         }
-        guard let activeDeleteRange else {
+        guard let activeRange = activeDeleteRange else {
             statusMessage = L10n.tr("legacy.key_27")
             return
         }
 
-        let normalized = normalizeDeleteRanges([activeDeleteRange])
-        guard let activeRange = normalized.first else {
+        let normalized = normalizeDeleteRanges([activeRange])
+        guard let normalizedRange = normalized.first else {
             statusMessage = L10n.tr("legacy.key_28")
             return
         }
 
-        let sourceDuration = makeDurationTime()
-        let keepRanges = trimEngine.keepRanges(from: [activeRange], sourceDuration: sourceDuration)
-        guard !keepRanges.isEmpty else {
+        let historySnapshot = makeTimelineEditSnapshot()
+        let timelineDurationBeforeDelete = sourceDuration
+        let (remainingClips, remainingStarts) = removingTimelineRange(
+            start: normalizedRange.start.seconds,
+            end: normalizedRange.end.seconds
+        )
+        guard !remainingClips.isEmpty else {
             statusMessage = L10n.tr("legacy.key_29")
             return
         }
 
-        let outputURL: URL
-        do {
-            outputURL = try makeInlineTrimOutputURL(for: sourceURL, suffix: "cut")
-        } catch {
-            statusMessage = L10n.tr("legacy.key_25")
+        let preferredPosition = min(
+            preferredTimelinePositionAfterDeleting(range: normalizedRange),
+            timelineDurationBeforeDelete
+        )
+        let previousClips = timelineClips
+        let previousThumbnails = timelineClipThumbnails
+        let nextThumbnails = cachedThumbnails(
+            for: remainingClips,
+            previousClips: previousClips,
+            previousThumbnails: previousThumbnails
+        )
+        timelineClips = remainingClips
+        timelineClipStartSeconds = remainingStarts
+        timelineClipThumbnails = nextThumbnails
+        timelineDurationOverride = timelineDurationBeforeDelete
+        activeDeleteRange = nil
+        refreshTimelineAfterEdit(
+            keepingPlaybackPosition: preferredPosition,
+            rebuildPreview: false,
+            loadMissingThumbnails: false
+        )
+        registerTimelineEdit(before: historySnapshot)
+        statusMessage = L10n.tr("video.cut.timeline.delete_done")
+    }
+
+    func deleteTimelineClip(_ clipID: UUID) {
+        guard !isBusy else { return }
+        guard timelineClips.count > 1 else {
+            statusMessage = L10n.tr("video.cut.timeline.delete_last_unavailable")
             return
         }
+        guard timelineClips.contains(where: { $0.id == clipID }) else { return }
 
-        isExporting = true
-        statusMessage = L10n.tr("legacy.key_170")
-        Task {
-            defer { isExporting = false }
-            do {
-                let expectedOutputDuration = keepRanges.reduce(0) { partial, range in
-                    partial + max(0, range.duration.seconds)
-                }
-                pendingReloadPlaybackPosition = preferredReloadPlaybackPositionAfterDeleting(
-                    deletedRange: activeRange,
-                    expectedOutputDuration: expectedOutputDuration
-                )
-                let exported = try await runFFmpegExport(
-                    sourceURL: sourceURL,
-                    keepRanges: keepRanges,
-                    cropRectNormalized: .full,
-                    outputURL: outputURL,
-                    applyAudioProcessing: false,
-                    performanceProfile: .balanced
-                )
-                loadVideo(url: exported)
-                cleanupInlineEditArtifacts(previousSourceURL: sourceURL, keeping: exported)
-                statusMessage = L10n.f("fmt.video.delete_selected_reloaded", exported.lastPathComponent)
-            } catch {
-                pendingReloadPlaybackPosition = nil
-                statusMessage = L10n.f("fmt.video.delete_failed", error.localizedDescription)
-            }
+        let historySnapshot = makeTimelineEditSnapshot()
+        timelineDurationOverride = max(sourceDuration, timelineDurationOverride ?? 0)
+        timelineClips.removeAll { $0.id == clipID }
+        timelineClipThumbnails.removeValue(forKey: clipID)
+        timelineClipStartSeconds.removeValue(forKey: clipID)
+        if selectedTimelineClipID == clipID {
+            selectedTimelineClipID = nil
         }
+        refreshTimelineAfterEdit(
+            keepingPlaybackPosition: playbackPosition,
+            rebuildPreview: false,
+            loadMissingThumbnails: false
+        )
+        registerTimelineEdit(before: historySnapshot)
+        statusMessage = L10n.tr("video.cut.timeline.clip_deleted")
+    }
+
+    func deleteSelectedTimelineClip() {
+        guard let selectedTimelineClipID else { return }
+        deleteTimelineClip(selectedTimelineClipID)
     }
 
     func activeDeleteRangeStartSeconds() -> Double? {
@@ -459,18 +731,305 @@ final class VideoCuttingViewModel: ObservableObject {
         return clampedSeconds(activeDeleteRange.normalized.end.seconds)
     }
 
-    private func preferredReloadPlaybackPositionAfterDeleting(
-        deletedRange: CutRange,
-        expectedOutputDuration: Double
-    ) -> Double {
+    private func preferredTimelinePositionAfterDeleting(range: CutRange) -> Double {
         let frame = max(normalizedFrameDuration, 1.0 / 60.0)
-        let clippedDuration = max(0, expectedOutputDuration)
+        let clippedDuration = max(0, sourceDuration - range.durationSeconds)
         guard clippedDuration > frame else { return 0 }
 
-        if deletedRange.start.seconds > frame {
-            return min(deletedRange.start.seconds - frame, clippedDuration - frame)
+        if range.start.seconds > frame {
+            return min(range.start.seconds - frame, clippedDuration - frame)
         }
         return min(frame, clippedDuration - frame)
+    }
+
+    private func insertVideoIntoTimeline(from url: URL, at timelinePosition: Double) {
+        Task {
+            do {
+                let asset = AVAssetAsyncLoaders.makeURLAsset(url)
+                guard try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .video) != nil else {
+                    statusMessage = L10n.tr("video.cut.timeline.insert_missing_video")
+                    return
+                }
+                let duration = max(0, try await AVAssetAsyncLoaders.duration(of: asset).seconds)
+                guard duration > 0 else {
+                    statusMessage = L10n.tr("video.cut.timeline.insert_invalid")
+                    return
+                }
+                let hasAudio = (try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .audio)) != nil
+                let inserted = VideoTimelineClip(
+                    sourceURL: url,
+                    sourceStartSeconds: 0,
+                    sourceEndSeconds: duration,
+                    hasAudioTrack: hasAudio
+                )
+                let historySnapshot = makeTimelineEditSnapshot()
+                insertTimelineClip(inserted, at: timelinePosition)
+                refreshTimelineAfterEdit(keepingPlaybackPosition: timelinePosition)
+                registerTimelineEdit(before: historySnapshot)
+                statusMessage = L10n.f("video.cut.timeline.inserted", url.lastPathComponent)
+            } catch {
+                statusMessage = L10n.f("video.cut.timeline.insert_failed", error.localizedDescription)
+            }
+        }
+    }
+
+    private func insertTimelineClip(_ insertedClip: VideoTimelineClip, at timelinePosition: Double) {
+        guard !timelineClips.isEmpty else {
+            timelineClips = [insertedClip]
+            timelineClipStartSeconds[insertedClip.id] = 0
+            return
+        }
+
+        let position = max(0, min(timelinePosition, sourceDuration))
+        if let location = timelineLocation(at: position),
+           let leading = location.clip.clipped(
+                to: location.clip.sourceStartSeconds,
+                location.clip.sourceStartSeconds + location.localSeconds
+           ),
+           let trailing = location.clip.clipped(
+                to: location.clip.sourceStartSeconds + location.localSeconds,
+                location.clip.sourceEndSeconds
+           ),
+           location.localSeconds > 0.0005,
+           location.localSeconds < location.clip.durationSeconds - 0.0005 {
+            let clipStart = timelineStartSeconds(for: location.clip) ?? position - location.localSeconds
+            timelineClipStartSeconds.removeValue(forKey: location.clip.id)
+            timelineClipStartSeconds[leading.id] = clipStart
+            timelineClipStartSeconds[insertedClip.id] = position
+            timelineClipStartSeconds[trailing.id] = position + insertedClip.durationSeconds
+            timelineClips.replaceSubrange(location.index...location.index, with: [leading, insertedClip, trailing])
+            return
+        }
+
+        let insertionIndex = timelineClips.firstIndex {
+            (timelineStartSeconds(for: $0) ?? 0) >= position
+        } ?? timelineClips.count
+        timelineClipStartSeconds[insertedClip.id] = position
+        timelineClips.insert(insertedClip, at: insertionIndex)
+    }
+
+    private func removingTimelineRange(
+        start: Double,
+        end: Double
+    ) -> (clips: [VideoTimelineClip], starts: [UUID: Double]) {
+        let lower = max(0, min(start, end))
+        let upper = min(sourceDuration, max(start, end))
+        guard upper - lower > 0.0005 else {
+            return (timelineClips, timelineClipStartSeconds)
+        }
+
+        var result: [VideoTimelineClip] = []
+        var nextStarts: [UUID: Double] = [:]
+        for clip in timelineClips {
+            let clipStart = timelineStartSeconds(for: clip) ?? 0
+            let clipEnd = clipStart + clip.durationSeconds
+            let overlaps = upper > clipStart && lower < clipEnd
+
+            if !overlaps {
+                result.append(clip)
+                nextStarts[clip.id] = clipStart
+                continue
+            }
+
+            if lower > clipStart,
+               let leading = clip.clipped(
+                    to: clip.sourceStartSeconds,
+                    clip.sourceStartSeconds + (lower - clipStart)
+               ) {
+                result.append(leading)
+                nextStarts[leading.id] = clipStart
+            }
+
+            if upper < clipEnd,
+               let trailing = clip.clipped(
+                    to: clip.sourceStartSeconds + (upper - clipStart),
+                    clip.sourceEndSeconds
+               ) {
+                result.append(trailing)
+                nextStarts[trailing.id] = upper
+            }
+        }
+        return (result, nextStarts)
+    }
+
+    func timelineStartSeconds(for clip: VideoTimelineClip?) -> Double? {
+        guard let clip else { return nil }
+        return timelineClipStartSeconds[clip.id]
+    }
+
+    private func reflowTimelineClipStarts() {
+        var cursor = 0.0
+        for clip in timelineClips {
+            timelineClipStartSeconds[clip.id] = cursor
+            cursor += clip.durationSeconds
+        }
+    }
+
+    private func snapTimelineStart(_ seconds: Double, duration: Double) -> Double {
+        let frame = normalizedFrameDuration
+        let snapped = frame > 0 ? (seconds / frame).rounded() * frame : seconds
+        return max(0, min(snapped, max(0, sourceDuration - duration)))
+    }
+
+    private func timelineLocation(at seconds: Double) -> (index: Int, clip: VideoTimelineClip, localSeconds: Double)? {
+        let position = max(0, min(seconds, sourceDuration))
+        for (index, clip) in timelineClips.enumerated() {
+            let start = timelineStartSeconds(for: clip) ?? 0
+            let end = start + clip.durationSeconds
+            if position >= start && (position < end || (index == timelineClips.indices.last && position <= end)) {
+                return (index, clip, max(0, min(position - start, clip.durationSeconds)))
+            }
+        }
+        return nil
+    }
+
+    private func makeTimelineEditSnapshot() -> TimelineEditSnapshot {
+        TimelineEditSnapshot(
+            clips: timelineClips,
+            clipStarts: timelineClipStartSeconds,
+            clipThumbnails: timelineClipThumbnails,
+            playbackPosition: playbackPosition,
+            isPlaying: isPlaying,
+            activeDeleteRange: activeDeleteRange,
+            keepStartText: keepStartText,
+            keepEndText: keepEndText,
+            timelineDurationOverride: timelineDurationOverride,
+            selectedTimelineClipID: selectedTimelineClipID
+        )
+    }
+
+    private func restoreTimelineEditSnapshot(_ snapshot: TimelineEditSnapshot) {
+        timelineClips = snapshot.clips
+        timelineClipStartSeconds = snapshot.clipStarts
+        timelineClipThumbnails = snapshot.clipThumbnails
+        selectedTimelineClipID = snapshot.selectedTimelineClipID
+        activeDeleteRange = snapshot.activeDeleteRange
+        timelineDurationOverride = snapshot.timelineDurationOverride
+        playbackPosition = snapshot.playbackPosition
+        isPlaying = snapshot.isPlaying
+        refreshTimelineAfterEdit(keepingPlaybackPosition: snapshot.playbackPosition)
+        keepStartText = snapshot.keepStartText
+        keepEndText = snapshot.keepEndText
+    }
+
+    private func registerTimelineEdit(before snapshot: TimelineEditSnapshot) {
+        guard timelineClips != snapshot.clips ||
+                timelineClipStartSeconds != snapshot.clipStarts ||
+                activeDeleteRange != snapshot.activeDeleteRange else {
+            return
+        }
+        timelineUndoStack.append(snapshot)
+        timelineRedoStack.removeAll()
+        updateTimelineEditHistoryState()
+    }
+
+    private func clearTimelineEditHistory() {
+        timelineUndoStack.removeAll()
+        timelineRedoStack.removeAll()
+        updateTimelineEditHistoryState()
+    }
+
+    private func updateTimelineEditHistoryState() {
+        canUndoTimelineEdit = !timelineUndoStack.isEmpty
+        canRedoTimelineEdit = !timelineRedoStack.isEmpty
+    }
+
+    private func refreshTimelineAfterEdit(
+        keepingPlaybackPosition: Double,
+        rebuildPreview: Bool = true,
+        loadMissingThumbnails: Bool = true
+    ) {
+        if let selectedTimelineClipID,
+           !timelineClips.contains(where: { $0.id == selectedTimelineClipID }) {
+            self.selectedTimelineClipID = nil
+        }
+        timelineClipStartSeconds = timelineClipStartSeconds.filter { key, _ in
+            timelineClips.contains(where: { $0.id == key })
+        }
+        let contentDuration = timelineClips.reduce(0) { partial, clip in
+            max(partial, (timelineStartSeconds(for: clip) ?? 0) + clip.durationSeconds)
+        }
+        sourceDuration = max(timelineDurationOverride ?? 0, contentDuration)
+        hasAudioTrack = timelineClips.contains(where: \.hasAudioTrack)
+        keepStartText = formatSecondsForInput(0)
+        keepEndText = formatSecondsForInput(sourceDuration)
+        timelineClipThumbnailGenerationID = UUID()
+        let generationID = timelineClipThumbnailGenerationID
+        let clips = timelineClips
+        timelineClipThumbnails = timelineClipThumbnails.filter { key, _ in
+            clips.contains(where: { $0.id == key })
+        }
+        if loadMissingThumbnails {
+            for clip in clips where timelineClipThumbnails[clip.id] == nil {
+                Task { [weak self] in
+                    await self?.loadTimelineClipThumbnails(for: clip, generationID: generationID)
+                }
+            }
+        }
+        if rebuildPreview {
+            rebuildTimelinePreview(keepingPlaybackPosition: keepingPlaybackPosition)
+        }
+    }
+
+    private func cachedThumbnails(
+        for clips: [VideoTimelineClip],
+        previousClips: [VideoTimelineClip],
+        previousThumbnails: [UUID: [VideoTimelineThumbnail]]
+    ) -> [UUID: [VideoTimelineThumbnail]] {
+        var result: [UUID: [VideoTimelineThumbnail]] = [:]
+
+        for clip in clips {
+            if let thumbnails = previousThumbnails[clip.id], !thumbnails.isEmpty {
+                result[clip.id] = thumbnails
+                continue
+            }
+
+            guard let previousClip = previousClips.first(where: {
+                $0.sourceURL == clip.sourceURL &&
+                clip.sourceStartSeconds >= $0.sourceStartSeconds - 0.0005 &&
+                clip.sourceEndSeconds <= $0.sourceEndSeconds + 0.0005
+            }) else {
+                continue
+            }
+            let sourceThumbnails = previousThumbnails[previousClip.id] ?? []
+            let clippedThumbnails = cachedTimelineThumbnails(sourceThumbnails, for: clip)
+            if !clippedThumbnails.isEmpty {
+                result[clip.id] = clippedThumbnails
+            }
+        }
+        return result
+    }
+
+    /// Reuses the already-rendered source frames when a clip is split. A very
+    /// short range may contain no sampled frame, so keep its nearest source
+    /// frame as a stable visual fallback instead of starting another decode.
+    private func cachedTimelineThumbnails(
+        _ thumbnails: [VideoTimelineThumbnail],
+        for clip: VideoTimelineClip
+    ) -> [VideoTimelineThumbnail] {
+        guard !thumbnails.isEmpty else { return [] }
+
+        let epsilon = max(frameDurationSeconds, 0.02)
+        let matching = thumbnails.filter { thumbnail in
+            thumbnail.seconds >= clip.sourceStartSeconds - epsilon &&
+                thumbnail.seconds <= clip.sourceEndSeconds + epsilon
+        }
+        if !matching.isEmpty {
+            return matching
+        }
+
+        guard let nearest = thumbnails.min(by: {
+            abs($0.seconds - (clip.sourceStartSeconds + clip.sourceEndSeconds) / 2) <
+                abs($1.seconds - (clip.sourceStartSeconds + clip.sourceEndSeconds) / 2)
+        }) else {
+            return []
+        }
+
+        let fallbackSeconds = min(
+            max(nearest.seconds, clip.sourceStartSeconds),
+            max(clip.sourceStartSeconds, clip.sourceEndSeconds - 0.001)
+        )
+        return [VideoTimelineThumbnail(seconds: fallbackSeconds, image: nearest.image)]
     }
 
     func exportTrimmedVideo() {
@@ -499,11 +1058,6 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
 
-        let keepRanges = trimEngine.keepRanges(from: [], sourceDuration: makeDurationTime())
-        guard !keepRanges.isEmpty else {
-            statusMessage = L10n.tr("legacy.key_153")
-            return
-        }
         let cropRectForExport = VideoCropRect(normalizedCropRect)
 
         isExporting = true
@@ -515,15 +1069,34 @@ final class VideoCuttingViewModel: ObservableObject {
         Task {
             defer { isExporting = false }
             do {
-                let exported = try await runFFmpegExport(
-                    sourceURL: sourceURL,
-                    keepRanges: keepRanges,
-                    cropRectNormalized: cropRectForExport,
-                    outputURL: outputURL,
-                    applyAudioProcessing: true,
-                    performanceProfile: .quality,
-                    targetRenderSize: targetRenderSize
-                )
+                let exported: URL
+                if hasTimelineEdits {
+                    guard !timelineClips.isEmpty else {
+                        throw VideoTimelinePreviewError.emptyTimeline
+                    }
+                    exported = try await runTimelineExport(
+                        clips: timelineClips,
+                        cropRectNormalized: cropRectForExport,
+                        outputURL: outputURL,
+                        applyAudioProcessing: true,
+                        performanceProfile: .quality,
+                        targetRenderSize: targetRenderSize
+                    )
+                } else {
+                    let keepRanges = trimEngine.keepRanges(from: [], sourceDuration: makeDurationTime())
+                    guard !keepRanges.isEmpty else {
+                        throw VideoTimelinePreviewError.emptyTimeline
+                    }
+                    exported = try await runFFmpegExport(
+                        sourceURL: sourceURL,
+                        keepRanges: keepRanges,
+                        cropRectNormalized: cropRectForExport,
+                        outputURL: outputURL,
+                        applyAudioProcessing: true,
+                        performanceProfile: .quality,
+                        targetRenderSize: targetRenderSize
+                    )
+                }
                 exportURL = exported
                 let removedTempFiles = cleanupHistoricalTemporaryFilesAfterExport(
                     keeping: [sourceURL, exported]
@@ -577,25 +1150,67 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     func applyAudioPreviewProcessing() {
-        guard hasSource else { return }
-        guard hasAudioTrack else { return }
-        guard let sourceURL else { return }
-
+        guard hasSource, hasAudioTrack else { return }
         isApplyingAudioPreview = true
-        defer { isApplyingAudioPreview = false }
+        rebuildTimelinePreview(keepingPlaybackPosition: playbackPosition) { [weak self] in
+            self?.isApplyingAudioPreview = false
+        }
+    }
+
+    func completeTimelineEditsAndReload() {
+        guard let sourceURL else {
+            statusMessage = L10n.tr("video.cut.timeline.commit_reload_no_source")
+            return
+        }
+        guard hasTimelineEdits else {
+            statusMessage = L10n.tr("video.cut.timeline.commit_reload_no_edits")
+            return
+        }
+        guard !timelineClips.isEmpty else {
+            statusMessage = L10n.tr("video.cut.timeline.empty")
+            return
+        }
+
+        let clips = timelineClips
+        let orderedClips = clips.sorted {
+            (timelineStartSeconds(for: $0) ?? 0) < (timelineStartSeconds(for: $1) ?? 0)
+        }
+        var compactStarts: [UUID: Double] = [:]
+        var compactCursor = 0.0
+        for clip in orderedClips {
+            compactStarts[clip.id] = compactCursor
+            compactCursor += clip.durationSeconds
+        }
+        let outputURL: URL
+        do {
+            outputURL = try makeInlineTrimOutputURL(for: sourceURL, suffix: "timeline")
+        } catch {
+            statusMessage = L10n.f("video.cut.timeline.commit_reload_failed", error.localizedDescription)
+            return
+        }
+
+        pausePlayback()
+        isApplyingTimelineReload = true
+        statusMessage = L10n.tr("video.cut.timeline.commit_reload_processing")
 
         Task {
-            let asset = AVAssetAsyncLoaders.makeURLAsset(sourceURL)
-            let item = await makePlayerItem(for: asset, hasAudioTrack: hasAudioTrack)
-            await MainActor.run {
-                self.player.replaceCurrentItem(with: item)
-                let seekTime = self.makeTime(self.playbackPosition)
-                self.player.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
-                if self.isPlaying {
-                    self.player.play()
-                } else {
-                    self.player.pause()
-                }
+            defer { isApplyingTimelineReload = false }
+            do {
+                let exported = try await runTimelineExport(
+                    clips: orderedClips,
+                    cropRectNormalized: .full,
+                    outputURL: outputURL,
+                    applyAudioProcessing: false,
+                    performanceProfile: .balanced,
+                    targetRenderSize: nil,
+                    clipStartSecondsOverride: compactStarts
+                )
+                loadVideo(url: exported)
+                cleanupInlineEditArtifacts(previousSourceURL: sourceURL, keeping: exported)
+                statusMessage = L10n.f("video.cut.timeline.commit_reload_done", exported.lastPathComponent)
+            } catch {
+                try? FileManager.default.removeItem(at: outputURL)
+                statusMessage = L10n.f("video.cut.timeline.commit_reload_failed", error.localizedDescription)
             }
         }
     }
@@ -606,7 +1221,11 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
         guard canExecuteCrop else {
-            statusMessage = isCropNoOp ? L10n.tr("legacy.key_104") : L10n.tr("legacy.key_128")
+            if hasTimelineEdits {
+                statusMessage = L10n.tr("video.cut.timeline.commit_required_for_crop")
+            } else {
+                statusMessage = isCropNoOp ? L10n.tr("legacy.key_104") : L10n.tr("legacy.key_128")
+            }
             return
         }
 
@@ -618,25 +1237,38 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
 
-        let keepRanges = trimEngine.keepRanges(from: [], sourceDuration: makeDurationTime())
-        guard !keepRanges.isEmpty else {
-            statusMessage = L10n.tr("legacy.key_153")
-            return
-        }
-
         isApplyingCrop = true
         statusMessage = L10n.tr("legacy.key_88")
         Task {
             defer { isApplyingCrop = false }
             do {
-                let exported = try await runFFmpegExport(
-                    sourceURL: sourceURL,
-                    keepRanges: keepRanges,
-                    cropRectNormalized: VideoCropRect(normalizedCropRect),
-                    outputURL: outputURL,
-                    applyAudioProcessing: false,
-                    performanceProfile: .balanced
-                )
+                let exported: URL
+                if hasTimelineEdits {
+                    guard !timelineClips.isEmpty else {
+                        throw VideoTimelinePreviewError.emptyTimeline
+                    }
+                    exported = try await runTimelineExport(
+                        clips: timelineClips,
+                        cropRectNormalized: VideoCropRect(normalizedCropRect),
+                        outputURL: outputURL,
+                        applyAudioProcessing: false,
+                        performanceProfile: .balanced,
+                        targetRenderSize: nil
+                    )
+                } else {
+                    let keepRanges = trimEngine.keepRanges(from: [], sourceDuration: makeDurationTime())
+                    guard !keepRanges.isEmpty else {
+                        throw VideoTimelinePreviewError.emptyTimeline
+                    }
+                    exported = try await runFFmpegExport(
+                        sourceURL: sourceURL,
+                        keepRanges: keepRanges,
+                        cropRectNormalized: VideoCropRect(normalizedCropRect),
+                        outputURL: outputURL,
+                        applyAudioProcessing: false,
+                        performanceProfile: .balanced
+                    )
+                }
                 loadVideo(url: exported)
                 cleanupInlineEditArtifacts(previousSourceURL: sourceURL, keeping: exported)
                 statusMessage = L10n.f("fmt.video.crop_reloaded", exported.lastPathComponent)
@@ -647,7 +1279,7 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     func resetCropRect(showStatus: Bool = true) {
-        guard hasSource else { return }
+        guard hasSource, !hasTimelineEdits, !isBusy else { return }
         cropRectNormalized = .full
         if showStatus {
             statusMessage = L10n.tr("legacy.key_94")
@@ -655,6 +1287,7 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     func selectAspectPresetWithReset(_ preset: VideoCuttingAspectPreset) {
+        guard !hasTimelineEdits, !isBusy else { return }
         guard hasSource else {
             selectedAspectPreset = preset
             return
@@ -666,7 +1299,7 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     func applyPresetToCropRect() {
-        guard hasSource else { return }
+        guard hasSource, !hasTimelineEdits, !isBusy else { return }
         if normalizedLockedAspectRatio == 1 {
             cropRectNormalized = .full
             return
@@ -685,7 +1318,7 @@ final class VideoCuttingViewModel: ObservableObject {
         translation: CGSize,
         overlayVideoDisplaySize: CGSize
     ) {
-        guard hasSource else { return }
+        guard hasSource, !hasTimelineEdits, !isBusy else { return }
         let minSize = normalizedCropMinSize(for: overlayVideoDisplaySize)
         let next = VideoCropGeometry.applyDrag(
             startRect: normalizedCropRect,
@@ -896,6 +1529,11 @@ final class VideoCuttingViewModel: ObservableObject {
         let generationID = UUID()
         timelineThumbnailGenerationID = generationID
         timelineThumbnails = []
+        timelineClipThumbnailGenerationID = generationID
+        timelineClipThumbnails = [:]
+        timelineClipStartSeconds = [:]
+        timelineDurationOverride = nil
+        clearTimelineEditHistory()
         Task {
             let asset = AVAssetAsyncLoaders.makeURLAsset(url)
             do {
@@ -909,6 +1547,12 @@ final class VideoCuttingViewModel: ObservableObject {
 
                 let hasAudioTrack = await updateFrameInfo(from: asset)
                 let item = await makePlayerItem(for: asset, hasAudioTrack: hasAudioTrack)
+                let initialClip = VideoTimelineClip(
+                    sourceURL: normalizedURL,
+                    sourceStartSeconds: 0,
+                    sourceEndSeconds: duration,
+                    hasAudioTrack: hasAudioTrack
+                )
                 let initialPlaybackPosition = await MainActor.run { () -> Double in
                     let pending = self.pendingReloadPlaybackPosition
                     self.pendingReloadPlaybackPosition = nil
@@ -918,14 +1562,20 @@ final class VideoCuttingViewModel: ObservableObject {
                 await MainActor.run {
                     self.sourceURL = url
                     self.sourceDuration = duration
+                    self.originalTimelineSourceDuration = duration
                     self.keepStartText = self.formatSecondsForInput(0)
                     self.keepEndText = self.formatSecondsForInput(duration)
                     self.activeDeleteRange = nil
+                    self.selectedTimelineClipID = nil
                     self.cropRectNormalized = .full
                     self.exportURL = nil
                     self.playbackPosition = initialPlaybackPosition
                     self.hasPlaybackReady = true
                     self.hasAudioTrack = hasAudioTrack
+                    self.timelineClips = [initialClip]
+                    self.timelineClipStartSeconds = [initialClip.id: 0]
+                    self.isPlaybackMuted = false
+                    self.player.isMuted = false
                     self.player.pause()
                     self.player.replaceCurrentItem(with: item)
                     self.player.seek(
@@ -947,6 +1597,7 @@ final class VideoCuttingViewModel: ObservableObject {
                     duration: duration,
                     generationID: generationID
                 )
+                await loadTimelineClipThumbnails(for: initialClip, generationID: generationID)
             } catch {
                 await MainActor.run {
                     self.pendingReloadPlaybackPosition = nil
@@ -1039,8 +1690,7 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     private func suggestedOutputName(for sourceURL: URL) -> String {
-        let stem = sourceURL.deletingPathExtension().lastPathComponent
-        return "\(stem)-trimmed.mp4"
+        DemoFlowExportFileNamer.fileName(prefix: "v", fileExtension: "mp4")
     }
 
     private func makeInlineTrimOutputURL(for sourceURL: URL, suffix: String) throws -> URL {
@@ -1128,6 +1778,108 @@ final class VideoCuttingViewModel: ObservableObject {
         }
     }
 
+    private func loadTimelineClipThumbnails(
+        for clip: VideoTimelineClip,
+        generationID: UUID? = nil
+    ) async {
+        let requestedGenerationID = generationID ?? timelineClipThumbnailGenerationID
+        let thumbnails = await Task.detached(priority: .utility) {
+            try? await VideoTimelineThumbnailService.makeThumbnails(
+                from: clip.sourceURL,
+                startSeconds: clip.sourceStartSeconds,
+                endSeconds: clip.sourceEndSeconds
+            )
+        }.value ?? []
+
+        await MainActor.run {
+            guard self.timelineClipThumbnailGenerationID == requestedGenerationID,
+                  self.timelineClips.contains(where: { $0.id == clip.id }) else {
+                return
+            }
+            self.timelineClipThumbnails[clip.id] = thumbnails
+        }
+    }
+
+    private func rebuildTimelinePreview(
+        keepingPlaybackPosition requestedPosition: Double,
+        completion: (() -> Void)? = nil
+    ) {
+        let clips = timelineClips
+        let generationID = UUID()
+        let shouldResumePlayback = isPlaying
+        let hasAudio = clips.contains(where: \.hasAudioTrack)
+        timelinePreviewGenerationID = generationID
+        player.pause()
+
+        Task {
+            defer { completion?() }
+            do {
+                let composition = try await makeTimelinePreviewComposition(from: clips)
+                let item = await makePlayerItem(for: composition, hasAudioTrack: hasAudio)
+                guard timelinePreviewGenerationID == generationID else { return }
+
+                let targetPosition = max(0, min(requestedPosition, sourceDuration))
+                player.replaceCurrentItem(with: item)
+                player.isMuted = isPlaybackMuted
+                await player.seek(
+                    to: makeTime(targetPosition),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                playbackPosition = targetPosition
+                if shouldResumePlayback {
+                    player.play()
+                } else {
+                    player.pause()
+                }
+            } catch {
+                guard timelinePreviewGenerationID == generationID else { return }
+                statusMessage = L10n.f("video.cut.timeline.preview_failed", error.localizedDescription)
+            }
+        }
+    }
+
+    private func makeTimelinePreviewComposition(
+        from clips: [VideoTimelineClip]
+    ) async throws -> AVMutableComposition {
+        guard !clips.isEmpty else {
+            throw VideoTimelinePreviewError.emptyTimeline
+        }
+
+        let composition = AVMutableComposition()
+        guard let videoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw VideoTimelinePreviewError.videoTrackUnavailable
+        }
+        var audioTrack: AVMutableCompositionTrack?
+        for clip in clips {
+            let asset = AVAssetAsyncLoaders.makeURLAsset(clip.sourceURL)
+            guard let sourceVideoTrack = try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .video) else {
+                throw VideoTimelinePreviewError.sourceVideoUnavailable(clip.displayName)
+            }
+            let sourceRange = CMTimeRange(
+                start: CMTime(seconds: clip.sourceStartSeconds, preferredTimescale: 600),
+                duration: CMTime(seconds: clip.durationSeconds, preferredTimescale: 600)
+            )
+            let timeline = makeTime(timelineStartSeconds(for: clip) ?? 0)
+            try videoTrack.insertTimeRange(sourceRange, of: sourceVideoTrack, at: timeline)
+
+            if clip.hasAudioTrack,
+               let sourceAudioTrack = try await AVAssetAsyncLoaders.firstTrack(in: asset, mediaType: .audio) {
+                if audioTrack == nil {
+                    audioTrack = composition.addMutableTrack(
+                        withMediaType: .audio,
+                        preferredTrackID: kCMPersistentTrackID_Invalid
+                    )
+                }
+                try audioTrack?.insertTimeRange(sourceRange, of: sourceAudioTrack, at: timeline)
+            }
+        }
+        return composition
+    }
+
     private func makePlayerItem(for asset: AVAsset, hasAudioTrack: Bool) async -> AVPlayerItem {
         let item = AVPlayerItem(asset: asset)
         guard hasAudioTrack else { return item }
@@ -1190,6 +1942,58 @@ final class VideoCuttingViewModel: ObservableObject {
             applyAudioProcessing: applyAudioProcessing,
             targetRenderSize: targetRenderSize
         )
+    }
+
+    private func runTimelineExport(
+        clips: [VideoTimelineClip],
+        cropRectNormalized: VideoCropRect,
+        outputURL: URL,
+        applyAudioProcessing: Bool,
+        performanceProfile: VideoCuttingFFmpegProject.PerformanceProfile,
+        targetRenderSize: CGSize?,
+        clipStartSecondsOverride: [UUID: Double]? = nil
+    ) async throws -> URL {
+        guard !clips.isEmpty else { throw VideoTimelinePreviewError.emptyTimeline }
+        await prepareFFmpegIfNeeded()
+
+        let timelineRenderSize: CGSize? = targetRenderSize ?? timelineCropRenderSize
+        let project = VideoTimelineFFmpegProject(
+            clips: clips,
+            clipStartSeconds: clips.map { clip in
+                clipStartSecondsOverride?[clip.id] ?? timelineStartSeconds(for: clip) ?? 0
+            },
+            cropRectNormalized: cropRectNormalized,
+            renderSize: timelineRenderSize,
+            audioProcessingConfig: applyAudioProcessing ? audioProcessingConfig : .default,
+            isAudioMuted: false,
+            outputURL: outputURL,
+            performanceProfile: performanceProfile
+        )
+
+        if isFFmpegReady {
+            do {
+                return try await ffmpegExportEngine.exportTimeline(project: project) { [weak self] ratio in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.ffmpegStatusMessage = L10n.f("fmt.ffmpeg.progress", Int((ratio * 100).rounded()))
+                    }
+                }
+            } catch {
+                isFFmpegReady = false
+                isUsingBuiltinComposeFallback = true
+                ffmpegStatusMessage = L10n.f("fmt.ffmpeg.fallback_active", error.localizedDescription)
+            }
+        }
+
+        return try await composeExportEngine.exportTimeline(project: project)
+    }
+
+    private var timelineCropRenderSize: CGSize {
+        let crop = VideoCropGeometry.clampNormalizedRect(normalizedCropRect)
+        let sourceSize = currentRealExportSize
+        let width = evenDimension(sourceSize.width * crop.width)
+        let height = evenDimension(sourceSize.height * crop.height)
+        return CGSize(width: width, height: height)
     }
 
     private func prepareFFmpegIfNeeded(force: Bool = false) async {
@@ -1428,11 +2232,45 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 }
 
+private enum VideoTimelinePreviewError: LocalizedError {
+    case emptyTimeline
+    case videoTrackUnavailable
+    case sourceVideoUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyTimeline:
+            return L10n.tr("video.cut.timeline.empty")
+        case .videoTrackUnavailable:
+            return L10n.tr("video.cut.timeline.preview_track_failed")
+        case let .sourceVideoUnavailable(name):
+            return L10n.f("video.cut.timeline.source_unavailable", name)
+        }
+    }
+}
+
 private struct VideoTimelineThumbnailService: Sendable {
     nonisolated private static let maximumThumbnailCount = 14
     nonisolated private static let maximumThumbnailSize = CGSize(width: 180, height: 102)
 
     nonisolated static func makeThumbnails(from sourceURL: URL, duration: Double) async throws -> [VideoTimelineThumbnail] {
+        guard duration > 0 else { return [] }
+
+        return try await makeThumbnails(
+            from: sourceURL,
+            startSeconds: 0,
+            endSeconds: duration
+        )
+    }
+
+    nonisolated static func makeThumbnails(
+        from sourceURL: URL,
+        startSeconds: Double,
+        endSeconds: Double
+    ) async throws -> [VideoTimelineThumbnail] {
+        let start = max(0, startSeconds)
+        let end = max(start, endSeconds)
+        let duration = end - start
         guard duration > 0 else { return [] }
 
         let asset = AVURLAsset(url: sourceURL)
@@ -1444,9 +2282,10 @@ private struct VideoTimelineThumbnailService: Sendable {
 
         var thumbnails: [VideoTimelineThumbnail] = []
         for seconds in sampleTimes(duration: duration) {
-            let time = CMTime(seconds: seconds, preferredTimescale: 600)
+            let sampledSeconds = start + seconds
+            let time = CMTime(seconds: sampledSeconds, preferredTimescale: 600)
             guard let result = try? await generator.image(at: time) else { continue }
-            thumbnails.append(VideoTimelineThumbnail(seconds: seconds, image: result.image))
+            thumbnails.append(VideoTimelineThumbnail(seconds: sampledSeconds, image: result.image))
         }
         return thumbnails
     }

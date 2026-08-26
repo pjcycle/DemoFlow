@@ -93,13 +93,14 @@ if [[ -z "$whisper_model_source" && -n "$whisper_source_dir" && -f "${whisper_so
 fi
 
 entitlements_path="${DEMOFLOW_EMBEDDED_TOOL_ENTITLEMENTS:-${script_dir}/EmbeddedTool.entitlements}"
+helpers_require_sandbox="${ENABLE_APP_SANDBOX:-NO}"
 
 if [[ ! -d "$resources_dir" ]]; then
 	echo "[DemoFlow codesign] Resources directory not found; skipping embedded tool signing."
 	exit 0
 fi
 
-if [[ ! -f "$entitlements_path" ]]; then
+if [[ "$helpers_require_sandbox" == "YES" && ! -f "$entitlements_path" ]]; then
 	echo "[DemoFlow codesign] Missing helper entitlements: ${entitlements_path}" >&2
 	exit 1
 fi
@@ -255,12 +256,41 @@ helpers=(ffmpeg ffprobe)
 if [[ -f "${helpers_dir}/whisper-cli" ]]; then
 	helpers+=(whisper-cli)
 fi
+
+verify_sandbox_entitlements() {
+	local helper_path="$1"
+	local entitlements
+	# Xcode 26 emits the decoded entitlement dictionary with '-' and warns for
+	# the legacy ':-' path form. Match the stable decoded keys instead of XML.
+	entitlements="$(/usr/bin/codesign -d --entitlements - "$helper_path" 2>&1)"
+	if [[ "$entitlements" != *"[Key] com.apple.security.app-sandbox"* ||
+		"$entitlements" != *"[Key] com.apple.security.inherit"* ||
+		"$entitlements" != *"[Bool] true"* ]]; then
+		echo "[DemoFlow codesign] ${helper_path#${app_bundle}/} is missing required App Sandbox entitlements." >&2
+		exit 1
+	fi
+}
+
+sign_helper() {
+	local helper_path="$1"
+	local identifier="$2"
+	if [[ "$helpers_require_sandbox" == "YES" ]]; then
+		/usr/bin/codesign "${codesign_common_flags[@]}" --identifier "$identifier" --entitlements "$entitlements_path" "$helper_path"
+		verify_sandbox_entitlements "$helper_path"
+	else
+		# The default local Debug scheme deliberately runs without App Sandbox so
+		# its direct-distribution media workflow can be verified. A child helper
+		# carrying com.apple.security.inherit under that parent aborts before main.
+		/usr/bin/codesign "${codesign_common_flags[@]}" --identifier "$identifier" "$helper_path"
+	fi
+}
+
 for helper in "${helpers[@]}"; do
 	helper_path="${helpers_dir}/${helper}"
 	identifier="${product_identifier}.${helper}"
 	if [[ -f "$helper_path" ]]; then
 		echo "[DemoFlow codesign] Signing ${helper_path#${app_bundle}/} as ${identifier}"
-		/usr/bin/codesign "${codesign_common_flags[@]}" --identifier "$identifier" --entitlements "$entitlements_path" "$helper_path"
+		sign_helper "$helper_path" "$identifier"
 	else
 		echo "[DemoFlow codesign] Warning: ${helper} not found at ${helper_path}" >&2
 	fi
@@ -274,7 +304,7 @@ if [[ "$include_ytdlp" == "YES" ]]; then
 		chmod +x "$ytdlp_dest"
 		ytdlp_identifier="${product_identifier}.yt-dlp"
 		echo "[DemoFlow codesign] Signing yt-dlp as ${ytdlp_identifier}"
-		/usr/bin/codesign "${codesign_common_flags[@]}" --identifier "$ytdlp_identifier" --entitlements "$entitlements_path" "$ytdlp_dest"
+		sign_helper "$ytdlp_dest" "$ytdlp_identifier"
 		echo "[DemoFlow codesign] yt-dlp included in this build."
 	else
 		rm -f "$ytdlp_dest"

@@ -80,7 +80,7 @@ private enum ScreenDrawHotkeyConstants {
         HotkeyDescriptor(id: 7, keyCode: Int16(kVK_ANSI_2), modifiers: UInt32(cmdKey | optionKey), action: .selectTool(.arrow)),
         HotkeyDescriptor(id: 8, keyCode: Int16(kVK_ANSI_3), modifiers: UInt32(cmdKey | optionKey), action: .selectTool(.rectangle)),
         HotkeyDescriptor(id: 9, keyCode: Int16(kVK_ANSI_4), modifiers: UInt32(cmdKey | optionKey), action: .selectTool(.ellipse)),
-        HotkeyDescriptor(id: 10, keyCode: Int16(kVK_ANSI_5), modifiers: UInt32(cmdKey | optionKey), action: .selectTool(.cross)),
+        HotkeyDescriptor(id: 10, keyCode: Int16(kVK_ANSI_5), modifiers: UInt32(cmdKey | optionKey), action: .selectTool(.text)),
         HotkeyDescriptor(id: 11, keyCode: Int16(kVK_ANSI_6), modifiers: UInt32(cmdKey | optionKey), action: .selectTool(.check)),
         HotkeyDescriptor(id: 12, keyCode: Int16(kVK_ANSI_S), modifiers: UInt32(cmdKey | controlKey), action: .toggleOverlay),
         HotkeyDescriptor(id: 13, keyCode: Int16(kVK_ANSI_X), modifiers: UInt32(cmdKey | controlKey), action: .toggleCanvasPassthrough),

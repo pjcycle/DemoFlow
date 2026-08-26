@@ -430,7 +430,7 @@ final class AudioReplacementViewModel: ObservableObject {
             return
         }
         guard let outputURL = workspace.pickVideoOutputURL(
-            suggestedName: "\(sourceURL.deletingPathExtension().lastPathComponent)-字幕口播.mp4"
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "a", fileExtension: "mp4")
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
             return
@@ -477,7 +477,7 @@ final class AudioReplacementViewModel: ObservableObject {
             return
         }
         guard let outputURL = workspace.pickVideoOutputURL(
-            suggestedName: "\(sourceURL.deletingPathExtension().lastPathComponent)-音频替换.mp4"
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "a", fileExtension: "mp4")
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
             return

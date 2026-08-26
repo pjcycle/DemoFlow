@@ -23,6 +23,8 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
     @Published private(set) var state: WatermarkRemovalState = .idle
     @Published private(set) var progress: Double = 0
     @Published private(set) var outputURL: URL?
+    @Published private(set) var canExportCurrentVideo = false
+    @Published private(set) var isExportingCurrentVideo = false
     @Published private(set) var statusMessage = L10n.tr("subdub.watermark.status.idle")
     @Published private(set) var watermarkLibrary = WatermarkLibrarySnapshot()
     @Published var isWatermarkLibraryPresented = false
@@ -37,9 +39,11 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
     private let libraryService = WatermarkLibraryService()
     private var sessionCancellable: AnyCancellable?
     private var activeTask: Task<Void, Never>?
+    private var exportTask: Task<Void, Never>?
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var temporaryOutputURL: URL?
+    private var preserveExportAvailabilityOnNextSourceChange = false
     private var sourceSessionDirectory: URL?
     private weak var subscriptionViewModel: SubscriptionViewModel?
     private var onRequireSubscription: (() -> Void)?
@@ -77,6 +81,7 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
 
     deinit {
         activeTask?.cancel()
+        exportTask?.cancel()
         if let timeObserverToken { player.removeTimeObserver(timeObserverToken) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
     }
@@ -128,7 +133,7 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
     }
 
     func openWatermarkLibrary() {
-        guard selectedRegionID != nil, !state.isBusy else { return }
+        guard !state.isBusy else { return }
         reloadWatermarkLibrary()
         isWatermarkLibraryPresented = true
     }
@@ -307,9 +312,24 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
         var next = style
         next.text = normalizedText
         var snapshot = watermarkLibrary
-        if let replacingID,
-           let index = snapshot.textStyles.firstIndex(where: { $0.id == replacingID }) {
-            snapshot.textStyles[index] = next
+        // If no explicit replacingID is provided (e.g. "save new text"), reuse
+        // the existing entry that already has the same text so we never end up
+        // with duplicate text content in the library.
+        let targetID: UUID? = replacingID
+            ?? snapshot.textStyles.first(where: { $0.text == normalizedText })?.id
+        if let targetID,
+           let index = snapshot.textStyles.firstIndex(where: { $0.id == targetID }) {
+            snapshot.textStyles[index] = WatermarkLibraryTextStyle(
+                id: targetID,
+                name: next.name,
+                text: next.text,
+                font: next.font,
+                color: next.color,
+                outlineEnabled: next.outlineEnabled,
+                outlineScale: next.outlineScale,
+                shadowEnabled: next.shadowEnabled,
+                shadowOffsetScale: next.shadowOffsetScale
+            )
         } else {
             snapshot.textStyles.insert(next, at: 0)
         }
@@ -477,21 +497,21 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
         do {
             refreshRegionReplacementsFromLibrary()
             let outputDirectory = try DemoFlowOutputDirectoryPolicy.prepareVideoCutsDirectory()
-            let timestamp = Self.timestampFormatter.string(from: Date())
-            let baseName = sourceURL.deletingPathExtension().lastPathComponent
-            let suffix = regions.contains(where: \.hasReplacementLayer)
-                ? "watermark-replaced"
-                : "watermark-removed"
-            let fileName = "\(baseName)-\(suffix)-\(timestamp).mp4"
-            let finalURL = outputDirectory.appendingPathComponent(fileName)
+            let finalURL = DemoFlowExportFileNamer.availableOutputURL(
+                in: outputDirectory,
+                prefix: "w",
+                fileExtension: "mp4"
+            )
+            let fileStem = finalURL.deletingPathExtension().lastPathComponent
             let temporaryURL = outputDirectory.appendingPathComponent(
-                ".\(fileName).partial-\(UUID().uuidString)"
+                ".\(fileStem).partial-\(UUID().uuidString).mp4"
             )
             player.pause()
             isPreviewPlaying = false
             clearFramePreview()
             temporaryOutputURL = temporaryURL
             outputURL = nil
+            canExportCurrentVideo = false
             progress = 0
             state = .processing
             statusMessage = L10n.tr("subdub.watermark.status.processing")
@@ -500,6 +520,15 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
             let quality = selectedQuality
             let repairPreset = selectedRepairPreset
             let duration = sourceDuration
+#if DEBUG
+            let onLog: (String) -> Void = { [weak self] line in
+                Task { @MainActor [weak self] in
+                    self?.statusMessage = line
+                }
+            }
+#else
+            let onLog: (String) -> Void = { _ in }
+#endif
             activeTask = Task { [weak self] in
                 guard let self else { return }
                 defer {
@@ -518,9 +547,7 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
                         onProgress: { [weak self] value in
                             Task { @MainActor [weak self] in self?.progress = value }
                         },
-                        onLog: { [weak self] line in
-                            Task { @MainActor [weak self] in self?.statusMessage = line }
-                        }
+                        onLog: onLog
                     )
                     guard !Task.isCancelled else { throw WatermarkRemovalError.cancelled }
                     try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
@@ -572,7 +599,87 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
         regions = []
         selectedRegionID = nil
         outputURL = nil
+        canExportCurrentVideo = false
+        exportTask?.cancel()
+        exportTask = nil
+        isExportingCurrentVideo = false
+        preserveExportAvailabilityOnNextSourceChange = false
         progress = 0
+    }
+
+    func prepareForProcessedVideoReload() {
+        preserveExportAvailabilityOnNextSourceChange = true
+    }
+
+    func markCurrentVideoAsProcessed() {
+        guard hasSource else { return }
+        canExportCurrentVideo = true
+    }
+
+    func exportCurrentVideo() {
+        guard canExportCurrentVideo,
+              !isExportingCurrentVideo,
+              !state.isBusy,
+              let sourceURL,
+              FileManager.default.fileExists(atPath: sourceURL.path) else {
+            return
+        }
+        guard let destinationURL = workspace.pickVideoOutputURL(
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "w", fileExtension: "mp4")
+        ) else {
+            statusMessage = L10n.tr("subdub.status.save_cancelled")
+            return
+        }
+
+        let sourcePath = sourceURL.path
+        let destinationPath = destinationURL.path
+        let temporaryURL = destinationURL.deletingLastPathComponent()
+            .appendingPathComponent(
+                ".\(destinationURL.deletingPathExtension().lastPathComponent)-partial-\(UUID().uuidString).mp4"
+            )
+        let temporaryPath = temporaryURL.path
+        isExportingCurrentVideo = true
+        statusMessage = L10n.tr("subdub.watermark.status.exporting_current")
+        exportTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.detached(priority: .utility) {
+                    let fileManager = FileManager.default
+                    guard fileManager.fileExists(atPath: sourcePath) else {
+                        throw CocoaError(.fileNoSuchFile)
+                    }
+                    try fileManager.createDirectory(
+                        at: URL(fileURLWithPath: destinationPath).deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try? fileManager.removeItem(atPath: temporaryPath)
+                    try fileManager.copyItem(atPath: sourcePath, toPath: temporaryPath)
+                    if fileManager.fileExists(atPath: destinationPath) {
+                        try fileManager.removeItem(atPath: destinationPath)
+                    }
+                    try fileManager.moveItem(atPath: temporaryPath, toPath: destinationPath)
+                }.value
+                guard !Task.isCancelled else { return }
+                self.isExportingCurrentVideo = false
+                self.exportTask = nil
+                self.statusMessage = L10n.f(
+                    "subdub.watermark.status.exported_current",
+                    destinationURL.lastPathComponent
+                )
+                self.workspace.reveal(destinationURL)
+            } catch is CancellationError {
+                self.isExportingCurrentVideo = false
+                self.exportTask = nil
+            } catch {
+                try? FileManager.default.removeItem(atPath: temporaryPath)
+                self.isExportingCurrentVideo = false
+                self.exportTask = nil
+                self.statusMessage = L10n.f(
+                    "subdub.status.export_failed",
+                    error.localizedDescription
+                )
+            }
+        }
     }
 
     func revealOutput() {
@@ -582,11 +689,17 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
 
     func markReloadFailed() {
         statusMessage = L10n.tr("subdub.watermark.status.reload_failed")
+        canExportCurrentVideo = false
+        preserveExportAvailabilityOnNextSourceChange = false
     }
 
     private func syncFromSession() {
         let nextURL = timelineSession.videoURL
         let didChange = sourceURL != nextURL
+        let preserveExportAvailability = didChange && preserveExportAvailabilityOnNextSourceChange
+        if didChange {
+            preserveExportAvailabilityOnNextSourceChange = false
+        }
         sourceURL = nextURL
         sourceDuration = timelineSession.sourceDuration
         sourceWaveformSamples = timelineSession.sourceWaveformSamples
@@ -606,6 +719,10 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
         regions = []
         selectedRegionID = nil
         outputURL = nil
+        canExportCurrentVideo = preserveExportAvailability
+        exportTask?.cancel()
+        exportTask = nil
+        isExportingCurrentVideo = false
         progress = 0
         sourceVideoSize = .zero
         sourceWaveformSamples = []
@@ -669,6 +786,8 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
             return L10n.tr("subdub.watermark.error.preview")
         case WatermarkRemovalError.outputValidationFailed:
             return L10n.tr("subdub.watermark.error.output_validation")
+        case let WatermarkRemovalError.probeFailed(reason):
+            return L10n.f("subdub.watermark.error.command", "ffprobe: \(reason)")
         case let WatermarkRemovalError.commandFailed(reason):
             return L10n.f("subdub.watermark.error.command", reason)
         default:
@@ -768,10 +887,4 @@ final class WatermarkRemovalViewModel: NSObject, ObservableObject {
         }
     }
 
-    private static let timestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter
-    }()
 }

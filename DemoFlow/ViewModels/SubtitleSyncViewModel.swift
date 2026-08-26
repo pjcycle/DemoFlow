@@ -116,7 +116,7 @@ final class SubtitleSyncViewModel: ObservableObject {
             return
         }
         guard let outputURL = workspace.pickVideoOutputURL(
-            suggestedName: "\(videoURL.deletingPathExtension().lastPathComponent)-字幕同步.mp4"
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "s", fileExtension: "mp4")
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
             return

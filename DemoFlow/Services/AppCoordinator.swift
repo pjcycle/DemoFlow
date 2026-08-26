@@ -164,6 +164,7 @@ final class AppCoordinator: ObservableObject {
     @Published private(set) var isPrivacyNoticePresented = false
     @Published private(set) var isPrivacyPolicySheetPresented = false
     @Published private(set) var privacyPolicyOpenErrorMessage: String?
+    @Published private(set) var isOpenSourceLicensesSheetPresented = false
     @Published private(set) var isReviewPromptVisible = false
 
     let audioEngine: AudioInputEngine
@@ -589,6 +590,14 @@ final class AppCoordinator: ObservableObject {
 
     func dismissPrivacyPolicySheet() {
         isPrivacyPolicySheetPresented = false
+    }
+
+    func openOpenSourceLicensesSheet() {
+        isOpenSourceLicensesSheetPresented = true
+    }
+
+    func dismissOpenSourceLicensesSheet() {
+        isOpenSourceLicensesSheetPresented = false
     }
 
     func openSubscriptionWindow() {
@@ -2327,9 +2336,11 @@ final class AppCoordinator: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: L10n.tr("output.recording.unset_toast")]
             )
         }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return directory.appendingPathComponent("DemoFlow-segment-merged-\(formatter.string(from: Date())).mp4")
+        return DemoFlowExportFileNamer.availableOutputURL(
+            in: directory,
+            prefix: "r",
+            fileExtension: "mp4"
+        )
     }
 
     private func cleanupRecordingSessionSegments(except keepURL: URL) {

@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import Foundation
 
 @MainActor
@@ -50,9 +49,29 @@ final class WatermarkRemovalService {
             arguments: arguments,
             expectedDurationSeconds: nil
         )
+#if DEBUG
+        writePreviewDiagnostics(
+            sourceURL: sourceURL,
+            timestamp: timestamp,
+            videoSize: videoSize,
+            filter: plan.filter,
+            command: render(arguments, executable: tools.ffmpegURL),
+            failure: nil
+        )
+#endif
         do {
             _ = try await runner.run(command: command)
         } catch {
+#if DEBUG
+            writePreviewDiagnostics(
+                sourceURL: sourceURL,
+                timestamp: timestamp,
+                videoSize: videoSize,
+                filter: plan.filter,
+                command: render(arguments, executable: tools.ffmpegURL),
+                failure: error.localizedDescription
+            )
+#endif
             if Task.isCancelled { throw WatermarkRemovalError.cancelled }
             throw WatermarkRemovalError.commandFailed(error.localizedDescription)
         }
@@ -105,22 +124,22 @@ final class WatermarkRemovalService {
             "-map", "0:a:0?",
             "-c:v", "h264_videotoolbox",
             "-profile:v", "high",
-            "-b:v", "(quality.videoBitrateMbps)M",
-            "-maxrate", "(quality.videoBitrateMbps)M",
-            "-bufsize", "(quality.videoBitrateMbps * 2)M",
+            "-b:v", "\(quality.videoBitrateMbps)M",
+            "-maxrate", "\(quality.videoBitrateMbps)M",
+            "-bufsize", "\(quality.videoBitrateMbps * 2)M",
             "-pix_fmt", "nv12",
             "-power_efficient", "1",
             "-c:a", "aac",
-            "-b:a", "(quality.audioBitrateKbps)k",
+            "-b:a", "\(quality.audioBitrateKbps)k",
             "-movflags", "+faststart",
             "-progress", "pipe:1",
             "-nostats",
             "-f", "mp4",
             outputURL.path
         ]
-        onLog("[ready] ffmpeg=(tools.ffmpegURL.path)")
-        onLog("[ready] ffprobe=(tools.ffprobeURL.path)")
-        onLog("[run] (render(arguments, executable: tools.ffmpegURL))")
+        onLog("[ready] ffmpeg=\(tools.ffmpegURL.path)")
+        onLog("[ready] ffprobe=\(tools.ffprobeURL.path)")
+        onLog("[run] \(render(arguments, executable: tools.ffmpegURL))")
 
         do {
             _ = try await runner.run(
@@ -136,7 +155,11 @@ final class WatermarkRemovalService {
             throw WatermarkRemovalError.commandFailed(error.localizedDescription)
         }
 
-        try await validateVideo(outputURL)
+        try validateVideo(
+            outputURL,
+            ffprobeURL: tools.ffprobeURL,
+            onLog: onLog
+        )
         onProgress(1)
     }
 
@@ -157,11 +180,14 @@ final class WatermarkRemovalService {
             throw WatermarkRemovalError.invalidRegion
         }
 
+        let delogoGuardBand = 16
         let delogoFilters = try makeDelogoFilters(
             regions: regions,
             videoSize: videoSize,
-            repairPreset: repairPreset
+            repairPreset: repairPreset,
+            coordinateOffset: delogoGuardBand
         )
+        let delogoChain = makeDelogoChain(delogoFilters, guardBand: delogoGuardBand)
         let imageRegions = regions.compactMap { $0.imageReplacement }
         let textRegions = regions.compactMap { region -> (WatermarkRegion, WatermarkTextReplacement)? in
             guard let text = region.textReplacement, text.isEnabled else { return nil }
@@ -171,7 +197,7 @@ final class WatermarkRemovalService {
         guard !regions.isEmpty else { throw WatermarkRemovalError.invalidRegion }
         if !hasCompositeLayers {
             return WatermarkFilterPlan(
-                filter: delogoFilters.joined(separator: ","),
+                filter: delogoChain,
                 imageInputs: [],
                 textFiles: [],
                 hasCompositeLayers: false
@@ -205,7 +231,7 @@ final class WatermarkRemovalService {
 
         var imageInputs: [String] = []
         var inputIndex = 1
-        var graph = "[0:v]\(delogoFilters.joined(separator: ","))[watermark_base]"
+        var graph = "[0:v]\(delogoChain)[watermark_base]"
         var currentLabel = "watermark_base"
 
         for image in imageRegions {
@@ -264,24 +290,45 @@ final class WatermarkRemovalService {
     private func makeDelogoFilters(
         regions: [WatermarkRegion],
         videoSize: CGSize,
-        repairPreset: WatermarkRepairPreset
+        repairPreset: WatermarkRepairPreset,
+        coordinateOffset: Int
     ) throws -> [String] {
-        let maxX = Int(videoSize.width.rounded(.down)) - 1
-        let maxY = Int(videoSize.height.rounded(.down)) - 1
+        let frameWidth = Int(videoSize.width.rounded(.down))
+        let frameHeight = Int(videoSize.height.rounded(.down))
+        // FFmpeg's delogo rejects a box touching the right or bottom edge, so
+        // preserve one pixel of frame space beyond every requested region.
+        guard frameWidth >= 3, frameHeight >= 3 else {
+            throw WatermarkRemovalError.invalidRegion
+        }
         let filters = regions.compactMap { region -> String? in
             let rect = expandedRect(
                 VideoCropGeometry.clampNormalizedRect(region.rectNormalized.cgRect),
                 padding: repairPreset.paddingScale
             )
-            let x = max(0, min(maxX, Int((rect.minX * videoSize.width).rounded(.down))))
-            let y = max(0, min(maxY, Int((rect.minY * videoSize.height).rounded(.down))))
-            let width = max(2, min(maxX + 1 - x, Int((rect.width * videoSize.width).rounded(.down))))
-            let height = max(2, min(maxY + 1 - y, Int((rect.height * videoSize.height).rounded(.down))))
+            let requestedWidth = max(2, Int((rect.width * videoSize.width).rounded(.down)))
+            let requestedHeight = max(2, Int((rect.height * videoSize.height).rounded(.down)))
+            let x = min(
+                max(0, Int((rect.minX * videoSize.width).rounded(.down))),
+                frameWidth - 3
+            )
+            let y = min(
+                max(0, Int((rect.minY * videoSize.height).rounded(.down))),
+                frameHeight - 3
+            )
+            let width = min(requestedWidth, frameWidth - x - 1)
+            let height = min(requestedHeight, frameHeight - y - 1)
             guard width > 1, height > 1 else { return nil }
-            return "delogo=x=(x):y=(y):w=(width):h=(height):show=0"
+            return "delogo=x=\(x + coordinateOffset):y=\(y + coordinateOffset):w=\(width):h=\(height):show=0"
         }
         guard !filters.isEmpty else { throw WatermarkRemovalError.invalidRegion }
         return filters
+    }
+
+    private func makeDelogoChain(_ filters: [String], guardBand: Int) -> String {
+        // delogo needs repair pixels beyond all four sides of a selected region.
+        // Expand all sides, shift regions inward, then restore the source canvas.
+        let doubledGuardBand = guardBand * 2
+        return "pad=iw+\(doubledGuardBand):ih+\(doubledGuardBand):\(guardBand):\(guardBand):color=black,\(filters.joined(separator: ",")),crop=iw-\(doubledGuardBand):ih-\(doubledGuardBand):\(guardBand):\(guardBand)"
     }
 
     private func normalizedReplacementRect(_ rect: VideoCropRect) -> CGRect {
@@ -310,19 +357,75 @@ final class WatermarkRemovalService {
             .replacingOccurrences(of: "]", with: "\\]")
     }
 
-    private func validateVideo(_ url: URL) async throws {
+    private func validateVideo(
+        _ url: URL,
+        ffprobeURL: URL,
+        onLog: @escaping (String) -> Void
+    ) throws {
         guard fileManager.fileExists(atPath: url.path),
               let attributes = try? fileManager.attributesOfItem(atPath: url.path),
               let size = attributes[.size] as? NSNumber,
               size.int64Value > 0 else {
             throw WatermarkRemovalError.outputValidationFailed
         }
-        let asset = AVURLAsset(url: url)
-        let duration = try? await asset.load(.duration)
-        let tracks = try? await asset.loadTracks(withMediaType: .video)
-        guard let duration, duration.seconds > 0, tracks?.isEmpty == false else {
+
+        let durationCommand = WatermarkProbeCommand(
+            executableURL: ffprobeURL,
+            arguments: [
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                url.path
+            ]
+        )
+        onLog("[verify] \(durationCommand.rendered)")
+        let durationOutput = try runProbe(durationCommand)
+        let duration = durationOutput
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .first ?? 0
+        guard duration > 0 else {
             throw WatermarkRemovalError.outputValidationFailed
         }
+
+        let videoTrackCommand = WatermarkProbeCommand(
+            executableURL: ffprobeURL,
+            arguments: [
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                url.path
+            ]
+        )
+        onLog("[verify] \(videoTrackCommand.rendered)")
+        let videoTrackOutput = try runProbe(videoTrackCommand)
+        guard videoTrackOutput.contains("video") else {
+            throw WatermarkRemovalError.outputValidationFailed
+        }
+    }
+
+    private func runProbe(_ command: WatermarkProbeCommand) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments
+        process.standardOutput = output
+        process.standardError = output
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw WatermarkRemovalError.probeFailed(error.localizedDescription)
+        }
+        let text = String(
+            decoding: output.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        guard process.terminationStatus == 0 else {
+            throw WatermarkRemovalError.probeFailed(text)
+        }
+        return text
     }
 
     private func prepareOutput(_ url: URL) throws {
@@ -333,6 +436,36 @@ final class WatermarkRemovalService {
     private func formatSeconds(_ value: Double) -> String {
         String(format: "%.3f", max(0, value))
     }
+
+#if DEBUG
+    private func writePreviewDiagnostics(
+        sourceURL: URL,
+        timestamp: Double,
+        videoSize: CGSize,
+        filter: String,
+        command: String,
+        failure: String?
+    ) {
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("DemoFlow", isDirectory: true)
+            .appendingPathComponent("tmp", isDirectory: true)
+        let url = directory.appendingPathComponent("SubDubWatermarkPreview.log")
+        let lines = [
+            "source=\(sourceURL.path)",
+            "timestamp=\(formatSeconds(timestamp))",
+            "videoSize=\(Int(videoSize.width.rounded()))x\(Int(videoSize.height.rounded()))",
+            "filter=\(filter)",
+            "command=\(command)",
+            "failure=\(failure ?? "none")"
+        ]
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            // Diagnostics must never affect preview behavior.
+        }
+    }
+#endif
 
     private func render(_ arguments: [String], executable: URL) -> String {
         let renderedArguments = arguments.map { argument in
@@ -355,6 +488,18 @@ private struct WatermarkFilterPlan {
     }
 }
 
+private struct WatermarkProbeCommand {
+    let executableURL: URL
+    let arguments: [String]
+
+    var rendered: String {
+        let renderedArguments = arguments.map { argument in
+            argument.contains(" ") ? "\"\(argument)\"" : argument
+        }.joined(separator: " ")
+        return "\(executableURL.path) \(renderedArguments)"
+    }
+}
+
 private extension Collection {
     subscript(safe index: Index) -> Element? {
         indices.contains(index) ? self[index] : nil
@@ -371,6 +516,7 @@ enum WatermarkRemovalError: Error {
     case textFileFailed
     case previewFailed
     case outputValidationFailed
+    case probeFailed(String)
     case cancelled
     case commandFailed(String)
 }

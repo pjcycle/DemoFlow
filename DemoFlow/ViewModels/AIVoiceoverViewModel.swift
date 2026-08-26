@@ -149,7 +149,7 @@ final class AIVoiceoverViewModel: ObservableObject {
             return
         }
         guard let outputURL = workspace.pickAudioOutputURL(
-            suggestedName: "voiceover.mp3",
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "o", fileExtension: "mp3"),
             contentType: .mp3
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
@@ -174,7 +174,7 @@ final class AIVoiceoverViewModel: ObservableObject {
             return
         }
         guard let outputURL = workspace.pickVideoOutputURL(
-            suggestedName: "\(sourceURL.deletingPathExtension().lastPathComponent)-口播.mp4"
+            suggestedName: DemoFlowExportFileNamer.fileName(prefix: "o", fileExtension: "mp4")
         ) else {
             statusMessage = L10n.tr("subdub.status.save_cancelled")
             return
