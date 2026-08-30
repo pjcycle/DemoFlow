@@ -10,7 +10,18 @@ import AppKit
 import SwiftUI
 
 enum SubscriptionWindowLayout {
-    static let windowSize = CGSize(width: 710, height: 470)
+    static let standardWindowSize = CGSize(width: 710, height: 470)
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+    static let diagnosticsWindowSize = CGSize(width: 710, height: 640)
+#endif
+
+    static func windowSize(showingDiagnostics: Bool) -> CGSize {
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+        return showingDiagnostics ? diagnosticsWindowSize : standardWindowSize
+#else
+        return standardWindowSize
+#endif
+    }
     static let contentPadding: CGFloat = 16
     static let topInset: CGFloat = 30
     static let sectionSpacing: CGFloat = 12
@@ -51,6 +62,10 @@ struct SubscriptionWindowView: View {
     let onClose: () -> Void
 
     var body: some View {
+        let windowSize = SubscriptionWindowLayout.windowSize(
+            showingDiagnostics: subscriptionViewModel.isSubscriptionDiagnosticsVisible
+        )
+
         ZStack {
             LinearGradient(
                 colors: [SubscriptionPalette.backgroundTop, SubscriptionPalette.backgroundBottom],
@@ -79,8 +94,8 @@ struct SubscriptionWindowView: View {
             await subscriptionViewModel.bootstrap()
         }
         .frame(
-            width: SubscriptionWindowLayout.windowSize.width,
-            height: SubscriptionWindowLayout.windowSize.height,
+            width: windowSize.width,
+            height: windowSize.height,
             alignment: .topLeading
         )
     }
@@ -120,29 +135,22 @@ struct SubscriptionWindowView: View {
                             .foregroundStyle(SubscriptionPalette.inkPrimary)
                     }
 
-                    #if DEBUG
-                    if !subscriptionViewModel.isProUnlocked,
-                       subscriptionViewModel.isDebugSubscriptionTrialAvailable {
-                        Button {
-                            subscriptionViewModel.activateFixed100DayTrial()
-                            onClose()
-                        } label: {
-                            Text(L10n.tr("subscription.debug.fixed_100_day"))
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(SubscriptionPalette.headerEnd)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                        }
-                        .buttonStyle(.plain)
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+                    if subscriptionViewModel.isSubscriptionDiagnosticsVisible {
+                        Text(subscriptionViewModel.externalBuildMarker)
+                        .font(.caption2.monospaced().weight(.semibold))
+                        .foregroundStyle(SubscriptionPalette.headerEnd)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
                         .background(
                             Capsule(style: .continuous)
-                                .fill(SubscriptionPalette.headerEnd.opacity(0.14))
+                                .fill(SubscriptionPalette.headerEnd.opacity(0.12))
                         )
-                        .help(L10n.tr("subscription.debug.fixed_100_day"))
-                        .disabled(subscriptionViewModel.isPurchasing)
                     }
+                    #endif
 
-                    if subscriptionViewModel.isUsingDebugFallback {
+                    #if DEBUG
+                    if subscriptionViewModel.isDebugSubscriptionInfoClearAvailable {
                         Button(L10n.tr("subscription.debug.clear")) {
                             subscriptionViewModel.clearDebugFallback()
                         }
@@ -178,6 +186,15 @@ struct SubscriptionWindowView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.green)
                 }
+
+                #if DEBUG
+                if let message = subscriptionViewModel.debugClearMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(SubscriptionPalette.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                #endif
             }
 
             Spacer(minLength: 0)
@@ -239,8 +256,74 @@ struct SubscriptionWindowView: View {
                 }
             }
 
+            #if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+            if !subscriptionViewModel.isProUnlocked,
+               subscriptionViewModel.isSubscriptionDiagnosticsVisible {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "ladybug.fill")
+                        Text(L10n.tr("subscription.debug.external_diagnostics_title"))
+                            .font(.caption.weight(.semibold))
+                        Spacer(minLength: 0)
+                        Text(subscriptionViewModel.externalBuildMarker)
+                            .font(.caption2.monospaced())
+                    }
+                    .foregroundStyle(SubscriptionPalette.headerEnd)
+
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(subscriptionViewModel.subscriptionDiagnosticsSummary)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 104)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.62))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.55), lineWidth: 1)
+                    )
+
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { @MainActor in
+                                await subscriptionViewModel.reloadProducts()
+                            }
+                        } label: {
+                            Label(
+                                L10n.tr("subscription.paywall.reload"),
+                                systemImage: "arrow.clockwise"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(SubscriptionPalette.headerEnd)
+                        .disabled(subscriptionViewModel.isLoadingProducts || subscriptionViewModel.isPurchasing)
+
+                        Button {
+                            subscriptionViewModel.openSubscriptionDiagnosticsLog()
+                        } label: {
+                            Label(
+                                L10n.tr("subscription.debug.open_log"),
+                                systemImage: "doc.text.magnifyingglass"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(SubscriptionPalette.inkSecondary)
+                        .disabled(subscriptionViewModel.isPurchasing)
+                    }
+                }
+            }
+            #endif
+
             #if DEBUG
-            if !subscriptionViewModel.isProUnlocked {
+            if !subscriptionViewModel.isProUnlocked,
+               subscriptionViewModel.isSubscriptionDiagnosticsVisible {
                 Text(subscriptionViewModel.storeKitDebugSummary)
                     .font(.caption2.monospaced())
                     .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
@@ -330,20 +413,49 @@ struct SubscriptionWindowView: View {
                 .disabled(subscriptionViewModel.isPurchasing)
                 .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
 
+                if !subscriptionViewModel.isProUnlocked,
+                   subscriptionViewModel.isFreeTrialAvailable {
+                    Button(L10n.tr("subscription.free_trial.button")) {
+                        if subscriptionViewModel.activateFreeTrial() {
+                            onClose()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(SubscriptionPalette.headerEnd)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(SubscriptionPalette.headerEnd.opacity(0.14))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(SubscriptionPalette.headerEnd.opacity(0.4), lineWidth: 1)
+                    )
+                    .help(L10n.tr("subscription.free_trial.button"))
+                    .disabled(subscriptionViewModel.isPurchasing)
+                    .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
+                }
+
                 #if DEBUG
                 if !subscriptionViewModel.isProUnlocked,
                    subscriptionViewModel.isDebugSubscriptionTrialAvailable {
-                    Text(subscriptionViewModel.debugTrialDaysLabel)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(SubscriptionPalette.inkPrimary)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
+                    Button(L10n.f(
+                        "subscription.debug.activate",
+                        subscriptionViewModel.debugTrialDaysLabel
+                    )) {
                             subscriptionViewModel.activateDebugSubscriptionTrial()
                             onClose()
                         }
-                        .help(L10n.tr("subscription.debug.skip_help"))
-                        .disabled(subscriptionViewModel.isPurchasing)
-                        .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
+                    .buttonStyle(.plain)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(SubscriptionPalette.inkPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .help(L10n.tr("subscription.debug.skip_help"))
+                    .disabled(subscriptionViewModel.isPurchasing)
+                    .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
                 }
                 #endif
 

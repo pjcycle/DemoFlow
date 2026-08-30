@@ -175,6 +175,7 @@ final class AppCoordinator: ObservableObject {
     let recordingControlController: RecordingControlWindowController
     let recordingRegionSelectionController: RecordingRegionSelectionWindowController
     let recordingRegionIndicatorController: RecordingRegionIndicatorWindowController
+    let recordingWindowSelectionController: RecordingWindowSelectionWindowController
     let recorder: ScreenRecorderEngine
 
     private let screenDrawHotkeyService: ScreenDrawHotkeyService
@@ -193,11 +194,16 @@ final class AppCoordinator: ObservableObject {
     private var pendingDrawCaptureRefreshTask: Task<Void, Never>?
     private var isSuppressingPiPHideCallback = false
     private var pendingPiPFilmStopTrigger: PiPFilmStopTrigger?
+    private var windowOcclusionToastDismissTask: Task<Void, Never>?
     private var armedRecordingCaptureMode: RecordingCaptureMode = .fullScreen
     private var pendingRegionSelection: RecordingRegionSelection?
     private var activeRecordingRegionSelection: RecordingRegionSelection?
+    private var pendingWindowSelection: RecordingWindowSelection?
+    private var activeRecordingWindowSelection: RecordingWindowSelection?
     private var recordingControlMode: RecordingControlMode = .ready
     private var recordingControlDisplayModel: RecordingControlDisplayModel = .default
+    private var recordingMicrophoneMuted = false
+    private var recordingHasMicrophoneInput = false
     private var recordingSessionSegmentURLs: [URL] = []
     private var recordingSessionElapsedBeforeCurrentSegment: TimeInterval = 0
     private var recordingSessionCurrentSegmentStart: Date?
@@ -224,6 +230,7 @@ final class AppCoordinator: ObservableObject {
             recordingControlController: RecordingControlWindowController(),
             recordingRegionSelectionController: RecordingRegionSelectionWindowController(),
             recordingRegionIndicatorController: RecordingRegionIndicatorWindowController(),
+            recordingWindowSelectionController: RecordingWindowSelectionWindowController(),
             screenDrawHotkeyService: ScreenDrawHotkeyService(),
             pipHotkeyService: PiPHotkeyService(),
             quickActionHotkeyService: QuickActionHotkeyService()
@@ -240,6 +247,7 @@ final class AppCoordinator: ObservableObject {
         recordingControlController: RecordingControlWindowController,
         recordingRegionSelectionController: RecordingRegionSelectionWindowController,
         recordingRegionIndicatorController: RecordingRegionIndicatorWindowController,
+        recordingWindowSelectionController: RecordingWindowSelectionWindowController,
         screenDrawHotkeyService: ScreenDrawHotkeyService,
         pipHotkeyService: PiPHotkeyService,
         quickActionHotkeyService: QuickActionHotkeyService
@@ -252,10 +260,20 @@ final class AppCoordinator: ObservableObject {
         self.recordingControlController = recordingControlController
         self.recordingRegionSelectionController = recordingRegionSelectionController
         self.recordingRegionIndicatorController = recordingRegionIndicatorController
+        self.recordingWindowSelectionController = recordingWindowSelectionController
         self.screenDrawHotkeyService = screenDrawHotkeyService
         self.pipHotkeyService = pipHotkeyService
         self.quickActionHotkeyService = quickActionHotkeyService
         self.recorder = ScreenRecorderEngine(cameraEngine: recordingCameraEngine)
+        self.recorder.onTargetWindowOccluded = { [weak self] in
+            self?.handleRecordingTargetWindowOccluded()
+        }
+        self.recorder.onTargetWindowUnoccluded = { [weak self] in
+            self?.handleRecordingTargetWindowUnoccluded()
+        }
+        self.recorder.onTargetWindowFrameUpdated = { [weak self] displayID, frame in
+            self?.handleRecordingTargetWindowFrameUpdated(displayID: displayID, frame: frame)
+        }
 
         if self.screenDrawToolbarController.drawSessionStore !== self.screenDrawCanvasController.drawSessionStore {
             assertionFailure("Screen drawing toolbar and canvas must share the same session store")
@@ -292,6 +310,9 @@ final class AppCoordinator: ObservableObject {
             self?.handleQuickActionHotkeyAction(action)
         }
         self.quickActionHotkeyService.shouldHandleAction = { _ in true }
+        self.pipPreviewRuntime.onPreviewSample = { [weak pipController] sampleBuffer in
+            pipController?.enqueuePreviewSample(sampleBuffer)
+        }
         self.pipPreviewRuntime.onRecordingFailure = { [weak self] error in
             self?.handlePiPRecordingRuntimeFailure(error)
         }
@@ -343,6 +364,9 @@ final class AppCoordinator: ObservableObject {
         }
         self.recordingControlController.onPauseToggleRequested = { [weak self] in
             self?.handleRecordingControlPauseToggle()
+        }
+        self.recordingControlController.onMicrophoneToggleRequested = { [weak self] in
+            self?.handleRecordingControlMicrophoneToggle()
         }
         self.recordingControlController.onRegionToggleRequested = { [weak self] in
             self?.handleRecordingControlRegionToggle()
@@ -747,7 +771,7 @@ final class AppCoordinator: ObservableObject {
             aspectRatio: pipAspectRatio
         )
         pipLayout = layout
-        let didShow = pipController.show(session: pipPreviewRuntime.previewSession, on: targetScreen, layout: layout)
+        let didShow = pipController.show(on: targetScreen, layout: layout)
         print("[PiP] didShow=\(didShow) visible=\(pipController.isVisible)")
         if !didShow {
             pipStatusMessage = L10n.tr("legacy.pip_space")
@@ -1083,10 +1107,7 @@ final class AppCoordinator: ObservableObject {
             showRecordingOutputLocationSettings()
             return
         }
-        guard subscriptionViewModel.isProUnlocked || !recordingQualityConfig.preset.requiresSubscription else {
-            requestSubscriptionUnlock(for: .recordingQuality)
-            return
-        }
+        // 录屏基础功能对所有用户开放，不设 VIP 闸门
         guard canStartRecording else {
             statusMessage = unavailableReason()
             return
@@ -1112,6 +1133,9 @@ final class AppCoordinator: ObservableObject {
         if recordingCaptureMode != captureMode {
             recordingCaptureMode = captureMode
         }
+        // 每次重新进入准备态都从干净的窗口选择状态开始；录制中不会调用这里。
+        recordingWindowSelectionController.stopContinuousListening()
+        pendingWindowSelection = nil
         resetRecordingSessionForArming(captureMode: captureMode)
         isRecordingArmed = true
         armedRecordingCaptureMode = captureMode
@@ -1131,6 +1155,12 @@ final class AppCoordinator: ObservableObject {
                 return
             }
             statusMessage = L10n.tr("recording.region.status.selecting")
+        } else if captureMode == .window {
+            dismissRegionSelectionOverlay()
+            pendingWindowSelection = nil
+            refreshRecordingControlSizeDisplayForCurrentMode()
+            statusMessage = L10n.tr("recording.window.status.selecting")
+            presentWindowSelectionIfNeeded()
         } else {
             dismissRegionSelectionOverlay()
             refreshRecordingControlSizeDisplayForCurrentMode()
@@ -1198,6 +1228,8 @@ final class AppCoordinator: ObservableObject {
             recordingFixedCapturePreset = nil
             recordingRegionSelectionController.setSelectionInteractionMode(.freeform)
             dismissRegionSelectionOverlay()
+            recordingWindowSelectionController.stopContinuousListening()
+            pendingWindowSelection = nil
             statusMessage = L10n.tr("legacy.key_115")
             if isRecordingArmed || recordingControlController.isVisible {
                 refreshRecordingControlSizeDisplayForCurrentMode()
@@ -1205,6 +1237,20 @@ final class AppCoordinator: ObservableObject {
             return
         }
 
+        if mode == .window {
+            dismissRegionSelectionOverlay()
+            recordingWindowSelectionController.stopContinuousListening()
+            pendingWindowSelection = nil
+            statusMessage = L10n.tr("recording.window.status.selecting")
+            if isRecordingArmed || recordingControlController.isVisible {
+                refreshRecordingControlSizeDisplayForCurrentMode()
+                presentWindowSelectionIfNeeded()
+            }
+            return
+        }
+
+        recordingWindowSelectionController.stopContinuousListening()
+        pendingWindowSelection = nil
         dismissRegionSelectionOverlay()
         let interactionMode: RecordingRegionSelectionInteractionMode = recordingFixedCapturePreset == nil ? .freeform : .fixedSizeLocked
         recordingRegionSelectionController.setSelectionInteractionMode(interactionMode)
@@ -1219,6 +1265,81 @@ final class AppCoordinator: ObservableObject {
             _ = beginRegionSelectionIfNeededForReadyControl(preferredScreen: nil)
             refreshRecordingControlSizeDisplayForCurrentMode()
         }
+    }
+
+    private func presentWindowSelectionIfNeeded() {
+        guard recordingCaptureMode == .window else { return }
+        guard !recorderState.isRecording else { return }
+        guard isRecordingArmed || (recordingControlController.isVisible && recordingControlMode == .ready) else { return }
+        if recordingWindowSelectionController.isListening { return }
+
+        // 启动持续监听（含 async 准备 shareableContent）；用 Task 包保持调用方同步签名
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.recordingWindowSelectionController.startContinuousListening(
+                onWindowPicked: { [weak self] selection in
+                    guard let self else { return }
+                    self.pendingWindowSelection = selection
+                    self.statusMessage = L10n.f(
+                        "recording.window.status.confirmed",
+                        selection.title
+                    )
+                    self.recordingWindowSelectionController.presentHighlight(for: selection)
+                    self.recordingControlController.bringToFront()
+                    self.refreshRecordingControlSizeDisplayForCurrentMode()
+                    self.updateRecordingControlDisplayModel()
+                    self.updateRecordingControlSurface()
+                },
+                onWindowFrameUpdated: { [weak self] selection in
+                    guard let self,
+                          self.pendingWindowSelection?.windowID == selection.windowID else { return }
+                    self.pendingWindowSelection = selection
+                    self.recordingControlController.bringToFront()
+                    self.refreshRecordingControlSizeDisplayForCurrentMode()
+                    self.updateRecordingControlDisplayModel()
+                    self.updateRecordingControlSurface()
+                },
+                onWindowDeselected: { [weak self] in
+                    guard let self else { return }
+                    self.pendingWindowSelection = nil
+                    self.statusMessage = L10n.tr("recording.window.status.deselected")
+                    self.refreshRecordingControlSizeDisplayForCurrentMode()
+                    self.updateRecordingControlDisplayModel()
+                    self.updateRecordingControlSurface()
+                },
+                onEscape: { [weak self] in
+                    guard let self else { return }
+                    self.recordingWindowSelectionController.stopContinuousListening()
+                    self.setRecordingCaptureMode(.fullScreen)
+                    self.statusMessage = L10n.tr("legacy.key_115")
+                },
+                onWindowLost: { [weak self] in
+                    guard let self else { return }
+                    self.pendingWindowSelection = nil
+                    self.statusMessage = L10n.tr("recording.window.lost_pre_recording")
+                    self.refreshRecordingControlSizeDisplayForCurrentMode()
+                    self.updateRecordingControlDisplayModel()
+                    self.updateRecordingControlSurface()
+                }
+            )
+            // 启动后再判一次：可能在 await 期间用户已切走模式或已开始录制
+            guard self.recordingCaptureMode == .window,
+                  !self.recorderState.isRecording else {
+                self.recordingWindowSelectionController.stopContinuousListening()
+                return
+            }
+            if let pendingWindowSelection = self.pendingWindowSelection {
+                self.recordingWindowSelectionController.presentHighlight(for: pendingWindowSelection)
+                self.recordingControlController.bringToFront()
+            } else {
+                self.statusMessage = L10n.tr("recording.window.status.selecting")
+            }
+        }
+    }
+
+    private func lockWindowSelectionForRecording() {
+        // 停止点击切换，但保留目标窗口虚线框；录制期间由引擎的位置跟踪更新它。
+        recordingWindowSelectionController.stopContinuousListening(keepingHighlight: true)
     }
 
     func activateRecordingFixedCapturePresetFromSettings(_ preset: RecordingFixedCapturePreset) {
@@ -1284,8 +1405,15 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func prepareRecordingCaptureSizeOptionForArming(_ option: RecordingControlCaptureSizeOption) {
-        recordingCaptureMode = .region
-        armedRecordingCaptureMode = .region
+        switch option {
+        case .freeform, .preset:
+            recordingCaptureMode = .region
+            armedRecordingCaptureMode = .region
+        case .window:
+            recordingCaptureMode = .window
+            armedRecordingCaptureMode = .window
+            return
+        }
         switch option {
         case .freeform:
             recordingFixedCapturePreset = nil
@@ -1293,6 +1421,8 @@ final class AppCoordinator: ObservableObject {
         case let .preset(preset):
             recordingFixedCapturePreset = preset
             recordingRegionSelectionController.setSelectionInteractionMode(.fixedSizeLocked)
+        case .window:
+            break
         }
     }
 
@@ -1309,6 +1439,19 @@ final class AppCoordinator: ObservableObject {
             break
         case let .preset(preset):
             applyFixedCapturePresetSelection(preset, preferredScreen: preferredScreen)
+        case .window:
+            // P1-E: 切到 .window 后启动窗口选择器；presentWindowSelectionIfNeeded 内部会
+            // 检测到 pendingWindowSelection 已经存在就直接复用，避免重复弹选择器
+            recordingWindowSelectionController.stopContinuousListening()
+            pendingWindowSelection = nil
+            dismissRegionSelectionOverlay()
+            recordingCaptureMode = .window
+            armedRecordingCaptureMode = .window
+            refreshRecordingControlSizeDisplayForCurrentMode()
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            presentWindowSelectionIfNeeded()
+            return
         }
 
         if beginRegionSelectionIfNeededForReadyControl(preferredScreen: preferredScreen) {
@@ -1320,6 +1463,8 @@ final class AppCoordinator: ObservableObject {
                 statusMessage = L10n.tr("recording.region.status.selecting")
             case .preset:
                 statusMessage = L10n.tr("recording.region.status.confirmed")
+            case .window:
+                break
             }
         } else {
             statusMessage = L10n.tr("recording.region.error.display_unavailable")
@@ -1474,6 +1619,10 @@ final class AppCoordinator: ObservableObject {
                     return recordingFixedCapturePreset.displayText
                 }
                 return recordingRegionSelectionSizeText
+            case .window:
+                // P1-A 占位：P1-E 会在窗口选择完成后渲染 "窗口标题 · 宽x高"
+                return pendingWindowSelection.map { "\($0.title) · \(Int($0.frameInDisplayPoints.width))×\(Int($0.frameInDisplayPoints.height))" }
+                    ?? L10n.tr("recording.window.no_selection")
             }
         }()
         recordingControlDisplayModel.captureSizeDisplay = sizeText
@@ -1753,9 +1902,15 @@ final class AppCoordinator: ObservableObject {
             stopRecordingControlSizeRefreshTimer()
             recordingRegionIndicatorController.hide()
             dismissRegionSelectionOverlay()
+            recordingWindowSelectionController.stopContinuousListening()
+            pendingWindowSelection = nil
             activeRecordingRegionSelection = nil
+            activeRecordingWindowSelection = nil
             recordingSessionLockedCaptureSizeDisplay = nil
             restoreMainWindowAfterRecording()
+            if recordingCaptureMode == .window {
+                presentWindowSelectionIfNeeded()
+            }
         case .failed:
             if recordingSessionStopIntent != .none || recordingControlMode == .paused {
                 return
@@ -1767,11 +1922,17 @@ final class AppCoordinator: ObservableObject {
             stopRecordingControlSizeRefreshTimer()
             recordingRegionIndicatorController.hide()
             dismissRegionSelectionOverlay()
+            recordingWindowSelectionController.stopContinuousListening()
+            pendingWindowSelection = nil
             activeRecordingRegionSelection = nil
+            activeRecordingWindowSelection = nil
             recordingSessionLockedCaptureSizeDisplay = nil
             restoreMainWindowAfterRecording()
             if isAudioAuthorized {
                 audioEngine.startMonitoringIfNeeded()
+            }
+            if recordingCaptureMode == .window {
+                presentWindowSelectionIfNeeded()
             }
         case .preparing, .stopping:
             break
@@ -1854,6 +2015,19 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    private func handleRecordingControlMicrophoneToggle() {
+        guard recordingControlMode == .recording,
+              recorderState.isRecording,
+              recordingHasMicrophoneInput else {
+            return
+        }
+
+        recordingMicrophoneMuted.toggle()
+        recorder.setMicrophoneMuted(recordingMicrophoneMuted)
+        updateRecordingControlDisplayModel()
+        updateRecordingControlSurface()
+    }
+
     private func handleRecordingControlRegionToggle() {
         guard recordingControlMode == .ready else { return }
         guard !recorderState.isRecording, !recorderState.isBusy else { return }
@@ -1869,12 +2043,34 @@ final class AppCoordinator: ObservableObject {
 
     private func handleRecordingControlCaptureSizeTapped() {
         guard recordingControlMode == .ready else { return }
-        let selectedOption: RecordingControlCaptureSizeOption? = {
-            guard recordingCaptureMode == .region else { return nil }
-            if let recordingFixedCapturePreset {
-                return .preset(recordingFixedCapturePreset)
+
+        // 窗口录制模式下：点尺寸按钮（显示窗口标题）重新激活持续监听让用户可换窗口
+        if recordingCaptureMode == .window {
+            recordingWindowSelectionController.clearCurrentSelection()
+            pendingWindowSelection = nil
+            statusMessage = L10n.tr("recording.window.status.selecting")
+            refreshRecordingControlSizeDisplayForCurrentMode()
+            updateRecordingControlDisplayModel()
+            updateRecordingControlSurface()
+            // 如果监听已经在跑（连续模式下不需要重启），不重复开
+            if !recordingWindowSelectionController.isListening {
+                presentWindowSelectionIfNeeded()
             }
-            return .freeform
+            return
+        }
+
+        let selectedOption: RecordingControlCaptureSizeOption? = {
+            switch recordingCaptureMode {
+            case .window:
+                return .window
+            case .region:
+                if let recordingFixedCapturePreset {
+                    return .preset(recordingFixedCapturePreset)
+                }
+                return .freeform
+            case .fullScreen:
+                return nil
+            }
         }()
 
         recordingControlController.showCaptureSizePicker(
@@ -1896,6 +2092,8 @@ final class AppCoordinator: ObservableObject {
         case .ready:
             isRecordingArmed = false
             dismissRegionSelectionOverlay()
+            recordingWindowSelectionController.stopContinuousListening()
+            pendingWindowSelection = nil
             recordingRegionIndicatorController.hide()
             recordingControlController.hide()
             stopRecordingControlSizeRefreshTimer()
@@ -1937,10 +2135,7 @@ final class AppCoordinator: ObservableObject {
             statusMessage = unavailableReason()
             return
         }
-        guard subscriptionViewModel.isProUnlocked || !recordingQualityConfig.preset.requiresSubscription else {
-            requestSubscriptionUnlock(for: .recordingQuality)
-            return
-        }
+        // 录屏基础功能对所有用户开放，不设 VIP 闸门
 
         let captureMode = armedRecordingCaptureMode
         let regionSelection: RecordingRegionSelection? = {
@@ -1951,6 +2146,10 @@ final class AppCoordinator: ObservableObject {
             }
             return pendingRegionSelection
         }()
+        let windowSelection: RecordingWindowSelection? = {
+            guard captureMode == .window else { return nil }
+            return pendingWindowSelection
+        }()
 
         if captureMode == .region {
             guard let regionSelection,
@@ -1959,11 +2158,23 @@ final class AppCoordinator: ObservableObject {
                 return
             }
             activeRecordingRegionSelection = regionSelection
+            activeRecordingWindowSelection = nil
             recordingSessionLockedCaptureSizeDisplay = formatSizeDisplay(for: regionSelection.rectInDisplayPoints.size)
             dismissRegionSelectionOverlay()
             _ = recordingRegionIndicatorController.show(selection: regionSelection)
+        } else if captureMode == .window {
+            guard let windowSelection else {
+                statusMessage = L10n.tr("recording.window.error.unavailable")
+                return
+            }
+            activeRecordingWindowSelection = windowSelection
+            activeRecordingRegionSelection = nil
+            recordingSessionLockedCaptureSizeDisplay = "\(Int(windowSelection.frameInDisplayPoints.width)) × \(Int(windowSelection.frameInDisplayPoints.height))"
+            dismissRegionSelectionOverlay()
+            recordingRegionIndicatorController.hide()
         } else {
             activeRecordingRegionSelection = nil
+            activeRecordingWindowSelection = nil
             recordingSessionLockedCaptureSizeDisplay = formattedCurrentScreenSizeDisplay()
             dismissRegionSelectionOverlay()
             recordingRegionIndicatorController.hide()
@@ -1982,9 +2193,15 @@ final class AppCoordinator: ObservableObject {
 
         let request = buildRecordingRequest(
             captureMode: captureMode,
-            regionSelection: activeRecordingRegionSelection
+            regionSelection: activeRecordingRegionSelection,
+            windowSelection: activeRecordingWindowSelection
         )
+        recordingHasMicrophoneInput = request.microphoneDeviceID != nil
         let screen = NSScreen.main ?? NSScreen.screens.first
+        // 窗口录制一旦开始录制，锁定窗口选择（不能再切换）
+        if captureMode == .window {
+            lockWindowSelectionForRecording()
+        }
         await recorder.startRecording(request: request, preferredScreen: screen)
         if recorder.state.isRecording {
             recordingControlMode = .recording
@@ -2000,6 +2217,8 @@ final class AppCoordinator: ObservableObject {
         } else {
             recordingControlMode = .ready
             isRecordingArmed = false
+            recordingMicrophoneMuted = false
+            recordingHasMicrophoneInput = false
             updateRecordingControlDisplayModel()
             updateRecordingControlSurface()
             if case .failed = recorder.state,
@@ -2091,7 +2310,6 @@ final class AppCoordinator: ObservableObject {
                 recordingSessionSegmentURLs.append(artifact.mergedURL)
             }
         }
-
         do {
             let finalURL = try await finalizeRecordingOutputIfNeeded()
             recorder.applyPostProcessedOutputURL(finalURL)
@@ -2109,6 +2327,8 @@ final class AppCoordinator: ObservableObject {
         }
         stopRecordingControlSizeRefreshTimer()
         recordingSessionStopIntent = .none
+        recordingWindowSelectionController.stopContinuousListening()
+        pendingWindowSelection = nil
         resetRecordingSessionStateForIdle()
         if isAudioAuthorized {
             audioEngine.startMonitoringIfNeeded()
@@ -2162,15 +2382,18 @@ final class AppCoordinator: ObservableObject {
 
     private func buildRecordingRequest(
         captureMode: RecordingCaptureMode,
-        regionSelection: RecordingRegionSelection?
+        regionSelection: RecordingRegionSelection?,
+        windowSelection: RecordingWindowSelection?
     ) -> RecordingRequest {
         let shouldCaptureMicrophone = isAudioAuthorized
             && audioEngine.selectedSourceID != nil
         return RecordingRequest(
             captureMode: captureMode,
             regionSelection: regionSelection,
+            windowSelection: windowSelection,
             includeAppWindowsInCapture: isAllRecordingEnabled,
             microphoneDeviceID: shouldCaptureMicrophone ? audioEngine.selectedSourceID : nil,
+            microphoneMutedAtStart: recordingMicrophoneMuted,
             cameraDeviceID: nil,
             cameraAudioDeviceID: nil,
             recordingQuality: recordingQualityConfig,
@@ -2191,6 +2414,8 @@ final class AppCoordinator: ObservableObject {
         recordingSessionLockedCaptureSizeDisplay = nil
         recordingSessionStopIntent = .none
         recordingControlMode = .ready
+        recordingMicrophoneMuted = false
+        recordingHasMicrophoneInput = false
         recordingControlDisplayModel = .default
         recordingControlDisplayModel.isAnnotateActive = isDrawOverlayVisible
         armedRecordingCaptureMode = captureMode
@@ -2215,6 +2440,8 @@ final class AppCoordinator: ObservableObject {
         recordingSessionLockedCaptureSizeDisplay = nil
         recordingSessionStopIntent = .none
         recordingControlMode = .ready
+        recordingMicrophoneMuted = false
+        recordingHasMicrophoneInput = false
         activeRecordingRegionSelection = nil
         updateRecordingControlDisplayModel()
         updateRecordingControlSurface()
@@ -2233,6 +2460,11 @@ final class AppCoordinator: ObservableObject {
         recordingControlDisplayModel.canRecordToggle = recordingControlMode != .stopping
         recordingControlDisplayModel.canPauseToggle = (recordingControlMode == .recording || recordingControlMode == .paused)
             && recordingControlMode != .stopping
+        recordingControlDisplayModel.isMicrophoneMuted = recordingMicrophoneMuted
+        recordingControlDisplayModel.hasMicrophoneInput = recordingHasMicrophoneInput
+            || (isAudioAuthorized && audioEngine.selectedSourceID != nil)
+        recordingControlDisplayModel.canToggleMicrophone = recordingControlMode == .recording
+            && recordingHasMicrophoneInput
         recordingControlDisplayModel.canClose = recordingControlMode != .stopping
         syncRecordingMenuBarPresentation(with: elapsed)
     }
@@ -3344,5 +3576,42 @@ private final class ScreenCapturePermissionProbe: NSObject, SCStreamOutput, SCSt
         _ = stream
         _ = sampleBuffer
         _ = outputType
+    }
+}
+
+// MARK: - 窗口遮挡 toast（AppCoordinator 扩展）
+private extension AppCoordinator {
+    func handleRecordingTargetWindowOccluded() {
+        statusMessage = L10n.tr("recording.window.toast.occluded")
+        windowOcclusionToastDismissTask?.cancel()
+        windowOcclusionToastDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            // 仅当遮挡提示仍然展示时才清理；避免覆盖掉用户后续操作产生的 statusMessage
+            if self.statusMessage == L10n.tr("recording.window.toast.occluded") {
+                self.statusMessage = ""
+            }
+        }
+    }
+
+    func handleRecordingTargetWindowUnoccluded() {
+        windowOcclusionToastDismissTask?.cancel()
+        windowOcclusionToastDismissTask = nil
+        // 不主动清 statusMessage——可能在显示别的重要消息；让 toast 自然 5s 后消失
+    }
+
+    func handleRecordingTargetWindowFrameUpdated(displayID: CGDirectDisplayID, frame: CGRect) {
+        guard let active = activeRecordingWindowSelection else { return }
+        // 用新 frame 重建 selection，触发 presentHighlight 重画虚线框跟随窗口
+        let updated = RecordingWindowSelection(
+            windowID: active.windowID,
+            windowIDs: active.windowIDs,
+            displayID: displayID,
+            frameInDisplayPoints: frame,
+            ownerBundleID: active.ownerBundleID,
+            title: active.title
+        )
+        activeRecordingWindowSelection = updated
+        recordingWindowSelectionController.presentHighlight(for: updated)
     }
 }

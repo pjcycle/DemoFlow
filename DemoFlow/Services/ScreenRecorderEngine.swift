@@ -24,6 +24,10 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     private let compositionEngine = CompositionExportEngine()
     private let pipProcessingEngine = PiPFrameProcessingEngine()
     private let recordingSampleQueue = DispatchQueue(label: "DemoFlow.screen-recorder.sample-writer")
+    private let windowTrackingService = WindowTrackingService()
+    private let windowOcclusionMonitor = WindowOcclusionMonitor()
+    nonisolated(unsafe) private var windowRecordingCompositor: WindowRecordingCompositor?
+    private var lastStreamConfiguration: SCStreamConfiguration?
 
     private var stream: SCStream?
     private var currentRequest: RecordingRequest?
@@ -51,6 +55,15 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     ) {
         self.cameraEngine = cameraEngine
         super.init()
+    }
+
+    var onTargetWindowOccluded: (() -> Void)?
+    var onTargetWindowUnoccluded: (() -> Void)?
+    /// 录制中窗口 frame 变化（应用并集 frame 实时更新）—— AppCoordinator 用于同步虚线框
+    var onTargetWindowFrameUpdated: ((CGDirectDisplayID, CGRect) -> Void)?
+
+    func setMicrophoneMuted(_ muted: Bool) {
+        screenFileWriter?.setMicrophoneMuted(muted)
     }
 
     func startRecording(
@@ -105,6 +118,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
                     if let keyframe = result.keyframe {
                         self.currentFaceKeyframes.append(keyframe)
                     }
+                    self.windowRecordingCompositor?.updateLatestCameraFrame(result.previewImage)
                 }
 
                 do {
@@ -131,6 +145,20 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             try await streamBundle.stream.startCapture()
             try await waitForRecordingStart()
             state = .recording
+            // 窗口录制 + 启用了 camera：初始化 PiP compositor
+            if request.captureMode == .window, request.cameraDeviceID != nil {
+                windowRecordingCompositor = WindowRecordingCompositor()
+            }
+            // 应用录制：启动窗口位置跟踪
+            if request.captureMode == .window, let windowSel = request.windowSelection {
+                let trackIDs = windowSel.windowIDs.isEmpty ? [windowSel.windowID] : windowSel.windowIDs
+                startWindowTracking(
+                    windowIDs: trackIDs,
+                    displayID: windowSel.displayID,
+                    initialFrameInDisplayPoints: windowSel.frameInDisplayPoints,
+                    stream: streamBundle.stream
+                )
+            }
             let recordingStatus = cameraTrackEnabled ? L10n.tr("legacy.key_114") : L10n.tr("legacy.key_113")
             let withMic = request.microphoneDeviceID != nil
             let inputStatus = withMic ? L10n.tr("legacy.key_231") : L10n.tr("legacy.key_230")
@@ -156,6 +184,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         guard stream != nil else { return }
         state = .stopping
         statusMessage = L10n.tr("legacy.key_14")
+        windowTrackingService.stopTracking()
+        windowOcclusionMonitor.stopMonitoring()
 
         let layout = currentRequest?.pipLayout ?? .default
         cameraEngine.onProcessingSample = nil
@@ -329,6 +359,68 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         }
     }
 
+    private func startWindowTracking(
+        windowIDs: [CGWindowID],
+        displayID: CGDirectDisplayID,
+        initialFrameInDisplayPoints: CGRect,
+        stream: SCStream
+    ) {
+        let weakStreamRef = WeakStream(stream: stream)
+        // 用第一个 windowID 作为 occlusion 检测的参考（应用整体检测）
+        let referenceWindowID = windowIDs.first ?? 0
+        windowOcclusionMonitor.startMonitoring(
+            windowID: referenceWindowID,
+            onOccluded: { [weak self] in
+                self?.onTargetWindowOccluded?()
+            },
+            onUnoccluded: { [weak self] in
+                self?.onTargetWindowUnoccluded?()
+            }
+        )
+        windowTrackingService.startTracking(
+            windowIDs: windowIDs,
+            displayID: displayID,
+            initialFrameInDisplayPoints: initialFrameInDisplayPoints,
+            onUpdate: { [weak self] update in
+                guard let self else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard let liveStream = weakStreamRef.stream,
+                          liveStream === self.stream else { return }
+                    let newConfig = SCStreamConfiguration()
+                    newConfig.sourceRect = update.frameInDisplayPoints
+                    // 其他字段保持引擎启动时的默认；updateConfiguration 整体替换需要包含所有
+                    if let baseConfig = self.lastStreamConfiguration {
+                        newConfig.width = baseConfig.width
+                        newConfig.height = baseConfig.height
+                        newConfig.minimumFrameInterval = baseConfig.minimumFrameInterval
+                        newConfig.queueDepth = baseConfig.queueDepth
+                        newConfig.capturesAudio = baseConfig.capturesAudio
+                        newConfig.captureMicrophone = baseConfig.captureMicrophone
+                        newConfig.pixelFormat = baseConfig.pixelFormat
+                        if let micID = baseConfig.microphoneCaptureDeviceID {
+                            newConfig.microphoneCaptureDeviceID = micID
+                        }
+                    }
+                    do {
+                        try await liveStream.updateConfiguration(newConfig)
+                    } catch {
+                        // 更新失败时不影响录制继续；下一轮 0.5s 会再尝试
+                    }
+                    // 通知 AppCoordinator 同步虚线框（跟随窗口大小变化）
+                    self.onTargetWindowFrameUpdated?(displayID, update.frameInDisplayPoints)
+                }
+            },
+            onLost: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.statusMessage = L10n.tr("recording.window.lost_during_recording")
+                    await self.stopRecording(reason: .finalize)
+                }
+            }
+        )
+    }
+
     private func buildScreenStream(
         screenRawURL: URL,
         request: RecordingRequest
@@ -344,6 +436,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             if request.captureMode == .region, let selection = request.regionSelection {
                 return selection.displayID
             }
+            if request.captureMode == .window, let selection = request.windowSelection {
+                return selection.displayID
+            }
             return CGMainDisplayID()
         }()
 
@@ -354,12 +449,35 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         if request.captureMode == .region, display.displayID != preferredDisplayID {
             throw RecorderError.regionDisplayUnavailable
         }
+
+        // 录应用下：filter 只保留目标应用的所有可见窗口；window 不强制等于 preferredDisplayID（窗口可能被拖动）
+        let filterPipWindowID: CGWindowID?
+        let filterExtraWindowIDs: [CGWindowID]
+        let filterIncludeAppWindows: Bool
+        if request.captureMode == .window, let windowSel = request.windowSelection {
+            // 应用录制：保留所有 windowIDs；其中至少一个要存在
+            let validIDs = windowSel.windowIDs.filter { id in
+                content.windows.contains(where: { $0.windowID == id && $0.isOnScreen })
+            }
+            guard !validIDs.isEmpty else {
+                throw RecorderError.windowUnavailable
+            }
+            filterPipWindowID = nil
+            filterExtraWindowIDs = validIDs
+            filterIncludeAppWindows = false
+        } else {
+            filterPipWindowID = request.pipWindowID
+            filterExtraWindowIDs = request.screenDrawWindowIDs
+            filterIncludeAppWindows = request.includeAppWindowsInCapture
+        }
+
         let filterContext = makeDisplayFilterContext(
             from: content,
             display: display,
-            pipWindowID: request.pipWindowID,
-            extraIncludedWindowIDs: request.screenDrawWindowIDs,
-            includeAppWindowsInCapture: request.includeAppWindowsInCapture
+            pipWindowID: filterPipWindowID,
+            extraIncludedWindowIDs: filterExtraWindowIDs,
+            includeAppWindowsInCapture: filterIncludeAppWindows,
+            windowOnly: request.captureMode == .window
         )
 
         let configuration = SCStreamConfiguration()
@@ -376,6 +494,34 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             )
             guard clampedRect.width >= 2, clampedRect.height >= 2 else {
                 throw RecorderError.invalidRegion
+            }
+            configuration.sourceRect = clampedRect
+            captureRectInDisplayPoints = clampedRect
+        } else if request.captureMode == .window, let selection = request.windowSelection {
+            // 应用录制：实时按当前所有可见窗口的并集计算 sourceRect
+            let validIDs = selection.windowIDs
+            let liveRects = validIDs.compactMap { id -> CGRect? in
+                guard let w = content.windows.first(where: { $0.windowID == id && $0.isOnScreen }) else { return nil }
+                return w.frame
+            }
+            var unionRect: CGRect
+            if liveRects.isEmpty {
+                unionRect = selection.frameInDisplayPoints
+            } else {
+                let localRects = liveRects.map {
+                    RecordingWindowCoordinateSpace.captureLocalFrame(
+                        forCaptureFrame: $0,
+                        displayID: selection.displayID
+                    )
+                }
+                unionRect = localRects.dropFirst().reduce(localRects[0]) { $0.union($1) }
+            }
+            let clampedRect = clampedRegionRect(
+                unionRect,
+                displaySizeInPoints: CGSize(width: CGFloat(display.width), height: CGFloat(display.height))
+            )
+            guard clampedRect.width >= 2, clampedRect.height >= 2 else {
+                throw RecorderError.windowUnavailable
             }
             configuration.sourceRect = clampedRect
             captureRectInDisplayPoints = clampedRect
@@ -416,7 +562,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             videoBitrateMbps: profile.videoBitrateMbps,
             audioSettings: configuration.captureMicrophone
                 ? makeMicrophoneAudioSettings(for: request.microphoneDeviceID)
-                : nil
+                : nil,
+            microphoneMuted: request.microphoneMutedAtStart
         )
 
         let stream = SCStream(filter: filterContext.filter, configuration: configuration, delegate: self)
@@ -424,6 +571,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         if configuration.captureMicrophone {
             try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: recordingSampleQueue)
         }
+        lastStreamConfiguration = configuration
 
         return (
             stream: stream,
@@ -465,7 +613,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         display: SCDisplay,
         pipWindowID: CGWindowID?,
         extraIncludedWindowIDs: [CGWindowID],
-        includeAppWindowsInCapture: Bool
+        includeAppWindowsInCapture: Bool,
+        windowOnly: Bool = false
     ) -> DisplayFilterContext {
         let mainBundleID = Bundle.main.bundleIdentifier
         let excludedApplicationBundleIDs = Set(
@@ -500,11 +649,19 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             let missingWindowIDs = requestedWindowIDs.subtracting(matchedRequestedWindowIDs).sorted()
             print("[RecordingWhitelist] unresolved windowIDs=\(missingWindowIDs)")
         }
-        let filter = SCContentFilter(
-            display: display,
-            excludingApplications: excludedApplications,
-            exceptingWindows: includedWindows
-        )
+        // 窗口录制必须使用 includingWindows。excludingApplications +
+        // exceptingWindows 的语义仍然是“捕获整块显示器”，因此会把桌面和 Dock
+        // 带进来，即使 exceptingWindows 里只有用户点击的窗口。
+        let filter: SCContentFilter
+        if windowOnly {
+            filter = SCContentFilter(display: display, including: includedWindows)
+        } else {
+            filter = SCContentFilter(
+                display: display,
+                excludingApplications: excludedApplications,
+                exceptingWindows: includedWindows
+            )
+        }
         let warnsAppWindowExclusion = !excludedApplications.contains { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
         return DisplayFilterContext(
             filter: filter,
@@ -786,7 +943,12 @@ extension ScreenRecorderEngine: SCStreamOutput {
         }
         guard let screenFileWriter else { return }
 
-        screenFileWriter.append(sampleBuffer: sampleBuffer, outputType: outputType) { [weak self] event in
+        var bufferToWrite = sampleBuffer
+        if outputType == .screen, let compositor = self.windowRecordingCompositor {
+            bufferToWrite = compositor.process(sampleBuffer: sampleBuffer)
+        }
+
+        screenFileWriter.append(sampleBuffer: bufferToWrite, outputType: outputType) { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handleWriterEvent(event)
             }
@@ -830,6 +992,7 @@ extension ScreenRecorderEngine {
         case noDisplay
         case regionDisplayUnavailable
         case invalidRegion
+        case windowUnavailable
         case missingIntermediate(String)
         case emptyIntermediate(String)
         case outputDirectoryAccessFailed
@@ -846,6 +1009,8 @@ extension ScreenRecorderEngine {
                 return L10n.tr("recording.region.error.display_unavailable")
             case .invalidRegion:
                 return L10n.tr("recording.region.error.invalid_region")
+            case .windowUnavailable:
+                return L10n.tr("recording.window.error.unavailable")
             case let .missingIntermediate(name):
                 return L10n.f("fmt.recording.missing_intermediate", name)
             case let .emptyIntermediate(name):
@@ -916,6 +1081,7 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
     nonisolated(unsafe) private var didEmitStartedEvent = false
     nonisolated(unsafe) private var didEmitFailureEvent = false
     nonisolated(unsafe) private var isFinishing = false
+    nonisolated(unsafe) private var microphoneMuted: Bool
 
     init(
         outputURL: URL,
@@ -923,8 +1089,10 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
         codec: RecordingVideoCodec,
         fps: Int,
         videoBitrateMbps: Int,
-        audioSettings: [String: Any]?
+        audioSettings: [String: Any]?,
+        microphoneMuted: Bool
     ) throws {
+        self.microphoneMuted = microphoneMuted
         let videoCodecType: AVVideoCodecType = codec == .hevc ? .hevc : .h264
         do {
             if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -984,6 +1152,13 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
             default:
                 break
             }
+        }
+    }
+
+    nonisolated func setMicrophoneMuted(_ muted: Bool) {
+        queue.async {
+            guard !self.isFinishing else { return }
+            self.microphoneMuted = muted
         }
     }
 
@@ -1069,15 +1244,116 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard CMTimeCompare(presentationTime, sessionStartTime) >= 0 else { return }
         guard audioInput.isReadyForMoreMediaData else { return }
-        guard audioInput.append(sampleBuffer) else {
+        let sampleToAppend: CMSampleBuffer
+        if microphoneMuted {
+            guard let silenceSample = makeSilenceSample(from: sampleBuffer) else {
+                return
+            }
+            sampleToAppend = silenceSample
+        } else {
+            sampleToAppend = sampleBuffer
+        }
+        guard audioInput.append(sampleToAppend) else {
             emitFailure(assetWriter.error ?? WriterError.audioAppendFailed, eventHandler: eventHandler)
             return
         }
+    }
+
+    nonisolated private func makeSilenceSample(from sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+        guard let sourceDataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            return nil
+        }
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            return nil
+        }
+        let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard sampleCount > 0 else { return nil }
+        let dataLength = CMBlockBufferGetDataLength(sourceDataBuffer)
+        guard dataLength > 0 else { return nil }
+
+        var silentDataBuffer: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: dataLength,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: dataLength,
+            flags: 0,
+            blockBufferOut: &silentDataBuffer
+        ) == kCMBlockBufferNoErr,
+        let silentDataBuffer,
+        CMBlockBufferFillDataBytes(
+            with: 0,
+            blockBuffer: silentDataBuffer,
+            offsetIntoDestination: 0,
+            dataLength: dataLength
+        ) == kCMBlockBufferNoErr else {
+            return nil
+        }
+
+        var requiredTimingEntryCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(
+            sampleBuffer,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &requiredTimingEntryCount
+        ) == noErr,
+        requiredTimingEntryCount > 0 else {
+            return nil
+        }
+
+        var timingInfos = Array(
+            repeating: CMSampleTimingInfo.invalid,
+            count: requiredTimingEntryCount
+        )
+        let copiedTimingStatus = timingInfos.withUnsafeMutableBufferPointer { timingBuffer in
+            CMSampleBufferGetSampleTimingInfoArray(
+                sampleBuffer,
+                entryCount: timingBuffer.count,
+                arrayToFill: timingBuffer.baseAddress,
+                entriesNeededOut: nil
+            )
+        }
+        guard copiedTimingStatus == noErr else { return nil }
+
+        let sampleSizes = (0..<sampleCount).map {
+            CMSampleBufferGetSampleSize(sampleBuffer, at: $0)
+        }
+        guard sampleSizes.allSatisfy({ $0 > 0 }) else { return nil }
+
+        var silentSample: CMSampleBuffer?
+        let sampleCreationStatus = timingInfos.withUnsafeBufferPointer { timingBuffer in
+            sampleSizes.withUnsafeBufferPointer { sampleSizeBuffer in
+                CMSampleBufferCreateReady(
+                    allocator: kCFAllocatorDefault,
+                    dataBuffer: silentDataBuffer,
+                    formatDescription: formatDescription,
+                    sampleCount: sampleCount,
+                    sampleTimingEntryCount: timingBuffer.count,
+                    sampleTimingArray: timingBuffer.baseAddress,
+                    sampleSizeEntryCount: sampleSizeBuffer.count,
+                    sampleSizeArray: sampleSizeBuffer.baseAddress,
+                    sampleBufferOut: &silentSample
+                )
+            }
+        }
+        guard sampleCreationStatus == noErr else { return nil }
+        return silentSample
     }
 
     nonisolated private func emitFailure(_ error: Error, eventHandler: @escaping (Event) -> Void) {
         guard !didEmitFailureEvent else { return }
         didEmitFailureEvent = true
         eventHandler(.failed(error))
+    }
+}
+
+private final class WeakStream {
+    weak var stream: SCStream?
+
+    init(stream: SCStream) {
+        self.stream = stream
     }
 }

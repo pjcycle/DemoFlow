@@ -30,34 +30,66 @@ final class SubscriptionViewModel: ObservableObject {
     private static let debugFallbackExpirationDefaultsKey = "demoflow.subscription.debug.expiration"
     private static let legacyDebugBypassEnabledDefaultsKey = "demoflow.subscription.debug.bypass.enabled"
 #endif
+#if DEBUG || DEMOFLOW_EXTERNAL_CHANNEL
+    private static let diagnosticsVisibilityDefaultsKey = "demoflow.subscription.diagnostics.visible"
+#endif
 
     @Published private(set) var isLoadingProducts = false
     @Published private(set) var isPurchasing = false
+    @Published private(set) var isSubscriptionDiagnosticsVisible = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var activePlan: SubscriptionPlan?
     @Published private(set) var activeExpirationDate: Date?
     @Published private(set) var activeEntitlement: SubscriptionEntitlementStatus = .free
     @Published private(set) var membershipLevel: SubscriptionMembershipLevel = .free
     @Published private(set) var products: [SubscriptionPlan: Product] = [:]
-    #if DEBUG
+#if DEBUG
     @Published private(set) var syntheticProducts: [SubscriptionPlan: SyntheticStoreKitProduct] = [:]
+    @Published private(set) var debugClearMessage: String?
     #endif
     @Published private(set) var isUsingDebugFallback = false
+    @Published private(set) var isUsingFreeTrial = false
     @Published var selectedPlan: SubscriptionPlan = .yearly
+
+    private let freeTrialStore = SubscriptionFreeTrialStore.shared
+
+    init() {
+#if DEBUG || DEMOFLOW_EXTERNAL_CHANNEL
+        isSubscriptionDiagnosticsVisible =
+            UserDefaults.standard.bool(forKey: Self.diagnosticsVisibilityDefaultsKey) ||
+            ProcessInfo.processInfo.arguments.contains("-DemoFlowEnableSubscriptionDiagnostics")
+#endif
+    }
 
     private var hasBootstrapped = false
     private var transactionObserverTask: Task<Void, Never>?
     private var automaticProductRetryTask: Task<Void, Never>?
     private var automaticProductRetryIndex = 0
+    private var lastProductLoadDiagnostics: String?
+    private var lastProductLoadAttemptCount = 0
+    private var lastProductLoadDate: Date?
+    private var lastTransactionEnvironment: String?
 
     // StoreKit can become available a few seconds after a fresh install or a
     // network transition. Retry the catalogue a limited number of times so a
     // transient empty response does not leave the purchase window stranded.
-    private let automaticProductRetryDelays: [UInt64] = [
-        2_000_000_000,
-        6_000_000_000,
-        15_000_000_000
-    ]
+    private var automaticProductRetryDelays: [UInt64] {
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+        // TestFlight needs a short feedback loop while retaining the existing
+        // local/App Store timing for the other build channels.
+        return [
+            1_000_000_000,
+            3_000_000_000,
+            8_000_000_000
+        ]
+#else
+        return [
+            2_000_000_000,
+            6_000_000_000,
+            15_000_000_000
+        ]
+#endif
+    }
 #if DEBUG
     private var localStoreKitSessionStatus: String {
         let hasInjectedURL = ProcessInfo.processInfo.environment["STOREKIT_CONFIGURATION_URL"] != nil
@@ -74,8 +106,6 @@ final class SubscriptionViewModel: ObservableObject {
         ProcessInfo.processInfo.arguments.contains("-DemoFlowLocalStoreKit")
     }
 #if DEBUG
-    private var lastProductLoadDiagnostics: String?
-
     private var debugBuildMarker: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
@@ -207,9 +237,100 @@ final class SubscriptionViewModel: ObservableObject {
 
     var isProUnlocked: Bool { activeEntitlement.isPro }
 
-    var shouldOfferProductReload: Bool {
-        !isProUnlocked && !isLoadingProducts && !isPurchasing && products.isEmpty
+    var isFreeTrialAvailable: Bool {
+        !isProUnlocked && freeTrialStore.canClaimTrial
     }
+
+    @discardableResult
+    func activateFreeTrial() -> Bool {
+        guard !isProUnlocked else {
+            statusMessage = L10n.tr("subscription.status.already_owned")
+            return false
+        }
+
+        guard let expirationDate = freeTrialStore.claim() else {
+            statusMessage = freeTrialStore.hasClaimedTrial()
+                ? L10n.tr("subscription.status.free_trial_already_used")
+                : L10n.tr("subscription.status.free_trial_unavailable")
+            return false
+        }
+
+        isUsingFreeTrial = true
+        applyActivePlan(.monthly, expirationDate: expirationDate)
+        statusMessage = L10n.tr("subscription.status.free_trial_activated")
+        diagnosticsLog(
+            "public free trial activated; days=\(SubscriptionFreeTrialStore.trialDays); expiration=\(expirationDate)"
+        )
+        return true
+    }
+
+#if DEBUG
+    var isDebugSubscriptionInfoClearAvailable: Bool { true }
+#endif
+
+    func toggleSubscriptionDiagnosticsVisibility() {
+#if DEBUG || DEMOFLOW_EXTERNAL_CHANNEL
+        isSubscriptionDiagnosticsVisible.toggle()
+        UserDefaults.standard.set(
+            isSubscriptionDiagnosticsVisible,
+            forKey: Self.diagnosticsVisibilityDefaultsKey
+        )
+        diagnosticsLog(
+            "subscription diagnostics visibility changed; visible=\(isSubscriptionDiagnosticsVisible)"
+        )
+#endif
+    }
+
+    var shouldOfferProductReload: Bool {
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+        return !isProUnlocked &&
+        !isLoadingProducts &&
+        !isPurchasing &&
+        products.count < SubscriptionPlan.allCases.count &&
+        automaticProductRetryTask == nil
+#else
+        return !isProUnlocked && !isLoadingProducts && !isPurchasing && products.isEmpty
+#endif
+    }
+
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+    /// TestFlight-only product diagnostics. The local Debug UI keeps its
+    /// existing StoreKit diagnostics and fallback flow. Display is opt-in.
+    var externalBuildMarker: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        return L10n.f("subscription.debug.external_build_marker", version, build)
+    }
+
+    var subscriptionDiagnosticsSummary: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        let requestedIDs = SubscriptionPlan.allCases.map(\.productID).joined(separator: ", ")
+        let attemptText = lastProductLoadAttemptCount == 0
+            ? "none"
+            : "\(lastProductLoadAttemptCount)"
+        let timeText: String
+        if let lastProductLoadDate {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            timeText = formatter.string(from: lastProductLoadDate)
+        } else {
+            timeText = "none"
+        }
+
+        return [
+            "channel=external/testflight bundleID=\(Bundle.main.bundleIdentifier ?? "<missing>") version=\(version) build=\(build)",
+            "storeKitEnvironment=\(storeKitEnvironmentDiagnostic) canMakePayments=\(AppStore.canMakePayments)",
+            "requested=[\(requestedIDs)]",
+            "realProducts=\(products.count)/\(SubscriptionPlan.allCases.count) attempt=\(attemptText) autoRetry=\(automaticProductRetryIndex)/\(automaticProductRetryDelays.count) last=\(timeText)",
+            lastProductLoadDiagnostics ?? "returned=<not-started> missing=<not-started> error=<none>"
+        ].joined(separator: "\n")
+    }
+
+    func openSubscriptionDiagnosticsLog() {
+        SubscriptionDiagnosticsStore.shared.openLogFile()
+    }
+#endif
 
     var membershipBadgeText: String? {
         membershipLevel.badgeTextKey.map { L10n.tr($0) }
@@ -306,6 +427,10 @@ final class SubscriptionViewModel: ObservableObject {
         }
         await loadProductsIfNeeded()
         await refreshEntitlements()
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+        // Do not delay product loading on the optional environment probe.
+        await loadAppTransactionEnvironment()
+#endif
         #if DEBUG
         let bootstrapRealCount = products.count
         let bootstrapSyntheticCount = syntheticProducts.count
@@ -323,6 +448,26 @@ final class SubscriptionViewModel: ObservableObject {
         defer { isLoadingProducts = false }
         let requestedProductIDs = SubscriptionPlan.allCases.map(\.productID)
         let totalProductCount = requestedProductIDs.count
+        lastProductLoadAttemptCount = 0
+        lastProductLoadDate = Date()
+        lastProductLoadDiagnostics = "requested=[\(requestedProductIDs.joined(separator: ", "))] returned=<pending> missing=<pending> error=<none>"
+
+#if DEBUG
+        // The fallback-only scheme must remain usable when StoreKit is not
+        // available. The regular Debug scheme still exercises real local
+        // StoreKit because it passes -DemoFlowLocalStoreKit.
+        if canUseDebugSubscriptionFallback && !isLocalStoreKitRequested {
+            let parsedSynthetic = parseBundledStoreKitSyntheticProducts()
+            syntheticProducts = parsedSynthetic
+            isUsingDebugFallback = persistedDebugFallbackPlan != nil
+            lastProductLoadAttemptCount = 1
+            lastProductLoadDiagnostics = "requested=[\(requestedProductIDs.joined(separator: ", "))] returned=[] missing=[\(requestedProductIDs.joined(separator: ", "))] error=<none> mode=explicit-debug-fallback"
+            diagnosticsLog("product load bypassed StoreKit; synthetic=\(parsedSynthetic.count)/\(totalProductCount); mode=explicit-debug-fallback")
+            statusMessage = L10n.tr("subscription.status.debug_fallback_ready")
+            return
+        }
+#endif
+
         // Preserve a previously loaded product if a later refresh is affected
         // by a temporary StoreKit outage. A cached Product remains valid for
         // the current app session and still drives the system purchase sheet.
@@ -332,6 +477,8 @@ final class SubscriptionViewModel: ObservableObject {
         diagnosticsLog("product load begin; requested=[\(requestedProductIDs.joined(separator: ", "))]")
 
         for attempt in 0..<3 {
+            lastProductLoadAttemptCount = attempt + 1
+            lastProductLoadDate = Date()
             diagnosticsLog("product load attempt \(attempt + 1)/3 begin")
             do {
                 let loaded = try await Product.products(for: requestedProductIDs)
@@ -342,23 +489,19 @@ final class SubscriptionViewModel: ObservableObject {
                     guard let plan = SubscriptionPlan(productID: product.id) else { continue }
                     nextProducts[plan] = product
                 }
-#if DEBUG
                 let returnedIDs = loaded.map(\.id).sorted().joined(separator: ", ")
                 let missingIDs = requestedProductIDs.filter { id in !loaded.contains(where: { $0.id == id }) }
                     .sorted()
                     .joined(separator: ", ")
                 lastProductLoadDiagnostics = "requested=[\(requestedProductIDs.joined(separator: ", "))] returned=[\(returnedIDs)] missing=[\(missingIDs)]"
                 diagnosticsLog("product load attempt \(attempt + 1)/3 result; returned=[\(returnedIDs)]; missing=[\(missingIDs)]; count=\(loaded.count)")
-                NSLog("[Subscription] Product load attempt %d: %@", attempt + 1, lastProductLoadDiagnostics ?? "")
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+                if isSubscriptionDiagnosticsVisible {
+                    NSLog("[Subscription] Product load attempt %d: %@", attempt + 1, lastProductLoadDiagnostics ?? "")
+                }
+#if DEBUG
                 NSLog("[Subscription] %@", debugRunMarkerMessage)
 #endif
-
-#if !DEBUG
-                let returnedIDs = loaded.map(\.id).sorted().joined(separator: ", ")
-                let missingIDs = requestedProductIDs.filter { id in !loaded.contains(where: { $0.id == id }) }
-                    .sorted()
-                    .joined(separator: ", ")
-                diagnosticsLog("product load attempt \(attempt + 1)/3 result; returned=[\(returnedIDs)]; missing=[\(missingIDs)]; count=\(loaded.count)")
 #endif
 
                 if nextProducts.count == totalProductCount || !nextProducts.isEmpty {
@@ -368,7 +511,9 @@ final class SubscriptionViewModel: ObservableObject {
                 lastError = error
                 debugLogProductLoadFailure(error)
                 diagnosticsLog("product load attempt \(attempt + 1)/3 error; \(diagnosticErrorDescription(error))")
-#if DEBUG
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+                lastProductLoadDiagnostics = "requested=[\(requestedProductIDs.joined(separator: ", "))] returned=[] missing=[\(requestedProductIDs.joined(separator: ", "))] error=\(diagnosticErrorDescription(error))"
+#else
                 lastProductLoadDiagnostics = "requested=[\(requestedProductIDs.joined(separator: ", "))] error=\(error.localizedDescription)"
 #endif
             }
@@ -417,7 +562,7 @@ final class SubscriptionViewModel: ObservableObject {
                 statusMessage = productsUnavailableMessage(error: lastError)
             }
             #else
-            statusMessage = L10n.tr("subscription.status.products_connecting")
+            statusMessage = productsUnavailableStatusMessage(error: lastError)
             scheduleAutomaticProductRetryIfNeeded()
             #endif
         } else {
@@ -431,7 +576,7 @@ final class SubscriptionViewModel: ObservableObject {
             }
 #else
             isUsingDebugFallback = false
-            statusMessage = L10n.tr("subscription.status.products_partial")
+            statusMessage = productsPartialStatusMessage()
             scheduleAutomaticProductRetryIfNeeded()
 #endif
         }
@@ -614,6 +759,7 @@ final class SubscriptionViewModel: ObservableObject {
                 diagnosticsLog("entitlement ignored; result=unverified_or_unknown")
                 continue
             }
+            lastTransactionEnvironment = transaction.environment.rawValue
             entitlementProductIDs.append(transaction.productID)
             diagnosticsLog("entitlement verified; productID=\(transaction.productID); transactionID=\(transaction.id)")
             if let currentPlan = activePlan {
@@ -644,6 +790,15 @@ final class SubscriptionViewModel: ObservableObject {
             isUsingDebugFallback = false
         }
         #endif
+
+        if activePlan == nil,
+           let freeTrialExpirationDate = freeTrialStore.activeTrialExpirationDate() {
+            activePlan = .monthly
+            activeExpirationDate = freeTrialExpirationDate
+            isUsingFreeTrial = true
+        } else {
+            isUsingFreeTrial = false
+        }
 
         applyActivePlan(activePlan, expirationDate: activeExpirationDate)
         diagnosticsLog("entitlement refresh end; results=\(entitlementResultCount); productIDs=[\(entitlementProductIDs.sorted().joined(separator: ", "))]; activePlan=\(activePlan?.rawValue ?? "free"); membership=\(membershipLevel.rawValue); fallback=\(isUsingDebugFallback)")
@@ -768,6 +923,9 @@ final class SubscriptionViewModel: ObservableObject {
 
     private func productsUnavailableMessage(error: Error?) -> String {
         #if DEBUG
+        guard isSubscriptionDiagnosticsVisible else {
+            return L10n.tr("subscription.status.products_failed")
+        }
         if let error {
             return L10n.f(
                 "subscription.status.products_failed_debug_reason",
@@ -785,13 +943,46 @@ final class SubscriptionViewModel: ObservableObject {
             reason = L10n.tr("subscription.status.products_failed_debug_scheme")
         }
         return L10n.f("subscription.status.products_failed_debug_reason", reason)
+        #elseif DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+        guard isSubscriptionDiagnosticsVisible else {
+            return L10n.tr("subscription.status.products_failed_external")
+        }
+        if let error {
+            return L10n.f(
+                "subscription.status.products_failed_external_reason",
+                L10n.f("subscription.status.products_failed_external_error", diagnosticErrorDescription(error))
+            )
+        }
+
+        let diagnostics = lastProductLoadDiagnostics ?? L10n.tr("subscription.status.products_failed_external_no_diagnostics")
+        return L10n.f(
+            "subscription.status.products_failed_external_reason",
+            L10n.f("subscription.status.products_failed_external_diagnostics", diagnostics)
+        )
         #else
         return L10n.tr("subscription.status.products_failed")
         #endif
     }
 
+    private func productsUnavailableStatusMessage(error: Error?) -> String {
+        if automaticProductRetryIndex >= automaticProductRetryDelays.count {
+            return productsUnavailableMessage(error: error)
+        }
+        return L10n.tr("subscription.status.products_connecting")
+    }
+
+    private func productsPartialStatusMessage() -> String {
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+        if automaticProductRetryIndex >= automaticProductRetryDelays.count {
+            return productsUnavailableMessage(error: nil)
+        }
+#endif
+        return L10n.tr("subscription.status.products_partial")
+    }
+
     private func debugLogProductLoadFailure(_ error: Error) {
-#if DEBUG
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+        guard isSubscriptionDiagnosticsVisible else { return }
         NSLog("[Subscription] Product load failed: %@", String(describing: error))
 #endif
     }
@@ -809,6 +1000,40 @@ final class SubscriptionViewModel: ObservableObject {
         }
         return "<not-injected>"
     }
+
+#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
+    private var storeKitEnvironmentDiagnostic: String {
+        if let lastTransactionEnvironment {
+            return lastTransactionEnvironment
+        }
+
+#if DEBUG
+        if ProcessInfo.processInfo.environment["STOREKIT_CONFIGURATION_URL"] != nil || isLocalStoreKitRequested {
+            return "xcode"
+        }
+#endif
+
+        return "unknown-no-product-or-transaction"
+    }
+
+    private func loadAppTransactionEnvironment() async {
+        if lastTransactionEnvironment != nil {
+            return
+        }
+
+        do {
+            switch try await AppTransaction.shared {
+            case .verified(let transaction):
+                lastTransactionEnvironment = transaction.environment.rawValue
+                diagnosticsLog("AppTransaction.shared verified; environment=\(transaction.environment.rawValue); bundleID=\(transaction.bundleID); appVersion=\(transaction.appVersion)")
+            case .unverified(_, let error):
+                diagnosticsLog("AppTransaction.shared unverified; \(diagnosticErrorDescription(error))")
+            }
+        } catch {
+            diagnosticsLog("AppTransaction.shared failed; \(diagnosticErrorDescription(error))")
+        }
+    }
+#endif
 
     private func diagnosticErrorDescription(_ error: Error) -> String {
         let nsError = error as NSError
@@ -868,30 +1093,17 @@ final class SubscriptionViewModel: ObservableObject {
 
     #if DEBUG
     var isDebugSubscriptionTrialAvailable: Bool {
-        true
+        canUseDebugSubscriptionFallback
     }
 
     func activateDebugSubscriptionTrial() {
-        let plan = selectedPlan
-        let expiration = debugTrialExpirationDate(for: plan)
-        persistDebugFallbackPlan(plan, expiration: expiration)
-        applyActivePlan(plan, expirationDate: expiration)
-        isUsingDebugFallback = true
-        statusMessage = L10n.tr("subscription.status.debug_bypass_activated")
-        diagnosticsLog("debug subscription trial activated; plan=\(plan.rawValue); expiration=\(expiration)")
-    }
-
-    /// Activates a fixed 100-day VIP trial regardless of the currently selected plan.
-    /// Used by the "Free 100-Day" debug entry point to give a stable purchase-style
-    /// activation that does not depend on which plan card the user has tapped.
-    func activateFixed100DayTrial() {
-        let expiration = Calendar.current.date(byAdding: .day, value: 100, to: Date())
-            ?? Date().addingTimeInterval(100 * 24 * 60 * 60)
+        let expiration = Calendar.current.date(byAdding: .day, value: SubscriptionFreeTrialStore.trialDays, to: Date())
+            ?? Date().addingTimeInterval(TimeInterval(SubscriptionFreeTrialStore.trialDays * 24 * 60 * 60))
         persistDebugFallbackPlan(.yearly, expiration: expiration)
         applyActivePlan(.yearly, expirationDate: expiration)
         isUsingDebugFallback = true
         statusMessage = L10n.tr("subscription.status.debug_bypass_activated")
-        diagnosticsLog("debug fixed 100-day trial activated; expiration=\(expiration)")
+        diagnosticsLog("debug subscription trial activated; days=\(SubscriptionFreeTrialStore.trialDays); expiration=\(expiration)")
     }
 
     func clearDebugFallback() {
@@ -899,11 +1111,24 @@ final class SubscriptionViewModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.debugFallbackPlanDefaultsKey)
         UserDefaults.standard.removeObject(forKey: Self.debugFallbackExpirationDefaultsKey)
         UserDefaults.standard.removeObject(forKey: Self.legacyDebugBypassEnabledDefaultsKey)
+        freeTrialStore.resetForDebugTesting()
         isUsingDebugFallback = false
+        isUsingFreeTrial = false
+        applyActivePlan(nil)
         statusMessage = L10n.tr("subscription.status.debug_fallback_cleared")
+        debugClearMessage = L10n.tr("subscription.status.debug_fallback_cleared")
         diagnosticsLog("debug fallback cleared")
-        Task { @MainActor in
-            await refreshEntitlements()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshEntitlements()
+            SubscriptionDiagnosticsStore.shared.clear()
+            if self.isProUnlocked {
+                self.statusMessage = L10n.tr("subscription.status.debug_clear_storekit_active")
+                self.debugClearMessage = L10n.tr("subscription.status.debug_clear_storekit_active")
+            } else {
+                self.statusMessage = L10n.tr("subscription.status.debug_fallback_cleared")
+                self.debugClearMessage = L10n.tr("subscription.status.debug_fallback_cleared")
+            }
         }
     }
 
@@ -912,6 +1137,9 @@ final class SubscriptionViewModel: ObservableObject {
     }
 
     private var persistedDebugFallbackPlan: SubscriptionPlan? {
+        // A persisted trial is inert unless this launch explicitly opts in.
+        // This prevents switching schemes from silently granting membership.
+        guard canUseDebugSubscriptionFallback else { return nil }
         guard let expirationDate = persistedDebugFallbackExpirationDate else { return nil }
         guard expirationDate > Date() else {
             UserDefaults.standard.removeObject(forKey: Self.debugFallbackPlanDefaultsKey)
@@ -923,14 +1151,20 @@ final class SubscriptionViewModel: ObservableObject {
               let plan = SubscriptionPlan(rawValue: rawValue) else {
             return nil
         }
-        // Migrate only legacy permanent local bypasses (one-shot). Newly
-        // activated `.lifetime` debug trials must stay `.lifetime`.
+        // Migrate the legacy permanent debug bypass to the current bounded
+        // Debug trial so it cannot continue to simulate a lifetime purchase.
         if UserDefaults.standard.bool(forKey: Self.legacyDebugBypassEnabledDefaultsKey) {
-            let expiration = debugTrialExpirationDate(for: .yearly)
+            let expiration = Calendar.current.date(
+                byAdding: .day,
+                value: SubscriptionFreeTrialStore.trialDays,
+                to: Date()
+            ) ?? Date().addingTimeInterval(
+                TimeInterval(SubscriptionFreeTrialStore.trialDays * 24 * 60 * 60)
+            )
             UserDefaults.standard.set(SubscriptionPlan.yearly.rawValue, forKey: Self.debugFallbackPlanDefaultsKey)
             UserDefaults.standard.set(expiration.timeIntervalSince1970, forKey: Self.debugFallbackExpirationDefaultsKey)
             UserDefaults.standard.removeObject(forKey: Self.legacyDebugBypassEnabledDefaultsKey)
-            diagnosticsLog("migrated legacy debug bypass to yearly VIP trial; expiration=\(expiration)")
+            diagnosticsLog("migrated legacy debug bypass to bounded VIP trial; expiration=\(expiration)")
             return .yearly
         }
         return plan
@@ -952,28 +1186,8 @@ final class SubscriptionViewModel: ObservableObject {
         diagnosticsLog("debug fallback activated; plan=\(plan.rawValue); expiration=\(expiration.description)")
     }
 
-    private func debugTrialExpirationDate(for plan: SubscriptionPlan) -> Date {
-        switch plan {
-        case .monthly:
-            return Calendar.current.date(byAdding: .day, value: 30, to: Date())
-                ?? Date().addingTimeInterval(30 * 24 * 60 * 60)
-        case .yearly:
-            return Calendar.current.date(byAdding: .day, value: 365, to: Date())
-                ?? Date().addingTimeInterval(365 * 24 * 60 * 60)
-        case .lifetime:
-            return .distantFuture
-        }
-    }
-
     var debugTrialDaysLabel: String {
-        switch selectedPlan {
-        case .monthly:
-            return L10n.f("subscription.debug.trial_days", 30)
-        case .yearly:
-            return L10n.f("subscription.debug.trial_days", 365)
-        case .lifetime:
-            return L10n.tr("subscription.debug.trial_lifetime")
-        }
+        L10n.f("subscription.debug.trial_days", SubscriptionFreeTrialStore.trialDays)
     }
     #endif
 }

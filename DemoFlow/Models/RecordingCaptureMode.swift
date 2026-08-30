@@ -11,6 +11,7 @@ import Foundation
 enum RecordingCaptureMode: String, CaseIterable, Identifiable, Codable {
     case fullScreen
     case region
+    case window
 
     var id: String { rawValue }
 
@@ -20,6 +21,8 @@ enum RecordingCaptureMode: String, CaseIterable, Identifiable, Codable {
             return "recording.capture_mode.full_screen"
         case .region:
             return "recording.capture_mode.region"
+        case .window:
+            return "recording.capture_mode.window"
         }
     }
 }
@@ -69,6 +72,7 @@ enum RecordingFixedCapturePreset: String, CaseIterable, Identifiable {
 enum RecordingControlCaptureSizeOption: Hashable, Identifiable {
     case freeform
     case preset(RecordingFixedCapturePreset)
+    case window
 
     var id: String {
         switch self {
@@ -76,10 +80,12 @@ enum RecordingControlCaptureSizeOption: Hashable, Identifiable {
             return "freeform"
         case let .preset(preset):
             return "preset-\(preset.rawValue)"
+        case .window:
+            return "window"
         }
     }
 
     static var allCases: [RecordingControlCaptureSizeOption] {
-        [.freeform] + RecordingFixedCapturePreset.allCases.map(Self.preset)
+        [.freeform] + RecordingFixedCapturePreset.allCases.map(Self.preset) + [.window]
     }
 }

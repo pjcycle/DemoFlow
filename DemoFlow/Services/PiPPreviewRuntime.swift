@@ -60,6 +60,7 @@ final class PiPPreviewRuntime: NSObject, ObservableObject {
     private let maxRefreshAttempt = 2
 
     var previewSession: AVCaptureSession { session }
+    var onPreviewSample: ((CMSampleBuffer) -> Void)?
     var onProcessingSample: ((CameraProcessingSample) -> Void)?
     var onRecordingFailure: ((Error) -> Void)?
 
@@ -783,6 +784,7 @@ extension PiPPreviewRuntime: AVCaptureVideoDataOutputSampleBufferDelegate, AVCap
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if output === self.videoDataOutput {
+                self.onPreviewSample?(sendableSample.value)
                 self.onProcessingSample?(
                     CameraProcessingSample(
                         sampleBuffer: sendableSample.value,

@@ -128,14 +128,21 @@ enum SubscriptionPlan: String, CaseIterable, Identifiable, Codable {
     }
 
     var compareAtPriceText: String {
+        let amount: Decimal
         switch self {
         case .monthly:
-            return "$4.99"
+            amount = 4.99
         case .yearly:
-            return "$39.99"
+            amount = 39.99
         case .lifetime:
-            return "$99.99"
+            amount = 99.99
         }
+
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "USD"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: NSDecimalNumber(decimal: amount)) ?? "$\(amount)"
     }
 
     var isRecommended: Bool {

@@ -26,6 +26,9 @@ struct RecordingControlDisplayModel: Equatable {
     var canSelectCaptureSize: Bool
     var canRecordToggle: Bool
     var canPauseToggle: Bool
+    var isMicrophoneMuted: Bool
+    var hasMicrophoneInput: Bool
+    var canToggleMicrophone: Bool
     var canClose: Bool
 
     static let `default` = RecordingControlDisplayModel(
@@ -38,6 +41,9 @@ struct RecordingControlDisplayModel: Equatable {
         canSelectCaptureSize: true,
         canRecordToggle: true,
         canPauseToggle: false,
+        isMicrophoneMuted: false,
+        hasMicrophoneInput: false,
+        canToggleMicrophone: false,
         canClose: true
     )
 }
@@ -57,6 +63,7 @@ final class RecordingControlWindowController: NSObject {
     var onCaptureSizeTapped: (() -> Void)?
     var onPiPToggleRequested: (() -> Void)?
     var onAnnotateToggleRequested: (() -> Void)?
+    var onMicrophoneToggleRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
 
     override init() {
@@ -125,6 +132,12 @@ final class RecordingControlWindowController: NSObject {
         applyViewState()
     }
 
+    /// 将控制条置于窗口选择高亮层之上。
+    /// 窗口选择时仍需要点击尺寸/窗口按钮来切换目标窗口。
+    func bringToFront() {
+        reassertFrontmost()
+    }
+
     func setCaptureSizeDisplay(_ text: String) {
         displayModel.captureSizeDisplay = text
         applyViewState()
@@ -152,7 +165,7 @@ final class RecordingControlWindowController: NSObject {
             let popover = NSPopover()
             popover.behavior = .transient
             popover.animates = true
-            popover.contentSize = NSSize(width: 188, height: 262)
+            popover.contentSize = NSSize(width: 188, height: 322)
             captureSizePickerPopover = popover
             return popover
         }()
@@ -252,7 +265,7 @@ final class RecordingControlWindowController: NSObject {
 
     private func makePanel() -> RecordingControlPanel {
         let panel = RecordingControlPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 332, height: 46),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 46),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -274,7 +287,7 @@ final class RecordingControlWindowController: NSObject {
             self?.onCloseRequested?()
         }
 
-        let contentView = RecordingControlView(frame: NSRect(x: 0, y: 0, width: 332, height: 46))
+        let contentView = RecordingControlView(frame: NSRect(x: 0, y: 0, width: 430, height: 46))
         contentView.autoresizingMask = [.width, .height]
         contentView.onAnnotateTapped = { [weak self] in
             self?.onAnnotateToggleRequested?()
@@ -293,6 +306,9 @@ final class RecordingControlWindowController: NSObject {
         }
         contentView.onPiPTapped = { [weak self] in
             self?.onPiPToggleRequested?()
+        }
+        contentView.onMicrophoneTapped = { [weak self] in
+            self?.onMicrophoneToggleRequested?()
         }
         contentView.onCloseTapped = { [weak self] in
             self?.onCloseRequested?()
@@ -337,6 +353,7 @@ private final class RecordingControlView: NSView {
     var onPiPTapped: (() -> Void)?
     var onAnnotateTapped: (() -> Void)?
     var onRecordTapped: (() -> Void)?
+    var onMicrophoneTapped: (() -> Void)?
     var onPauseTapped: (() -> Void)?
     var onCloseTapped: (() -> Void)?
 
@@ -347,6 +364,7 @@ private final class RecordingControlView: NSView {
     private let pipButton = NSButton(title: "", target: nil, action: nil)
     private let annotateButton = NSButton(title: "", target: nil, action: nil)
     private let recordButton = NSButton(title: "", target: nil, action: nil)
+    private let microphoneButton = NSButton(title: "", target: nil, action: nil)
     private let pauseButton = NSButton(title: "", target: nil, action: nil)
     private let closeButton = NSButton(title: "", target: nil, action: nil)
     private let stoppingIndicator = NSProgressIndicator()
@@ -440,6 +458,26 @@ private final class RecordingControlView: NSView {
 
         annotateButton.contentTintColor = model.isAnnotateActive ? .systemBlue : .labelColor
         annotateButton.alphaValue = model.isAnnotateActive ? 1.0 : 0.82
+        let microphoneIsMuted = model.isMicrophoneMuted || !model.hasMicrophoneInput
+        let microphoneDescriptionKey: String = {
+            guard model.hasMicrophoneInput else {
+                return "recording.control.microphone_unavailable"
+            }
+            return microphoneIsMuted
+                ? "recording.control.microphone_muted"
+                : "recording.control.microphone_enabled"
+        }()
+        microphoneButton.image = resolveSymbolImage(
+            preferred: microphoneIsMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+            fallback: microphoneIsMuted ? "speaker.slash" : "speaker.wave.2",
+            description: L10n.tr(microphoneDescriptionKey)
+        )
+        microphoneButton.toolTip = L10n.tr(microphoneDescriptionKey)
+        microphoneButton.setAccessibilityLabel(L10n.tr(microphoneDescriptionKey))
+        microphoneButton.contentTintColor = model.canToggleMicrophone
+            ? (microphoneIsMuted ? .systemOrange : .labelColor)
+            : .tertiaryLabelColor
+        microphoneButton.alphaValue = model.canToggleMicrophone ? 1.0 : 0.55
 
         let canPauseByMode = (mode == .recording || mode == .paused)
         let canRegionToggle = (mode == .ready)
@@ -447,6 +485,7 @@ private final class RecordingControlView: NSView {
         captureSizeButton.isEnabled = model.canSelectCaptureSize && mode == .ready
         recordButton.isEnabled = model.canRecordToggle && mode != .stopping
         pauseButton.isEnabled = model.canPauseToggle && canPauseByMode && mode != .stopping
+        microphoneButton.isEnabled = model.canToggleMicrophone && mode == .recording
         closeButton.isEnabled = model.canClose && mode != .stopping
         pipButton.isEnabled = mode != .stopping
         annotateButton.isEnabled = mode != .stopping
@@ -534,6 +573,14 @@ private final class RecordingControlView: NSView {
         recordButton.action = #selector(handleRecordTapped)
 
         configureButton(
+            microphoneButton,
+            symbolName: "speaker.wave.2.fill",
+            fallbackName: "speaker.wave.2",
+            description: L10n.tr("recording.control.microphone_enabled")
+        )
+        microphoneButton.action = #selector(handleMicrophoneTapped)
+
+        configureButton(
             pauseButton,
             symbolName: "pause.fill",
             fallbackName: "pause",
@@ -559,6 +606,7 @@ private final class RecordingControlView: NSView {
             annotateButton,
             verticalSeparator(),
             recordButton,
+            microphoneButton,
             pauseButton,
             closeButton
         ])
@@ -594,9 +642,11 @@ private final class RecordingControlView: NSView {
             pipButton.widthAnchor.constraint(equalToConstant: 28),
             annotateButton.widthAnchor.constraint(equalToConstant: 28),
             recordButton.widthAnchor.constraint(equalToConstant: 28),
+            microphoneButton.widthAnchor.constraint(equalToConstant: 28),
             pauseButton.widthAnchor.constraint(equalToConstant: 28),
             closeButton.widthAnchor.constraint(equalToConstant: 28),
             recordButton.heightAnchor.constraint(equalToConstant: 24),
+            microphoneButton.heightAnchor.constraint(equalToConstant: 24),
             pauseButton.heightAnchor.constraint(equalToConstant: 24),
             closeButton.heightAnchor.constraint(equalToConstant: 24),
 
@@ -661,6 +711,11 @@ private final class RecordingControlView: NSView {
     @objc
     private func handleRecordTapped() {
         onRecordTapped?()
+    }
+
+    @objc
+    private func handleMicrophoneTapped() {
+        onMicrophoneTapped?()
     }
 
     @objc
@@ -731,6 +786,11 @@ private struct RecordingCaptureSizePickerView: View {
             if !portraitOptions.isEmpty {
                 groupSection(title: "9:16", options: portraitOptions)
             }
+
+            if options.contains(.window) {
+                Divider().padding(.vertical, 4)
+                windowOptionButton()
+            }
         }
         .padding(10)
         .frame(width: 188, alignment: .leading)
@@ -791,6 +851,46 @@ private struct RecordingCaptureSizePickerView: View {
             return L10n.tr("recording.capture_size.freeform")
         case let .preset(preset):
             return preset.displayText
+        case .window:
+            return L10n.tr("recording.capture_mode.window")
         }
+    }
+
+    private func windowOptionButton() -> some View {
+        let isSelected = selectedOption == .window
+        return Button {
+            onSelect(.window)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .frame(width: 18)
+
+                Text(L10n.tr("recording.capture_mode.window"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+
+                Spacer(minLength: 8)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }

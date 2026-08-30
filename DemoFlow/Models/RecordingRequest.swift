@@ -11,8 +11,10 @@ import Foundation
 struct RecordingRequest {
     let captureMode: RecordingCaptureMode
     let regionSelection: RecordingRegionSelection?
+    let windowSelection: RecordingWindowSelection?
     let includeAppWindowsInCapture: Bool
     let microphoneDeviceID: String?
+    let microphoneMutedAtStart: Bool
     let cameraDeviceID: String?
     let cameraAudioDeviceID: String?
     let recordingQuality: RecordingQualityConfig

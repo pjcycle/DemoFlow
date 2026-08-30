@@ -28,6 +28,7 @@ DemoFlow is a macOS utility suite for screen recording, PiP camera, screen drawi
 - Video/audio device selection including Continuity Camera
 - Video dubbing, subtitle burning, and local Apple TTS audio replacement in the `配音字幕` workbench
 - Preview mute and real-time microphone level feedback
+- Keeps the last PiP frame stable while moving the floating window, then resumes live video
 - Aspect ratio: Auto / 16:9 / 4:3
 - Global hotkey: `⌘⌥P`
 
@@ -79,7 +80,25 @@ Hotkeys:
 
 - The primary action is `Purchase` for free users. Existing members can only choose a higher tier, where the action becomes `Upgrade Subscription`; the current and lower tiers are gray and disabled.
 - Monthly and yearly memberships show whole days remaining in the subscription window. A lifetime purchase shows `Lifetime SVIP`.
-- The 100-day free trial and clear-debug-membership actions exist only in local Debug builds and are excluded from release builds.
+- Every free user can claim one `Free 7-Day Trial`. Eligibility is held in Keychain as an anonymous app-generated installation ID and claim record. No hardware identifier is read or uploaded, and uninstalling does not reset the trial.
+- The live purchase price comes from the App Store storefront, such as CNY in China. Crossed-out marketing reference prices remain in USD.
+
+### Local Debug Subscription
+
+The local membership fallback is off by default and must be explicitly enabled. The recommended path is the dedicated `DemoFlowDebugSubscriptionFallback` scheme:
+
+1. Select `DemoFlowDebugSubscriptionFallback` in Xcode.
+2. Click `Run`.
+3. Open the subscription window and choose `Debug VIP (7 days)` to verify post-subscription flows with an independent local VIP.
+4. Before switching back, click `Clear Debug Info` in the subscription window. Then use `DemoFlowLocalStoreKit` or `DemoFlow` to test real local StoreKit products.
+
+To enable it manually, open `Product > Scheme > Edit Scheme > Run > Arguments` and add:
+
+```text
+-DemoFlowEnableDebugSubscriptionFallback
+```
+
+When using the fallback argument manually, do not also enable `-DemoFlowLocalStoreKit` or a `.storekit` configuration. Removing the argument does not erase the saved local Debug trial; click `Clear Debug Info` first. In a Debug build it clears the fallback, diagnostics log, and local 7-day trial record. It cannot revoke a local StoreKit transaction; reset StoreKit transaction history from Xcode's `Debug > StoreKit > Manage Transactions` when one remains active. The diagnostics switch is independent: use `-DemoFlowEnableSubscriptionDiagnostics`, or press `Cmd+Option+D` while the subscription window is focused.
 
 ## Requirements
 

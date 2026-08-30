@@ -81,4 +81,17 @@ final class SubscriptionDiagnosticsStore {
             NSWorkspace.shared.selectFile(logFileURL.path, inFileViewerRootedAtPath: "")
         }
     }
+
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+
+        do {
+            if fileManager.fileExists(atPath: logFileURL.path) {
+                try fileManager.removeItem(at: logFileURL)
+            }
+        } catch {
+            NSLog("[SubscriptionDiagnostics] Cannot clear log: %@", String(describing: error))
+        }
+    }
 }

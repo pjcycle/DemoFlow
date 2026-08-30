@@ -28,6 +28,7 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 - 独立浮动预览窗口（始终置顶，跨空间/全屏可用）
 - 支持视频/音频设备选择，包括 Continuity Camera
 - 静音和实时麦克风电平反馈
+- 拖动悬浮 PiP 时保持最后一帧稳定显示，停止移动后自动恢复实时画面
 - 比例：自动 / 16:9 / 4:3
 - 全局快捷键：`⌘⌥P`
 
@@ -79,7 +80,25 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 
 - 免费状态的主操作显示“购买”；已有订阅时只允许选择更高档方案并显示“升级订阅”，当前方案和更低档方案会灰色禁用，不支持降级。
 - 月付和年付会员在订阅弹窗中显示剩余整天数；买断显示“永久SVIP”。
-- “免费试用100天”和“清空调试订阅”只存在于本地 Debug 构建，正式包不包含调试订阅入口。
+- 所有免费用户可领取一次“免费试用7天”。资格保存在 Keychain：记录匿名随机安装 ID 和领取记录，不读取硬件机器 ID、不上传；卸载重装不会重新获得资格。
+- 正常成交价使用 App Store storefront 的本地化货币，中国区显示人民币；划线营销原价固定显示美元。
+
+### 本地调试订阅
+
+本地假会员回退默认关闭，必须显式开启。推荐使用专用的 `DemoFlowDebugSubscriptionFallback` Scheme：
+
+1. 在 Xcode 选择 `DemoFlowDebugSubscriptionFallback`。
+2. 点击 `Run` 启动。
+3. 打开订阅弹窗，点击“本地 VIP 测试（7天）”，用独立的本地 VIP 验证订阅后的功能。
+4. 切回其他 Scheme 前，在订阅弹窗点击“清空调试信息”；然后可使用 `DemoFlowLocalStoreKit` 或普通 `DemoFlow` 验证真实本地 StoreKit 商品。
+
+手动开启方式：进入 `Product > Scheme > Edit Scheme > Run > Arguments`，添加：
+
+```text
+-DemoFlowEnableDebugSubscriptionFallback
+```
+
+手动使用回退参数时，不要同时启用 `-DemoFlowLocalStoreKit` 或 `.storekit` 配置。关闭参数不会自动删除已经保存的本地调试会员，需先点击“清空调试信息”；它会清理 Debug 回退、诊断日志和 Debug 本地的 7 天试用记录。若本地 StoreKit 真实交易仍让界面显示会员，请在 Xcode 的 `Debug > StoreKit > Manage Transactions` 中重置交易历史。订阅诊断是独立开关，可传入 `-DemoFlowEnableSubscriptionDiagnostics`，或在订阅窗口聚焦时按 `⌘⌥D` 显示。
 
 ## 系统要求
 

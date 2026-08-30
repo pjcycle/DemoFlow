@@ -8,6 +8,8 @@
 import AppKit
 @preconcurrency import AVFoundation
 import Combine
+@preconcurrency import CoreMedia
+import CoreImage
 import CoreGraphics
 import Foundation
 
@@ -29,9 +31,16 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
     private var observers: [NotificationToken] = []
     private var windowConfig: PiPWindowConfig = .default
     private var runtimeTitleSuffix: String?
+    // `canJoinAllSpaces` keeps the PiP visible across Spaces. AppKit rejects
+    // combining it with `.moveToActiveSpace`, so do not add that flag here.
     private let desiredCollectionBehavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     private var isApplyingProgrammaticFrame = false
     private var pendingLayoutSyncWorkItem: DispatchWorkItem?
+    private var pendingScaleWorkItem: DispatchWorkItem?
+    private var pendingMoveResumeWorkItem: DispatchWorkItem?
+    private var pendingScaleDelta: CGFloat = 0
+    private var isPanelMovingOrResizing = false
+    private var needsFrontmostPassAfterTransition = false
 
     override init() {
         super.init()
@@ -40,13 +49,15 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
 
     deinit {
         pendingLayoutSyncWorkItem?.cancel()
+        pendingScaleWorkItem?.cancel()
+        pendingMoveResumeWorkItem?.cancel()
         observers.forEach { observer in
             observer.center.removeObserver(observer.token)
         }
     }
 
     @discardableResult
-    func show(session: AVCaptureSession, on screen: NSScreen, layout: PiPLayoutState) -> Bool {
+    func show(on screen: NSScreen, layout: PiPLayoutState) -> Bool {
         hostScreen = screen
         let normalizedLayout = resolvedLayout(layout, in: screen)
         layoutState = normalizedLayout
@@ -67,11 +78,11 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
         setFrame(fittedFrame, on: panel)
 
         if let previewView = panel.contentView as? PiPPreviewView {
-            previewView.attach(session: session)
+            previewView.prepareRenderer()
             previewView.applyTitleBarVisibility(windowConfig.isTitleBarVisible)
             previewView.applyFrameStyle(windowConfig.frameStyle)
             previewView.onScale = { [weak self] delta in
-                self?.scaleWindow(by: delta)
+                self?.requestWindowScale(by: delta)
             }
         }
 
@@ -102,6 +113,10 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
 
     func hide() {
         print("[PiPWindow] hide requested")
+        pendingMoveResumeWorkItem?.cancel()
+        pendingMoveResumeWorkItem = nil
+        isPanelMovingOrResizing = false
+        needsFrontmostPassAfterTransition = false
         syncLayoutFromWindow(immediately: true)
         panel?.orderOut(nil)
         syncVisibility(false)
@@ -143,6 +158,13 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
     func updateProcessedPreviewImage(_ image: CGImage?) {
         guard let previewView = panel?.contentView as? PiPPreviewView else { return }
         previewView.updateProcessedImage(image)
+    }
+
+    /// The preview uses the camera output samples directly. This keeps the last
+    /// decoded frame on screen while AppKit moves or resizes the panel surface.
+    func enqueuePreviewSample(_ sampleBuffer: CMSampleBuffer) {
+        guard let previewView = panel?.contentView as? PiPPreviewView else { return }
+        previewView.enqueue(sampleBuffer)
     }
 
     func applyWindowConfig(_ config: PiPWindowConfig) {
@@ -210,6 +232,13 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
     private func orderFrontIfNeeded() {
         guard let panel else { return }
         guard panel.isVisible else { return }
+        if isPanelMovingOrResizing {
+            // Re-ordering a window while WindowServer is moving it can make
+            // the backing surface flash, especially when crossing displays.
+            // Defer one frontmost pass until the transition has settled.
+            needsFrontmostPassAfterTransition = true
+            return
+        }
         applyLevel(using: panel)
         panel.collectionBehavior = desiredCollectionBehavior
         guard windowConfig.isAlwaysOnTop else { return }
@@ -467,9 +496,26 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
         return result
     }
 
+    private func requestWindowScale(by delta: CGFloat) {
+        guard delta.isFinite, delta != 0 else { return }
+        pendingScaleDelta += delta
+        guard pendingScaleWorkItem == nil else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let delta = self.pendingScaleDelta
+            self.pendingScaleDelta = 0
+            self.pendingScaleWorkItem = nil
+            self.scaleWindow(by: delta)
+        }
+        pendingScaleWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + (1.0 / 60.0), execute: workItem)
+    }
+
     private func scaleWindow(by delta: CGFloat) {
         guard let panel else { return }
         guard let screen = panel.screen ?? hostScreen else { return }
+        beginPanelTransitionIfNeeded()
         let currentFrame = panel.frame
         let scaleFactor = pow(1.01, -delta)
         let minimumSize = minimumSize(for: layoutState.aspectRatio)
@@ -497,7 +543,10 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
             height: targetSize.height
         )
         setFrame(clamped(frame: nextFrame, in: screen.visibleFrame), on: panel)
-        syncLayoutFromWindow(immediately: true)
+        // Publishing at scroll-event frequency causes avoidable SwiftUI and
+        // window-server work. The debounced snapshot still commits the final size.
+        syncLayoutFromWindow()
+        schedulePanelMoveResume(after: 0.12)
     }
 
     private func setFrame(_ frame: CGRect, on panel: NSPanel) {
@@ -550,14 +599,54 @@ extension PiPOverlayWindowController: NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
-        // Avoid publishing layout while the user is dragging the window.
+        // Keep the preview surface stable while WindowServer moves the panel.
+        // Resuming only after movement settles avoids repeatedly invalidating
+        // the video layer during a drag.
+        schedulePanelMoveResume()
+    }
+
+    func windowWillMove(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel,
+              panel === self.panel else { return }
+        beginPanelTransitionIfNeeded()
+        // A click without an actual drag may not deliver windowDidMove.
+        // The fallback keeps the preview from remaining frozen in that case.
+        schedulePanelMoveResume()
+    }
+
+    private func schedulePanelMoveResume() {
+        schedulePanelMoveResume(after: 0.12)
+    }
+
+    private func schedulePanelMoveResume(after delay: TimeInterval) {
+        pendingMoveResumeWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.panelDidStopMoving()
+        }
+        pendingMoveResumeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel,
+              panel === self.panel else { return }
+        beginPanelTransitionIfNeeded()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
+        pendingMoveResumeWorkItem?.cancel()
+        pendingMoveResumeWorkItem = nil
+        (panel?.contentView as? PiPPreviewView)?.endWindowMove()
+        isPanelMovingOrResizing = false
         syncLayoutFromWindow(immediately: true)
+        restoreFrontmostIfNeededAfterTransition()
     }
 
     func windowDidResize(_ notification: Notification) {
+        // AppKit can resize the content view before it calls `layout()` during
+        // a live resize. Keep every video layer pinned to the new bounds so a
+        // frozen frame never leaves black space in newly added window area.
+        (panel?.contentView as? PiPPreviewView)?.resizePreviewLayersToBounds()
         // Avoid publishing layout during live resize; commit at the end instead.
     }
 
@@ -568,6 +657,11 @@ extension PiPOverlayWindowController: NSWindowDelegate {
     func windowDidChangeScreen(_ notification: Notification) {
         if let panel = notification.object as? NSPanel {
             hostScreen = panel.screen ?? hostScreen
+        }
+        if isPanelMovingOrResizing {
+            // AppKit owns the frame while a drag crosses displays. Clamping it
+            // here can briefly expose an unrendered backing-store region.
+            return
         }
         normalizeCurrentLayoutIfNeeded()
         orderFrontIfNeeded()
@@ -595,6 +689,37 @@ extension PiPOverlayWindowController: NSWindowDelegate {
         print("[PiPWindow] windowDidDeminiaturize")
         syncVisibility(true)
         orderFrontIfNeeded()
+    }
+
+    private func panelDidStopMoving() {
+        pendingMoveResumeWorkItem = nil
+        if isPanelMovingOrResizing, NSEvent.pressedMouseButtons & 1 != 0 {
+            // A fast drag can briefly stop producing windowDidMove callbacks
+            // while the mouse is still down. Do not reveal the live layer yet.
+            schedulePanelMoveResume(after: 0.05)
+            return
+        }
+        isPanelMovingOrResizing = false
+        guard let previewView = panel?.contentView as? PiPPreviewView else { return }
+        previewView.endWindowMove()
+        normalizeCurrentLayoutIfNeeded()
+        restoreFrontmostIfNeededAfterTransition()
+    }
+
+    private func beginPanelTransitionIfNeeded() {
+        guard !isPanelMovingOrResizing else { return }
+        isPanelMovingOrResizing = true
+        (panel?.contentView as? PiPPreviewView)?.beginWindowMove()
+    }
+
+    private func restoreFrontmostIfNeededAfterTransition() {
+        guard needsFrontmostPassAfterTransition else { return }
+        needsFrontmostPassAfterTransition = false
+        // Let the final window frame and backing scale settle before the one
+        // required frontmost pass. This avoids a second redraw in the drag.
+        DispatchQueue.main.async { [weak self] in
+            self?.orderFrontIfNeeded()
+        }
     }
 }
 
@@ -657,47 +782,158 @@ private final class PiPPanel: NSPanel {
 private final class PiPPreviewView: NSView {
     var onScale: ((CGFloat) -> Void)?
 
-    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var previewLayer: AVSampleBufferDisplayLayer?
+    private var sampleBufferRenderer: AVSampleBufferVideoRenderer?
+    private var frozenFrameLayer: CALayer?
     private var processedLayer: CALayer?
+    private var latestSampleBuffer: CMSampleBuffer?
+    private let frozenFrameContext = CIContext(options: [.useSoftwareRenderer: false])
+    private var isWindowMoving = false
+    private var isWaitingForLiveFrame = false
+    private var needsContentsScaleUpdate = false
     private var frameStyle: PiPWindowFrameStyle = .circle
     private var isTitleBarVisible = true
 
     override func layout() {
         super.layout()
-        previewLayer?.frame = bounds
-        processedLayer?.frame = bounds
+        resizePreviewLayersToBounds()
         applyFrameShape()
     }
 
-    func attach(session: AVCaptureSession) {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateContentsScale()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        // Crossing displays can change backing scale while WindowServer is
+        // still relocating the surface. Changing it mid-drag is visible as a
+        // flash on fast moves, so retain the already-rendered frozen frame and
+        // update the scale only after the pointer is released.
+        if isWindowMoving {
+            needsContentsScaleUpdate = true
+            return
+        }
+        updateContentsScale()
+    }
+
+    func prepareRenderer() {
         ensureRootLayer()
         guard let rootLayer = layer else { return }
         if previewLayer == nil {
-            let layer = AVCaptureVideoPreviewLayer(session: session)
+            let layer = AVSampleBufferDisplayLayer()
             layer.videoGravity = .resizeAspectFill
+            layer.backgroundColor = NSColor.black.cgColor
+            layer.needsDisplayOnBoundsChange = true
+            layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
             rootLayer.addSublayer(layer)
             previewLayer = layer
-        } else {
-            previewLayer?.session = session
-            if let previewLayer, previewLayer.superlayer == nil {
-                rootLayer.addSublayer(previewLayer)
-            }
+            sampleBufferRenderer = layer.sampleBufferRenderer
+        } else if let previewLayer, previewLayer.superlayer == nil {
+            rootLayer.addSublayer(previewLayer)
         }
 
         if processedLayer == nil {
             let layer = CALayer()
             layer.contentsGravity = .resizeAspectFill
             layer.isHidden = true
+            layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
             rootLayer.addSublayer(layer)
             processedLayer = layer
         } else if let processedLayer, processedLayer.superlayer == nil {
             rootLayer.addSublayer(processedLayer)
         }
 
+        if frozenFrameLayer == nil {
+            let layer = CALayer()
+            layer.contentsGravity = .resizeAspectFill
+            layer.isHidden = true
+            layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+            rootLayer.addSublayer(layer)
+            frozenFrameLayer = layer
+        } else if let frozenFrameLayer, frozenFrameLayer.superlayer == nil {
+            rootLayer.addSublayer(frozenFrameLayer)
+        }
+
         applyTitleBarVisibility(true)
         applyFrameStyle(.circle)
-        previewLayer?.frame = bounds
-        processedLayer?.frame = bounds
+        resizePreviewLayersToBounds()
+        updateContentsScale()
+    }
+
+    func enqueue(_ sampleBuffer: CMSampleBuffer) {
+        // Keep the sample buffer alive for the next drag gesture. All preview
+        // layer and Core Image work stays on the main thread.
+        latestSampleBuffer = sampleBuffer
+
+        guard !isWindowMoving else { return }
+        guard let sampleBufferRenderer else { return }
+        if sampleBufferRenderer.status == .failed {
+            sampleBufferRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
+        }
+        guard sampleBufferRenderer.isReadyForMoreMediaData else { return }
+        sampleBufferRenderer.enqueue(sampleBuffer)
+
+        if isWaitingForLiveFrame {
+            isWaitingForLiveFrame = false
+            frozenFrameLayer?.isHidden = true
+            previewLayer?.isHidden = false
+        }
+    }
+
+    func beginWindowMove() {
+        guard !isWindowMoving else { return }
+        isWindowMoving = true
+
+        // `windowWillStartLiveResize` arrives before AppKit has delivered all
+        // content-view layout passes. Pin the frozen layer now; subsequent
+        // `windowDidResize` events keep it in sync as the user drags a handle.
+        resizePreviewLayersToBounds()
+
+        guard let frozenFrameLayer,
+              let image = makeFrozenFrame(from: latestSampleBuffer) else {
+            // The window can be dragged immediately after opening, before the
+            // first camera sample arrives. Keep the live layer in that case.
+            isWindowMoving = false
+            return
+        }
+
+        frozenFrameLayer.contents = image
+        frozenFrameLayer.isHidden = false
+        previewLayer?.isHidden = true
+        // Commit the frozen contents before WindowServer starts a fast move.
+        // Without this explicit boundary the first moved surface can expose a
+        // black backing-store tile before Core Animation presents the image.
+        CATransaction.flush()
+    }
+
+    func endWindowMove() {
+        guard isWindowMoving else { return }
+        isWindowMoving = false
+
+        if needsContentsScaleUpdate {
+            needsContentsScaleUpdate = false
+            updateContentsScale()
+        }
+
+        guard frozenFrameLayer?.contents != nil else {
+            previewLayer?.isHidden = false
+            return
+        }
+
+        // Keep the frozen image until the first post-drag camera frame has
+        // actually reached the display renderer. This removes the one-frame
+        // black flash that otherwise appears when the panel settles.
+        isWaitingForLiveFrame = true
+    }
+
+    private func makeFrozenFrame(from sampleBuffer: CMSampleBuffer?) -> CGImage? {
+        guard let sampleBuffer,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        return frozenFrameContext.createCGImage(image, from: image.extent)
     }
 
     func applyTitleBarVisibility(_ isTitleBarVisible: Bool) {
@@ -729,6 +965,28 @@ private final class PiPPreviewView: NSView {
             return
         }
         wantsLayer = true
+    }
+
+    func resizePreviewLayersToBounds() {
+        guard let rootLayer = layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer?.frame = rootLayer.bounds
+        frozenFrameLayer?.frame = rootLayer.bounds
+        processedLayer?.frame = rootLayer.bounds
+        CATransaction.commit()
+    }
+
+    private func updateContentsScale() {
+        guard let rootLayer = layer else { return }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rootLayer.contentsScale = scale
+        previewLayer?.contentsScale = scale
+        frozenFrameLayer?.contentsScale = scale
+        processedLayer?.contentsScale = scale
+        CATransaction.commit()
     }
 
     private func applyFrameShape() {

@@ -83,6 +83,8 @@ final class VideoCuttingViewModel: ObservableObject {
     private var timelineUndoStack: [TimelineEditSnapshot] = []
     private var timelineRedoStack: [TimelineEditSnapshot] = []
     private var pendingReloadPlaybackPosition: Double?
+    private var loadingVideoURL: URL?
+    private var videoLoadGenerationID = UUID()
     private var originalTimelineSourceDuration: Double = 0
     private var timelineDurationOverride: Double?
     private let defaultFPS: Double = 30
@@ -238,7 +240,10 @@ final class VideoCuttingViewModel: ObservableObject {
     }
 
     func autoImportLatestRecentRecordingIfNeeded(within seconds: TimeInterval = 600) {
-        guard sourceURL == nil else { return }
+        // The recording-finalized notification and the cutting window's onAppear
+        // can arrive in either order. While the first load is still resolving
+        // metadata, sourceURL is nil, so also guard the in-flight URL here.
+        guard sourceURL == nil, loadingVideoURL == nil else { return }
         guard let recentURL = latestRecentRecordingURL(within: seconds) else { return }
         importFromRecordingOutput(recentURL)
     }
@@ -278,6 +283,8 @@ final class VideoCuttingViewModel: ObservableObject {
         timelineClips = []
         timelineClipThumbnails = [:]
         timelineClipThumbnailGenerationID = UUID()
+        loadingVideoURL = nil
+        videoLoadGenerationID = UUID()
         timelineClipStartSeconds = [:]
         selectedTimelineClipID = nil
         timelinePreviewGenerationID = UUID()
@@ -1526,7 +1533,13 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
         let normalizedURL = url.standardizedFileURL
+        if sourceURL?.standardizedFileURL == normalizedURL || loadingVideoURL == normalizedURL {
+            return
+        }
+
         let generationID = UUID()
+        videoLoadGenerationID = generationID
+        loadingVideoURL = normalizedURL
         timelineThumbnailGenerationID = generationID
         timelineThumbnails = []
         timelineClipThumbnailGenerationID = generationID
@@ -1540,6 +1553,8 @@ final class VideoCuttingViewModel: ObservableObject {
                 let duration = max(0, try await AVAssetAsyncLoaders.duration(of: asset).seconds)
                 guard duration > 0 else {
                     await MainActor.run {
+                        guard self.videoLoadGenerationID == generationID else { return }
+                        self.loadingVideoURL = nil
                         self.statusMessage = L10n.tr("legacy.key_51")
                     }
                     return
@@ -1560,6 +1575,8 @@ final class VideoCuttingViewModel: ObservableObject {
                 }
 
                 await MainActor.run {
+                    guard self.videoLoadGenerationID == generationID else { return }
+                    self.loadingVideoURL = nil
                     self.sourceURL = url
                     self.sourceDuration = duration
                     self.originalTimelineSourceDuration = duration
@@ -1600,6 +1617,8 @@ final class VideoCuttingViewModel: ObservableObject {
                 await loadTimelineClipThumbnails(for: initialClip, generationID: generationID)
             } catch {
                 await MainActor.run {
+                    guard self.videoLoadGenerationID == generationID else { return }
+                    self.loadingVideoURL = nil
                     self.pendingReloadPlaybackPosition = nil
                     self.statusMessage = L10n.f("fmt.video.import_failed", error.localizedDescription)
                 }
@@ -1768,13 +1787,37 @@ final class VideoCuttingViewModel: ObservableObject {
         generationID: UUID
     ) async {
         let thumbnails = await Task.detached(priority: .utility) {
-            try? await VideoTimelineThumbnailService.makeThumbnails(from: sourceURL, duration: duration)
-        }.value ?? []
+            for attempt in 0..<2 {
+                if let thumbnails = try? await VideoTimelineThumbnailService.makeThumbnails(
+                    from: sourceURL,
+                    duration: duration
+                ), !thumbnails.isEmpty {
+                    return thumbnails
+                }
+                if attempt == 0 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+            }
+            return []
+        }.value
 
         await MainActor.run {
             guard self.timelineThumbnailGenerationID == generationID else { return }
             guard self.sourceURL?.standardizedFileURL == sourceURL else { return }
             self.timelineThumbnails = thumbnails
+
+            // Clip thumbnails are generated independently. If that request
+            // finishes first (or fails), immediately give every matching clip
+            // the full timeline thumbnails so the first render is not blank.
+            guard !thumbnails.isEmpty else { return }
+            for clip in self.timelineClips where clip.sourceURL.standardizedFileURL == sourceURL {
+                let current = self.timelineClipThumbnails[clip.id] ?? []
+                guard current.isEmpty else { continue }
+                self.timelineClipThumbnails[clip.id] = self.fallbackThumbnails(
+                    from: thumbnails,
+                    for: clip
+                )
+            }
         }
     }
 
@@ -1784,20 +1827,52 @@ final class VideoCuttingViewModel: ObservableObject {
     ) async {
         let requestedGenerationID = generationID ?? timelineClipThumbnailGenerationID
         let thumbnails = await Task.detached(priority: .utility) {
-            try? await VideoTimelineThumbnailService.makeThumbnails(
-                from: clip.sourceURL,
-                startSeconds: clip.sourceStartSeconds,
-                endSeconds: clip.sourceEndSeconds
-            )
-        }.value ?? []
+            for attempt in 0..<2 {
+                if let thumbnails = try? await VideoTimelineThumbnailService.makeThumbnails(
+                    from: clip.sourceURL,
+                    startSeconds: clip.sourceStartSeconds,
+                    endSeconds: clip.sourceEndSeconds
+                ), !thumbnails.isEmpty {
+                    return thumbnails
+                }
+                if attempt == 0 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+            }
+            return []
+        }.value
 
         await MainActor.run {
             guard self.timelineClipThumbnailGenerationID == requestedGenerationID,
                   self.timelineClips.contains(where: { $0.id == clip.id }) else {
                 return
             }
-            self.timelineClipThumbnails[clip.id] = thumbnails
+            if thumbnails.isEmpty {
+                let fallback = self.fallbackThumbnails(from: self.timelineThumbnails, for: clip)
+                if !fallback.isEmpty {
+                    self.timelineClipThumbnails[clip.id] = fallback
+                }
+            } else {
+                self.timelineClipThumbnails[clip.id] = thumbnails
+            }
         }
+    }
+
+    private func fallbackThumbnails(
+        from thumbnails: [VideoTimelineThumbnail],
+        for clip: VideoTimelineClip
+    ) -> [VideoTimelineThumbnail] {
+        guard !thumbnails.isEmpty else { return [] }
+
+        let lowerBound = clip.sourceStartSeconds - 0.05
+        let upperBound = clip.sourceEndSeconds + 0.05
+        let matching = thumbnails.filter {
+            $0.seconds >= lowerBound && $0.seconds <= upperBound
+        }
+        // A short clip can fall between the sparse full-timeline samples. In
+        // that case using the full set is still a valid visual fallback and is
+        // preferable to rendering an empty clip.
+        return matching.isEmpty ? thumbnails : matching
     }
 
     private func rebuildTimelinePreview(

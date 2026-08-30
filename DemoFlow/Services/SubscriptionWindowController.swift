@@ -10,11 +10,11 @@ import SwiftUI
 
 @MainActor
 final class SubscriptionWindowController: NSObject, NSWindowDelegate {
-    private let windowSize = SubscriptionWindowLayout.windowSize
     private var window: NSWindow?
     private var hostingController: NSHostingController<SubscriptionWindowView>?
     private var currentViewModel: SubscriptionViewModel?
     private var onClose: (() -> Void)?
+    private var diagnosticsKeyMonitor: Any?
 
     var isVisible: Bool {
         window?.isVisible == true
@@ -36,7 +36,7 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
             }
         )
         applyContent(rootView, to: window)
-        window.setContentSize(windowSize)
+        resizeWindowForCurrentDiagnosticsMode(window)
         positionWindowAtCenter(window, on: screen)
 
         if window.isMiniaturized {
@@ -46,9 +46,11 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
         window.orderFrontRegardless()
         positionWindowAtCenter(window, on: screen)
         self.window = window
+        installDiagnosticsKeyMonitorIfNeeded()
     }
 
     func hide() {
+        removeDiagnosticsKeyMonitor()
         window?.close()
         onClose = nil
         currentViewModel = nil
@@ -61,7 +63,10 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
 
     private func makeWindow() -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: windowSize),
+            contentRect: NSRect(
+                origin: .zero,
+                size: SubscriptionWindowLayout.windowSize(showingDiagnostics: false)
+            ),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -91,6 +96,41 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    private func installDiagnosticsKeyMonitorIfNeeded() {
+#if DEBUG || DEMOFLOW_EXTERNAL_CHANNEL
+        guard diagnosticsKeyMonitor == nil else { return }
+        diagnosticsKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  self.window?.isKeyWindow == true,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                    .isSuperset(of: [.command, .option]),
+                  event.charactersIgnoringModifiers?.lowercased() == "d" else {
+                return event
+            }
+
+            self.currentViewModel?.toggleSubscriptionDiagnosticsVisibility()
+            if let window = self.window {
+                self.resizeWindowForCurrentDiagnosticsMode(window)
+            }
+            return nil
+        }
+#endif
+    }
+
+    private func removeDiagnosticsKeyMonitor() {
+        guard let diagnosticsKeyMonitor else { return }
+        NSEvent.removeMonitor(diagnosticsKeyMonitor)
+        self.diagnosticsKeyMonitor = nil
+    }
+
+    private func resizeWindowForCurrentDiagnosticsMode(_ window: NSWindow) {
+        window.setContentSize(
+            SubscriptionWindowLayout.windowSize(
+                showingDiagnostics: currentViewModel?.isSubscriptionDiagnosticsVisible == true
+            )
+        )
+    }
+
     private func positionWindowAtCenter(_ window: NSWindow, on preferredScreen: NSScreen?) {
         guard let screen = preferredScreen ?? window.screen ?? NSScreen.main ?? NSScreen.screens.first else {
             window.center()
@@ -115,6 +155,7 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
             hostingController = nil
             currentViewModel = nil
             onClose = nil
+            removeDiagnosticsKeyMonitor()
         }
     }
 }

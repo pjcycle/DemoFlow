@@ -6,6 +6,7 @@ build/
 !DemoFlow.xcodeproj/xcshareddata/xcschemes/DemoFlowLocalStoreKit.xcscheme
 !DemoFlow.xcodeproj/xcshareddata/xcschemes/DemoFlowSandbox.xcscheme
 !DemoFlow.xcodeproj/xcshareddata/xcschemes/DemoFlowDebugSubscriptionFallback.xcscheme
+!DemoFlow.xcodeproj/xcshareddata/xcschemes/DemoFlowTestFlight.xcscheme
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcworkspace/xcshareddata/swiftpm/Package.resolved
 *.xcworkspace/xcuserdata/
