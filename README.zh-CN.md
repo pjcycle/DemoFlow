@@ -80,25 +80,19 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 
 - 免费状态的主操作显示“购买”；已有订阅时只允许选择更高档方案并显示“升级订阅”，当前方案和更低档方案会灰色禁用，不支持降级。
 - 月付和年付会员在订阅弹窗中显示剩余整天数；买断显示“永久SVIP”。
-- 所有免费用户可领取一次“免费试用7天”。资格保存在 Keychain：记录匿名随机安装 ID 和领取记录，不读取硬件机器 ID、不上传；卸载重装不会重新获得资格。
+- 当前版本不提供独立免费试用，仅支持月付、年付和买断。月付与年付通过 StoreKit 自动续订，买断为 Non-Consumable；购买与恢复均通过 StoreKit 2 完成。
 - 正常成交价使用 App Store storefront 的本地化货币，中国区显示人民币；划线营销原价固定显示美元。
 
 ### 本地调试订阅
 
-本地假会员回退默认关闭，必须显式开启。推荐使用专用的 `DemoFlowDebugSubscriptionFallback` Scheme：
+本地调试分为两个 Scheme：`DemoFlowLocalStoreKit` 只用于本地真实购买/恢复，不显示诊断、不提供清空按钮；`DemoFlowLocalStoreKitTestReset` 用于免费态录屏和重置，购买后可查看并清理 Debug 信息。两者都不上传；`.storekit` 交易历史需在 Xcode Transaction Manager 中删除。
 
-1. 在 Xcode 选择 `DemoFlowDebugSubscriptionFallback`。
-2. 点击 `Run` 启动。
-3. 打开订阅弹窗，点击“本地 VIP 测试（7天）”，用独立的本地 VIP 验证订阅后的功能。
-4. 切回其他 Scheme 前，在订阅弹窗点击“清空调试信息”；然后可使用 `DemoFlowLocalStoreKit` 或普通 `DemoFlow` 验证真实本地 StoreKit 商品。
+项目提供两个本地 Scheme：`DemoFlowLocalStoreKit` 用于真实本地 StoreKit 购买和恢复，不含诊断或清空按钮；`DemoFlowLocalStoreKitTestReset` 用于免费态录屏与界面测试，包含诊断和清空调试信息入口。重置入口只清理 App 自身数据，不会编译到 Sandbox、TestFlight 或 App Store 包。
 
-手动开启方式：进入 `Product > Scheme > Edit Scheme > Run > Arguments`，添加：
+### Scheme 与分发规则
 
-```text
--DemoFlowEnableDebugSubscriptionFallback
-```
+`DemoFlowLocalStoreKit` 仅用于本地真实 StoreKit 购买和恢复；`DemoFlowLocalStoreKitTestReset` 仅用于 Debug 免费态录屏、诊断和清空 App 数据。若仍显示会员，需在 Xcode Transaction Manager 删除 `.storekit` 交易。`DemoFlowSandbox` 只做本机 Sandbox 检查，`DemoFlowTestFlight` 用于上传 TestFlight，`DemoFlow` 用于正式 App Store 提交（Archive 固定 `AppStore`）；这三个分发 Scheme 均无诊断信息和清空调试按钮。
 
-手动使用回退参数时，不要同时启用 `-DemoFlowLocalStoreKit` 或 `.storekit` 配置。关闭参数不会自动删除已经保存的本地调试会员，需先点击“清空调试信息”；它会清理 Debug 回退、诊断日志和 Debug 本地的 7 天试用记录。若本地 StoreKit 真实交易仍让界面显示会员，请在 Xcode 的 `Debug > StoreKit > Manage Transactions` 中重置交易历史。订阅诊断是独立开关，可传入 `-DemoFlowEnableSubscriptionDiagnostics`，或在订阅窗口聚焦时按 `⌘⌥D` 显示。
 
 ## 系统要求
 

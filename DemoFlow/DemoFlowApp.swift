@@ -20,7 +20,7 @@ struct DemoFlowApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
-        WindowGroup("DemoFlow", id: "main-window") {
+        Window("DemoFlow", id: "main-window") {
             ContentView(
                 appCoordinator: appCoordinator,
                 videoCuttingViewModel: videoCuttingViewModel,
@@ -40,6 +40,9 @@ struct DemoFlowApp: App {
                 configureSubscriptionGatesIfNeeded()
             }
         }
+        // Show the single background control window at launch. It is never
+        // auto-hidden after becoming visible.
+        .restorationBehavior(.disabled)
 
         Window(L10n.tr("legacy.key_157"), id: Self.videoCuttingWindowID) {
             VideoCuttingModalView(
@@ -80,12 +83,23 @@ struct DemoFlowApp: App {
 @MainActor
 final class DemoFlowAppDelegate: NSObject, NSApplicationDelegate {
     private let menuBarController = MenuBarRecordingController()
+    private weak var appCoordinator: AppCoordinator?
+    private var didRequestInitialMainWindow = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuBarController.install()
     }
 
     func configure(appCoordinator: AppCoordinator) {
+        self.appCoordinator = appCoordinator
         menuBarController.configure(appCoordinator: appCoordinator)
+        guard !didRequestInitialMainWindow else { return }
+        didRequestInitialMainWindow = true
+        // Explicitly open the singleton background control window after the
+        // SwiftUI scene has installed its notification receiver.
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .demoFlowShouldOpenMainWindow, object: nil)
+        }
     }
 }

@@ -10,16 +10,38 @@ import AppKit
 import SwiftUI
 
 enum SubscriptionWindowLayout {
-    static let standardWindowSize = CGSize(width: 710, height: 470)
-#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
-    static let diagnosticsWindowSize = CGSize(width: 710, height: 640)
-#endif
+    static let standardWindowSize = CGSize(width: 710, height: 540)
 
-    static func windowSize(showingDiagnostics: Bool) -> CGSize {
-#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
-        return showingDiagnostics ? diagnosticsWindowSize : standardWindowSize
-#else
+    static func windowSize() -> CGSize {
         return standardWindowSize
+    }
+
+    /// 屏幕录制模式：用于 App Store Review 录屏时把订阅窗口收敛到只剩
+    /// Apple Guideline 3.1.2(c) 强制要求展示的字段（标题 / 时长 / 价格 /
+    /// 隐私政策链接 / 使用条款链接 / 恢复购买）。
+    ///
+    /// 启用方式（三选一，命中任一即视为开启）：
+    /// 1. 启动参数 `-DemoFlowRecordingMode`（从 Xcode scheme 启动）
+    /// 2. 环境变量 `DEMOFLOW_RECORDING_MODE=1`
+    /// 3. UserDefaults：`defaults write pjln.top.demoflow demoflow.subscription.recordingMode -bool YES`
+    ///
+    /// 关闭录制模式：`defaults delete pjln.top.demoflow demoflow.subscription.recordingMode`
+    static var isRecordingMode: Bool {
+        if ProcessInfo.processInfo.arguments.contains("-DemoFlowRecordingMode") {
+            return true
+        }
+        if ProcessInfo.processInfo.environment["DEMOFLOW_RECORDING_MODE"] == "1" {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: "demoflow.subscription.recordingMode")
+    }
+
+    /// Only the dedicated local free-state/reset scheme exposes Debug UI.
+    static var suppressLocalStoreKitDebugSurface: Bool {
+#if DEBUG
+        return !ProcessInfo.processInfo.arguments.contains("-DemoFlowLocalStoreKitTestReset")
+#else
+        return true
 #endif
     }
     static let contentPadding: CGFloat = 16
@@ -59,12 +81,11 @@ private enum SubscriptionPalette {
 
 struct SubscriptionWindowView: View {
     @ObservedObject var subscriptionViewModel: SubscriptionViewModel
+    @ObservedObject var appCoordinator: AppCoordinator
     let onClose: () -> Void
 
     var body: some View {
-        let windowSize = SubscriptionWindowLayout.windowSize(
-            showingDiagnostics: subscriptionViewModel.isSubscriptionDiagnosticsVisible
-        )
+        let windowSize = SubscriptionWindowLayout.windowSize()
 
         ZStack {
             LinearGradient(
@@ -135,24 +156,10 @@ struct SubscriptionWindowView: View {
                             .foregroundStyle(SubscriptionPalette.inkPrimary)
                     }
 
-#if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
-                    if subscriptionViewModel.isSubscriptionDiagnosticsVisible {
-                        Text(subscriptionViewModel.externalBuildMarker)
-                        .font(.caption2.monospaced().weight(.semibold))
-                        .foregroundStyle(SubscriptionPalette.headerEnd)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(SubscriptionPalette.headerEnd.opacity(0.12))
-                        )
-                    }
-                    #endif
-
                     #if DEBUG
-                    if subscriptionViewModel.isDebugSubscriptionInfoClearAvailable {
+                    if subscriptionViewModel.isLocalSubscriptionResetAvailable {
                         Button(L10n.tr("subscription.debug.clear")) {
-                            subscriptionViewModel.clearDebugFallback()
+                            subscriptionViewModel.resetLocalSubscriptionTestData()
                         }
                         .buttonStyle(.plain)
                         .font(.caption.weight(.semibold))
@@ -167,8 +174,10 @@ struct SubscriptionWindowView: View {
                             Capsule(style: .continuous)
                                 .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
                         )
+                        .help(L10n.tr("subscription.status.debug_reset_test_data"))
                     }
                     #endif
+
                 }
 
                 Text(L10n.tr("subscription.teaser.subtitle"))
@@ -187,14 +196,6 @@ struct SubscriptionWindowView: View {
                         .foregroundStyle(Color.green)
                 }
 
-                #if DEBUG
-                if let message = subscriptionViewModel.debugClearMessage {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(SubscriptionPalette.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                #endif
             }
 
             Spacer(minLength: 0)
@@ -215,6 +216,8 @@ struct SubscriptionWindowView: View {
                 SubscriptionPlanCardView(
                     plan: plan,
                     priceText: subscriptionViewModel.displayPriceText(for: plan),
+                    comparisonPriceText: subscriptionViewModel.comparisonDisplayPriceText(for: plan),
+                    discountPercent: subscriptionViewModel.comparisonDiscountPercent(for: plan),
                     isSelected: subscriptionViewModel.selectedPlan == plan,
                     isDisabled: subscriptionViewModel.isPurchasing || subscriptionViewModel.isLoadingProducts || !subscriptionViewModel.canSelectPlan(plan),
                     badgeText: subscriptionViewModel.planBadgeText(for: plan),
@@ -230,7 +233,9 @@ struct SubscriptionWindowView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
-                if !subscriptionViewModel.isProUnlocked {
+                if !subscriptionViewModel.isProUnlocked,
+                   !SubscriptionWindowLayout.isRecordingMode,
+                   !SubscriptionWindowLayout.suppressLocalStoreKitDebugSurface {
                     statusPill(subscriptionViewModel.statusMessage ?? L10n.tr("subscription.status.loading"))
 
                     if subscriptionViewModel.shouldOfferProductReload {
@@ -256,73 +261,9 @@ struct SubscriptionWindowView: View {
                 }
             }
 
-            #if DEMOFLOW_EXTERNAL_CHANNEL && !DEBUG
-            if !subscriptionViewModel.isProUnlocked,
-               subscriptionViewModel.isSubscriptionDiagnosticsVisible {
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "ladybug.fill")
-                        Text(L10n.tr("subscription.debug.external_diagnostics_title"))
-                            .font(.caption.weight(.semibold))
-                        Spacer(minLength: 0)
-                        Text(subscriptionViewModel.externalBuildMarker)
-                            .font(.caption2.monospaced())
-                    }
-                    .foregroundStyle(SubscriptionPalette.headerEnd)
-
-                    ScrollView(.vertical, showsIndicators: true) {
-                        Text(subscriptionViewModel.subscriptionDiagnosticsSummary)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(SubscriptionPalette.inkSecondary.opacity(0.9))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(maxHeight: 104)
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.white.opacity(0.62))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.55), lineWidth: 1)
-                    )
-
-                    HStack(spacing: 8) {
-                        Button {
-                            Task { @MainActor in
-                                await subscriptionViewModel.reloadProducts()
-                            }
-                        } label: {
-                            Label(
-                                L10n.tr("subscription.paywall.reload"),
-                                systemImage: "arrow.clockwise"
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(SubscriptionPalette.headerEnd)
-                        .disabled(subscriptionViewModel.isLoadingProducts || subscriptionViewModel.isPurchasing)
-
-                        Button {
-                            subscriptionViewModel.openSubscriptionDiagnosticsLog()
-                        } label: {
-                            Label(
-                                L10n.tr("subscription.debug.open_log"),
-                                systemImage: "doc.text.magnifyingglass"
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(SubscriptionPalette.inkSecondary)
-                        .disabled(subscriptionViewModel.isPurchasing)
-                    }
-                }
-            }
-            #endif
-
             #if DEBUG
-            if !subscriptionViewModel.isProUnlocked,
+            if !SubscriptionWindowLayout.isRecordingMode,
+               !subscriptionViewModel.isProUnlocked,
                subscriptionViewModel.isSubscriptionDiagnosticsVisible {
                 Text(subscriptionViewModel.storeKitDebugSummary)
                     .font(.caption2.monospaced())
@@ -370,6 +311,29 @@ struct SubscriptionWindowView: View {
             .opacity(subscriptionViewModel.canPurchaseSelectedPlan ? 1 : 0.72)
 
             HStack(spacing: 10) {
+                // 左边：使用条款 → 打开外部 URL
+                Button(L10n.tr("subscription.paywall.terms")) {
+                    appCoordinator.openUserAgreementURL()
+                }
+                .buttonStyle(.plain)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(SubscriptionPalette.inkPrimary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+
+                // 隐私政策 → 打开外部 URL（App Store Review Guideline 3.1.2(c) 强制要求）
+                Button(L10n.tr("subscription.paywall.privacy")) {
+                    appCoordinator.openPrivacyPolicyURL()
+                }
+                .buttonStyle(.plain)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(SubscriptionPalette.inkPrimary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+
+                Spacer(minLength: 0)
+
+                // 右边：恢复购买 + 稍后再说
                 Button(L10n.tr("subscription.paywall.restore")) {
                     Task { @MainActor in
                         _ = await subscriptionViewModel.restorePurchases()
@@ -394,72 +358,27 @@ struct SubscriptionWindowView: View {
                 .disabled(subscriptionViewModel.isPurchasing)
                 .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
 
-                Button(L10n.tr("subscription.paywall.later")) {
-                    onClose()
-                }
-                .buttonStyle(.plain)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(SubscriptionPalette.inkPrimary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(SubscriptionPalette.secondaryButtonFill)
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
-                )
-                .disabled(subscriptionViewModel.isPurchasing)
-                .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
-
-                if !subscriptionViewModel.isProUnlocked,
-                   subscriptionViewModel.isFreeTrialAvailable {
-                    Button(L10n.tr("subscription.free_trial.button")) {
-                        if subscriptionViewModel.activateFreeTrial() {
-                            onClose()
-                        }
+                if !SubscriptionWindowLayout.isRecordingMode {
+                    Button(L10n.tr("subscription.paywall.later")) {
+                        onClose()
                     }
                     .buttonStyle(.plain)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(SubscriptionPalette.headerEnd)
+                    .foregroundStyle(SubscriptionPalette.inkPrimary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
                     .background(
                         Capsule(style: .continuous)
-                            .fill(SubscriptionPalette.headerEnd.opacity(0.14))
+                            .fill(SubscriptionPalette.secondaryButtonFill)
                     )
                     .overlay(
                         Capsule(style: .continuous)
-                            .stroke(SubscriptionPalette.headerEnd.opacity(0.4), lineWidth: 1)
+                            .stroke(SubscriptionPalette.cardDefaultStroke.opacity(0.75), lineWidth: 1)
                     )
-                    .help(L10n.tr("subscription.free_trial.button"))
                     .disabled(subscriptionViewModel.isPurchasing)
                     .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
                 }
 
-                #if DEBUG
-                if !subscriptionViewModel.isProUnlocked,
-                   subscriptionViewModel.isDebugSubscriptionTrialAvailable {
-                    Button(L10n.f(
-                        "subscription.debug.activate",
-                        subscriptionViewModel.debugTrialDaysLabel
-                    )) {
-                            subscriptionViewModel.activateDebugSubscriptionTrial()
-                            onClose()
-                        }
-                    .buttonStyle(.plain)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(SubscriptionPalette.inkPrimary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 9)
-                    .help(L10n.tr("subscription.debug.skip_help"))
-                    .disabled(subscriptionViewModel.isPurchasing)
-                    .opacity(subscriptionViewModel.isPurchasing ? 0.6 : 1)
-                }
-                #endif
-
-                Spacer(minLength: 0)
             }
         }
     }
@@ -541,6 +460,8 @@ struct SubscriptionWindowView: View {
 private struct SubscriptionPlanCardView: View {
     let plan: SubscriptionPlan
     let priceText: String
+    let comparisonPriceText: String?
+    let discountPercent: Int?
     let isSelected: Bool
     let isDisabled: Bool
     let badgeText: String?
@@ -563,6 +484,13 @@ private struct SubscriptionPlanCardView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.center)
 
+                Text(L10n.tr(plan.lengthKey))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(cardSecondaryTextColor.opacity(0.95))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .multilineTextAlignment(.center)
+
                 Spacer(minLength: 0)
 
                 VStack(alignment: .center, spacing: 2) {
@@ -572,10 +500,12 @@ private struct SubscriptionPlanCardView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
 
-                    Text(plan.compareAtPriceText)
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(cardSecondaryTextColor)
-                        .strikethrough()
+                    if let comparisonPriceText {
+                        Text(comparisonPriceText)
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(cardSecondaryTextColor)
+                            .strikethrough()
+                    }
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -602,7 +532,9 @@ private struct SubscriptionPlanCardView: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                DiscountRibbon(text: ribbonText)
+                if let ribbonText {
+                    DiscountRibbon(text: ribbonText)
+                }
             }
             .shadow(color: isSelected ? SubscriptionPalette.cardSelectedStart.opacity(0.22) : Color.black.opacity(0.07), radius: isSelected ? 12 : 7, y: 4)
         }
@@ -638,15 +570,9 @@ private struct SubscriptionPlanCardView: View {
         L10n.tr(plan.subtitleKey)
     }
 
-    private var ribbonText: String {
-        guard let badgeTextKey = plan.badgeTextKey else { return "-50%" }
-        return compactDiscountText(from: L10n.tr(badgeTextKey))
-    }
-
-    private func compactDiscountText(from source: String) -> String {
-        let digits = source.filter(\.isNumber)
-        guard !digits.isEmpty else { return source }
-        return "-\(digits)%"
+    private var ribbonText: String? {
+        guard let percent = discountPercent else { return nil }
+        return "-\(percent)%"
     }
 }
 

@@ -9,7 +9,7 @@
       }
     ]
   },
-  "identifier" : "5220AC93",
+  "identifier" : "5220AC94",
   "nonRenewingSubscriptions" : [
 
   ],
@@ -51,7 +51,7 @@
   },
   "subscriptionGroups" : [
     {
-      "id" : "297B9B5E",
+      "id" : "297B9B5F",
       "localizations" : [
         {
           "displayName" : "DemoFlow Pro",
@@ -74,8 +74,7 @@
           "displayPrice" : "1.99",
           "familyShareable" : false,
           "groupNumber" : 2,
-          "internalID" : "E5BFAF62",
-          "introductoryOffer" : null,
+          "internalID" : "E5BFAF63",
           "localizations" : [
             {
               "description" : "Flexible month-to-month access.",
@@ -91,7 +90,7 @@
           "productID" : "pjln.top.demoflow.pro.monthly",
           "recurringSubscriptionPeriod" : "P1M",
           "referenceName" : "Monthly",
-          "subscriptionGroupID" : "297B9B5E",
+          "subscriptionGroupID" : "297B9B5F",
           "type" : "RecurringSubscription"
         },
         {
@@ -104,8 +103,7 @@
           "displayPrice" : "19.99",
           "familyShareable" : false,
           "groupNumber" : 1,
-          "internalID" : "A8C3D1BE",
-          "introductoryOffer" : null,
+          "internalID" : "A8C3D1BF",
           "localizations" : [
             {
               "description" : "Best value if you use DemoFlow regularly.",
@@ -121,7 +119,7 @@
           "productID" : "pjln.top.demoflow.pro.yearly",
           "recurringSubscriptionPeriod" : "P1Y",
           "referenceName" : "Yearly",
-          "subscriptionGroupID" : "297B9B5E",
+          "subscriptionGroupID" : "297B9B5F",
           "type" : "RecurringSubscription"
         }
       ]

@@ -5,6 +5,7 @@
 //  Stable, user-accessible diagnostics for StoreKit subscription testing.
 //
 
+#if DEBUG
 import AppKit
 import Foundation
 
@@ -95,3 +96,4 @@ final class SubscriptionDiagnosticsStore {
         }
     }
 }
+#endif

@@ -65,37 +65,25 @@ create_helper_dsym_bundle() {
 		return 0
 	fi
 
-	local tmp_dir
-	tmp_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/demoflow-${helper_name}-dsym.XXXXXX")"
-	local dwarf_file="${tmp_dir}/${helper_name}.dwarf"
 	local dsym_bundle="${archive_dsyms_dir}/${helper_name}.dSYM"
-	local info_plist="${dsym_bundle}/Contents/Info.plist"
-
-	/usr/bin/dsymutil --flat "$helper_binary" -o "$dwarf_file" >/dev/null 2>/dev/null
-	if [[ ! -s "$dwarf_file" ]]; then
-		echo "[DemoFlow dSYM] Empty dSYM data for ${helper_name}; skip."
-		rm -rf "$tmp_dir"
-		return 0
+	local binary_uuid
+	binary_uuid="$(/usr/bin/dwarfdump --uuid "$helper_binary" | awk 'NR == 1 { print $2 }')"
+	if [[ -z "$binary_uuid" ]]; then
+		echo "[DemoFlow dSYM] Unable to read UUID for ${helper_name}: ${helper_binary}" >&2
+		return 1
 	fi
 
 	rm -rf "$dsym_bundle"
-	mkdir -p "${dsym_bundle}/Contents/Resources/DWARF"
-	/bin/cp "$dwarf_file" "${dsym_bundle}/Contents/Resources/DWARF/${helper_name}"
-
-	rm -f "$info_plist"
-	/usr/libexec/PlistBuddy -c "Add :CFBundleDevelopmentRegion string English" "$info_plist" >/dev/null
-	/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.apple.xcode.dsym.${app_identifier}.${helper_name}" "$info_plist" >/dev/null
-	/usr/libexec/PlistBuddy -c "Add :CFBundleInfoDictionaryVersion string 6.0" "$info_plist" >/dev/null
-	/usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string dSYM" "$info_plist" >/dev/null
-	/usr/libexec/PlistBuddy -c "Add :CFBundleSignature string ????" "$info_plist" >/dev/null
-	if [[ -n "$app_short_version" ]]; then
-		/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string ${app_short_version}" "$info_plist" >/dev/null
+	if ! /usr/bin/dsymutil "$helper_binary" -o "$dsym_bundle"; then
+		echo "[DemoFlow dSYM] Failed to generate dSYM for ${helper_name}" >&2
+		return 1
 	fi
-	if [[ -n "$app_build_version" ]]; then
-		/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${app_build_version}" "$info_plist" >/dev/null
+	local dsym_uuid
+	dsym_uuid="$(/usr/bin/dwarfdump --uuid "$dsym_bundle" | awk 'NR == 1 { print $2 }')"
+	if [[ "$binary_uuid" != "$dsym_uuid" ]]; then
+		echo "[DemoFlow dSYM] UUID mismatch for ${helper_name}: binary=${binary_uuid}, dsym=${dsym_uuid}" >&2
+		return 1
 	fi
-
-	rm -rf "$tmp_dir"
 	echo "[DemoFlow dSYM] Generated helper dSYM: ${dsym_bundle}"
 }
 

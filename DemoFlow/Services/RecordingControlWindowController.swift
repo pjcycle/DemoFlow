@@ -29,6 +29,8 @@ struct RecordingControlDisplayModel: Equatable {
     var isMicrophoneMuted: Bool
     var hasMicrophoneInput: Bool
     var canToggleMicrophone: Bool
+    var microphoneSourceName: String
+    var canSelectMicrophone: Bool
     var canClose: Bool
 
     static let `default` = RecordingControlDisplayModel(
@@ -44,6 +46,8 @@ struct RecordingControlDisplayModel: Equatable {
         isMicrophoneMuted: false,
         hasMicrophoneInput: false,
         canToggleMicrophone: false,
+        microphoneSourceName: "",
+        canSelectMicrophone: false,
         canClose: true
     )
 }
@@ -56,6 +60,7 @@ final class RecordingControlWindowController: NSObject {
     private var mode: RecordingControlMode = .ready
     private var displayModel: RecordingControlDisplayModel = .default
     private var captureSizePickerPopover: NSPopover?
+    private var microphonePickerPopover: NSPopover?
 
     var onRecordToggleRequested: (() -> Void)?
     var onPauseToggleRequested: (() -> Void)?
@@ -64,6 +69,8 @@ final class RecordingControlWindowController: NSObject {
     var onPiPToggleRequested: (() -> Void)?
     var onAnnotateToggleRequested: (() -> Void)?
     var onMicrophoneToggleRequested: (() -> Void)?
+    var onMicrophonePickerRequested: (() -> Void)?
+    var onSettingsToggleRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
 
     override init() {
@@ -105,6 +112,7 @@ final class RecordingControlWindowController: NSObject {
 
     func hide() {
         hideCaptureSizePicker()
+        hideMicrophonePicker()
         panel?.orderOut(nil)
         mode = .ready
         displayModel = .default
@@ -123,6 +131,9 @@ final class RecordingControlWindowController: NSObject {
         displayModel = model
         if !model.canSelectCaptureSize {
             hideCaptureSizePicker()
+        }
+        if !model.canSelectMicrophone {
+            hideMicrophonePicker()
         }
         applyViewState()
     }
@@ -178,6 +189,73 @@ final class RecordingControlWindowController: NSObject {
 
     func hideCaptureSizePicker() {
         captureSizePickerPopover?.performClose(nil)
+    }
+
+    func showMicrophonePicker(
+        sources: [AudioInputSource],
+        selectedSourceID: String?,
+        isAuthorized: Bool,
+        onRequestAccess: @escaping () -> Void,
+        onSelect: @escaping (AudioInputSource) -> Void
+    ) {
+        guard mode == .ready, displayModel.canSelectMicrophone else { return }
+        guard let contentView = panel?.contentView as? RecordingControlView else { return }
+
+        let rootView = RecordingMicrophonePickerView(
+            sources: sources,
+            selectedSourceID: selectedSourceID,
+            isAuthorized: isAuthorized,
+            onRequestAccess: { [weak self] in
+                self?.hideMicrophonePicker()
+                onRequestAccess()
+            },
+            onSelect: { [weak self] source in
+                self?.hideMicrophonePicker()
+                onSelect(source)
+            }
+        )
+        let hostingController = NSHostingController(rootView: rootView)
+        let contentSize = microphonePickerContentSize(
+            sources: sources,
+            isAuthorized: isAuthorized
+        )
+        let popover = microphonePickerPopover ?? {
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.animates = true
+            microphonePickerPopover = popover
+            return popover
+        }()
+        if popover.isShown {
+            popover.performClose(nil)
+        }
+        popover.contentSize = contentSize
+        popover.contentViewController = hostingController
+        popover.show(relativeTo: contentView.microphoneSelectionAnchorView.bounds,
+                     of: contentView.microphoneSelectionAnchorView,
+                     preferredEdge: .minY)
+    }
+
+    func hideMicrophonePicker() {
+        microphonePickerPopover?.performClose(nil)
+    }
+
+    private func microphonePickerContentSize(
+        sources: [AudioInputSource],
+        isAuthorized: Bool
+    ) -> NSSize {
+        let availableCount = sources.filter(\.isAvailable).count
+        let height: CGFloat
+        if !isAuthorized {
+            height = 116
+        } else if availableCount == 0 {
+            height = 76
+        } else {
+            // Title + padding + 32pt rows. Keep a scroll area only once the
+            // device list needs it, instead of always reserving 220pt.
+            height = min(220, 56 + CGFloat(availableCount) * 36)
+        }
+        return NSSize(width: 270, height: height)
     }
 
     func setAnnotateActive(_ isActive: Bool) {
@@ -265,7 +343,7 @@ final class RecordingControlWindowController: NSObject {
 
     private func makePanel() -> RecordingControlPanel {
         let panel = RecordingControlPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 46),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 46),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -287,7 +365,7 @@ final class RecordingControlWindowController: NSObject {
             self?.onCloseRequested?()
         }
 
-        let contentView = RecordingControlView(frame: NSRect(x: 0, y: 0, width: 430, height: 46))
+        let contentView = RecordingControlView(frame: NSRect(x: 0, y: 0, width: 520, height: 46))
         contentView.autoresizingMask = [.width, .height]
         contentView.onAnnotateTapped = { [weak self] in
             self?.onAnnotateToggleRequested?()
@@ -309,6 +387,12 @@ final class RecordingControlWindowController: NSObject {
         }
         contentView.onMicrophoneTapped = { [weak self] in
             self?.onMicrophoneToggleRequested?()
+        }
+        contentView.onMicrophoneSelectionTapped = { [weak self] in
+            self?.onMicrophonePickerRequested?()
+        }
+        contentView.onSettingsTapped = { [weak self] in
+            self?.onSettingsToggleRequested?()
         }
         contentView.onCloseTapped = { [weak self] in
             self?.onCloseRequested?()
@@ -354,7 +438,9 @@ private final class RecordingControlView: NSView {
     var onAnnotateTapped: (() -> Void)?
     var onRecordTapped: (() -> Void)?
     var onMicrophoneTapped: (() -> Void)?
+    var onMicrophoneSelectionTapped: (() -> Void)?
     var onPauseTapped: (() -> Void)?
+    var onSettingsTapped: (() -> Void)?
     var onCloseTapped: (() -> Void)?
 
     private let effectView = NSVisualEffectView()
@@ -365,7 +451,9 @@ private final class RecordingControlView: NSView {
     private let annotateButton = NSButton(title: "", target: nil, action: nil)
     private let recordButton = NSButton(title: "", target: nil, action: nil)
     private let microphoneButton = NSButton(title: "", target: nil, action: nil)
+    private let microphoneSelectionButton = NSButton(title: "", target: nil, action: nil)
     private let pauseButton = NSButton(title: "", target: nil, action: nil)
+    private let settingsButton = NSButton(title: "", target: nil, action: nil)
     private let closeButton = NSButton(title: "", target: nil, action: nil)
     private let stoppingIndicator = NSProgressIndicator()
 
@@ -382,6 +470,10 @@ private final class RecordingControlView: NSView {
 
     var captureSizeAnchorView: NSView {
         captureSizeButton
+    }
+
+    var microphoneSelectionAnchorView: NSView {
+        microphoneSelectionButton
     }
 
     func render(mode: RecordingControlMode, model: RecordingControlDisplayModel) {
@@ -479,6 +571,21 @@ private final class RecordingControlView: NSView {
             : .tertiaryLabelColor
         microphoneButton.alphaValue = model.canToggleMicrophone ? 1.0 : 0.55
 
+        let microphoneSelectionDescription = model.microphoneSourceName.isEmpty
+            ? L10n.tr("recording.control.microphone_select")
+            : L10n.f("recording.control.microphone_selected", model.microphoneSourceName)
+        microphoneSelectionButton.image = resolveSymbolImage(
+            preferred: "mic.fill",
+            fallback: "mic",
+            description: microphoneSelectionDescription
+        )
+        microphoneSelectionButton.toolTip = microphoneSelectionDescription
+        microphoneSelectionButton.setAccessibilityLabel(microphoneSelectionDescription)
+        microphoneSelectionButton.contentTintColor = model.canSelectMicrophone
+            ? .labelColor
+            : .tertiaryLabelColor
+        microphoneSelectionButton.alphaValue = model.canSelectMicrophone ? 1.0 : 0.55
+
         let canPauseByMode = (mode == .recording || mode == .paused)
         let canRegionToggle = (mode == .ready)
         regionButton.isEnabled = canRegionToggle && model.canRecordToggle
@@ -486,6 +593,7 @@ private final class RecordingControlView: NSView {
         recordButton.isEnabled = model.canRecordToggle && mode != .stopping
         pauseButton.isEnabled = model.canPauseToggle && canPauseByMode && mode != .stopping
         microphoneButton.isEnabled = model.canToggleMicrophone && mode == .recording
+        microphoneSelectionButton.isEnabled = model.canSelectMicrophone && mode == .ready
         closeButton.isEnabled = model.canClose && mode != .stopping
         pipButton.isEnabled = mode != .stopping
         annotateButton.isEnabled = mode != .stopping
@@ -581,6 +689,14 @@ private final class RecordingControlView: NSView {
         microphoneButton.action = #selector(handleMicrophoneTapped)
 
         configureButton(
+            microphoneSelectionButton,
+            symbolName: "mic.fill",
+            fallbackName: "mic",
+            description: L10n.tr("recording.control.microphone_select")
+        )
+        microphoneSelectionButton.action = #selector(handleMicrophoneSelectionTapped)
+
+        configureButton(
             pauseButton,
             symbolName: "pause.fill",
             fallbackName: "pause",
@@ -596,6 +712,14 @@ private final class RecordingControlView: NSView {
         )
         closeButton.action = #selector(handleCloseTapped)
 
+        configureButton(
+            settingsButton,
+            symbolName: "gearshape.fill",
+            fallbackName: "gearshape",
+            description: L10n.tr("recording.control.settings")
+        )
+        settingsButton.action = #selector(handleSettingsTapped)
+
         let stack = NSStackView(views: [
             elapsedLabel,
             verticalSeparator(),
@@ -607,7 +731,10 @@ private final class RecordingControlView: NSView {
             verticalSeparator(),
             recordButton,
             microphoneButton,
+            microphoneSelectionButton,
             pauseButton,
+            verticalSeparator(),
+            settingsButton,
             closeButton
         ])
         stack.orientation = .horizontal
@@ -643,10 +770,13 @@ private final class RecordingControlView: NSView {
             annotateButton.widthAnchor.constraint(equalToConstant: 28),
             recordButton.widthAnchor.constraint(equalToConstant: 28),
             microphoneButton.widthAnchor.constraint(equalToConstant: 28),
+            microphoneSelectionButton.widthAnchor.constraint(equalToConstant: 28),
             pauseButton.widthAnchor.constraint(equalToConstant: 28),
+            settingsButton.widthAnchor.constraint(equalToConstant: 28),
             closeButton.widthAnchor.constraint(equalToConstant: 28),
             recordButton.heightAnchor.constraint(equalToConstant: 24),
             microphoneButton.heightAnchor.constraint(equalToConstant: 24),
+            microphoneSelectionButton.heightAnchor.constraint(equalToConstant: 24),
             pauseButton.heightAnchor.constraint(equalToConstant: 24),
             closeButton.heightAnchor.constraint(equalToConstant: 24),
 
@@ -719,8 +849,18 @@ private final class RecordingControlView: NSView {
     }
 
     @objc
+    private func handleMicrophoneSelectionTapped() {
+        onMicrophoneSelectionTapped?()
+    }
+
+    @objc
     private func handlePauseTapped() {
         onPauseTapped?()
+    }
+
+    @objc
+    private func handleSettingsTapped() {
+        onSettingsTapped?()
     }
 
     @objc
@@ -892,5 +1032,67 @@ private struct RecordingCaptureSizePickerView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct RecordingMicrophonePickerView: View {
+    let sources: [AudioInputSource]
+    let selectedSourceID: String?
+    let isAuthorized: Bool
+    let onRequestAccess: () -> Void
+    let onSelect: (AudioInputSource) -> Void
+
+    private var availableSources: [AudioInputSource] {
+        sources.filter(\.isAvailable)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.tr("recording.control.microphone_select"))
+                .font(.headline)
+
+            if !isAuthorized {
+                Text(L10n.tr("recording.control.microphone_permission_required"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(L10n.tr("legacy.key_204"), action: onRequestAccess)
+                    .buttonStyle(.borderedProminent)
+            } else if availableSources.isEmpty {
+                Text(L10n.tr("recording.control.microphone_unavailable"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(availableSources) { source in
+                            Button {
+                                onSelect(source)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: source.id == selectedSourceID ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(source.id == selectedSourceID ? Color.accentColor : Color.secondary)
+                                    Text(source.name)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 4)
+                                    if !source.badgeText.isEmpty {
+                                        Text(source.badgeText)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(width: 270, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }

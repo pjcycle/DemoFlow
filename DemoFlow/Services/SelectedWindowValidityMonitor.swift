@@ -20,7 +20,6 @@ final class SelectedWindowValidityMonitor {
 
     private var pollTask: Task<Void, Never>?
     private var targetWindowIDs: Set<CGWindowID> = []
-    private var primaryWindowID: CGWindowID?
     private var targetDisplayID: CGDirectDisplayID?
     private var lastDisplayID: CGDirectDisplayID?
     private var lastFrameInDisplayPoints: CGRect?
@@ -41,7 +40,6 @@ final class SelectedWindowValidityMonitor {
     ) {
         stopMonitoring()
         targetWindowIDs = Set(windowIDs)
-        primaryWindowID = windowIDs.first
         targetDisplayID = displayID
         lastDisplayID = nil
         lastFrameInDisplayPoints = nil
@@ -56,7 +54,6 @@ final class SelectedWindowValidityMonitor {
         pollTask?.cancel()
         pollTask = nil
         targetWindowIDs = []
-        primaryWindowID = nil
         targetDisplayID = nil
         lastDisplayID = nil
         lastFrameInDisplayPoints = nil
@@ -87,25 +84,30 @@ final class SelectedWindowValidityMonitor {
         } catch {
             return
         }
-        guard let primaryWindowID,
-              let targetWindow = content.windows.first(where: { $0.windowID == primaryWindowID }),
-              targetWindow.isOnScreen else {
+        let targetWindows = content.windows.filter {
+            $0.isOnScreen && targetWindowIDs.contains($0.windowID)
+        }
+        guard !targetWindows.isEmpty else {
             let lost = onLost
             stopMonitoring()
             lost?()
             return
         }
 
+        let targetWindow = targetWindows[0]
         let center = CGPoint(x: targetWindow.frame.midX, y: targetWindow.frame.midY)
         let displayID = RecordingWindowCoordinateSpace.displayID(containingCapturePoint: center)
             ?? targetDisplayID
         guard let displayID, NSScreen.screen(with: displayID) != nil else { return }
         targetDisplayID = displayID
 
-        let frameInDisplayPoints = RecordingWindowCoordinateSpace.captureLocalFrame(
-            forCaptureFrame: targetWindow.frame,
-            displayID: displayID
-        )
+        let frames = targetWindows.map {
+            RecordingWindowCoordinateSpace.captureLocalFrame(
+                forCaptureFrame: $0.frame,
+                displayID: displayID
+            )
+        }
+        let frameInDisplayPoints = frames.dropFirst().reduce(frames[0]) { $0.union($1) }
         guard lastDisplayID != displayID
                 || lastFrameInDisplayPoints?.equalTo(frameInDisplayPoints) != true else {
             return

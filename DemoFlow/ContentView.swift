@@ -14,6 +14,7 @@ struct ContentView: View {
     @ObservedObject private var audioToolViewModel: AudioToolViewModel
     @ObservedObject private var subDubViewModel: SubDubViewModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     private let videoCuttingWindowID: String
 
     @AppStorage("demoflow.sidebarCollapsed") private var sidebarCollapsedStorage = false
@@ -89,6 +90,19 @@ struct ContentView: View {
             appCoordinator.selectedSettingsSection = .videoCutting
             openVideoCuttingWindow()
             videoCuttingViewModel.importFromRecordingOutput(outputURL)
+        }
+        .onChange(of: appCoordinator.videoCuttingShouldOpen) { _, shouldOpen in
+            guard shouldOpen else { return }
+            hasUserOpenedVideoCutting = true
+            appCoordinator.videoCuttingShouldOpen = false
+            if isVideoCuttingWindowVisible {
+                dismissWindow(id: videoCuttingWindowID)
+            } else {
+                openWindow(id: videoCuttingWindowID)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .demoFlowShouldOpenMainWindow)) { _ in
+            openWindow(id: "main-window")
         }
     }
 
@@ -339,5 +353,17 @@ struct ContentView: View {
     private func openVideoCuttingWindow() {
         guard hasUserOpenedVideoCutting else { return }
         openWindow(id: videoCuttingWindowID)
+    }
+
+    private var isVideoCuttingWindowVisible: Bool {
+        let title = L10n.tr("legacy.key_157")
+        return NSApp.windows.contains { window in
+            window.isVisible && (
+                window.identifier?.rawValue == videoCuttingWindowID
+                    || window.title == title
+                    || window.title == "Smart Cutting"
+                    || window.title == "智能裁剪"
+            )
+        }
     }
 }

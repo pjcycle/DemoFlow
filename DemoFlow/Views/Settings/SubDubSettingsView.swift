@@ -1271,6 +1271,7 @@ private struct VideoDubbingPanel: View {
                     dubbingControls
                     videoPreview
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 dubbingTimeline
             } else {
                 dropZone(
@@ -1291,32 +1292,10 @@ private struct VideoDubbingPanel: View {
     }
 
     private var dubbingControls: some View {
+        // 稳定版：卡片高度对齐到视频预览，按钮靠底部对齐（之前的实现）。
         VStack(alignment: .leading, spacing: 10) {
             Spacer(minLength: 0)
-
-            HStack(spacing: 8) {
-                Label(
-                    viewModel.sourceURL?.lastPathComponent ?? L10n.tr("subdub.empty.no_video"),
-                    systemImage: "mic.and.signal.meter"
-                )
-                .lineLimit(1)
-                Spacer(minLength: 0)
-                iconButton(
-                    systemName: "arrow.triangle.2.circlepath",
-                    help: L10n.tr("subdub.action.reselect_video"),
-                    action: onImportVideo,
-                    isDisabled: viewModel.state.isBusy
-                )
-                iconButton(
-                    systemName: "xmark.circle",
-                    help: L10n.tr("subdub.action.remove_video"),
-                    action: onRemoveVideo,
-                    isDisabled: viewModel.state.isBusy
-                )
-            }
-
             dubbingActions
-            selectionControls
         }
         .frame(
             width: subDubConfigurationContentWidth,
@@ -1334,43 +1313,84 @@ private struct VideoDubbingPanel: View {
 
     private var dubbingActions: some View {
         HStack(spacing: 8) {
+            // 视频播放按钮（左侧最前）：统一控制 player 的播放/暂停。
+            // 可用：刚开始（.idle / .preparing）、录音结束（.finished / .succeeded / .failed / .ready），
+            //       以及任何非录音非暂停的状态。
+            // 禁用：仅 .recording / .paused（两条播放线严格互斥，避免冲突）。
+            // 录音中（state == .recording）时按钮变话筒 icon（mic.fill），视觉提示录音进行中。
+            let isRecording = viewModel.state == .recording
+            let playbackIcon: String = {
+                if isRecording { return "mic.fill" }
+                return viewModel.player.timeControlStatus == .playing ? "pause.fill" : "play.fill"
+            }()
+            let playbackHelp: String = {
+                if isRecording { return L10n.tr("subdub.action.recording") }
+                return viewModel.player.timeControlStatus == .playing
+                    ? L10n.tr("subdub.action.pause")
+                    : L10n.tr("subdub.action.play")
+            }()
             iconButton(
-                systemName: "mic",
-                help: L10n.tr("subdub.action.prepare"),
-                action: viewModel.prepareDubbing,
-                isDisabled: viewModel.state.isBusy
+                systemName: playbackIcon,
+                help: playbackHelp,
+                action: viewModel.togglePlayback,
+                isDisabled: !viewModel.isPlayerReady
+                    || viewModel.state == .recording
+                    || viewModel.state == .paused
             )
 
-            if viewModel.state == .ready || viewModel.state == .failed ||
-                viewModel.state == .finished || viewModel.state == .succeeded {
+            // 首次进入配音会话的准备按钮（mic），仅 .idle 时显示。
+            if viewModel.state == .idle {
                 iconButton(
-                    systemName: "record.circle",
-                    help: viewModel.selectedDubbingRange == nil
-                        ? L10n.tr("subdub.action.start_recording")
-                        : L10n.tr("subdub.action.replace_selection"),
-                    action: viewModel.startRecording
+                    systemName: "mic",
+                    help: L10n.tr("subdub.action.prepare"),
+                    action: viewModel.prepareDubbing,
+                    isDisabled: viewModel.state.isBusy
                 )
             }
 
-            if viewModel.state == .recording {
-                iconButton(
-                    systemName: "pause.fill",
-                    help: L10n.tr("subdub.action.pause_recording"),
-                    action: viewModel.pauseRecording
-                )
-                iconButton(
-                    systemName: "stop.fill",
-                    help: L10n.tr("subdub.action.stop_recording"),
-                    action: viewModel.stopRecording
-                )
+            // 录音主按钮：始终在同位置，按 state 切换 icon + action。
+            //   .ready/.finished/.succeeded/.failed/.preparing → record.circle.fill（开始/重录）
+            //   .recording                                     → pause.fill（暂停）
+            //   .paused                                        → record.circle.fill（继续录音）
+            if viewModel.state != .idle {
+                let isRecording = viewModel.state == .recording
+                let iconName = isRecording ? "pause.fill" : "record.circle.fill"
+                let action: () -> Void = {
+                    switch viewModel.state {
+                    case .recording:
+                        viewModel.pauseRecording()
+                    case .paused:
+                        viewModel.continueRecording()
+                    default:
+                        viewModel.startRecording()
+                    }
+                }
+                let helpKey: String = {
+                    switch viewModel.state {
+                    case .recording:
+                        return "subdub.action.pause_recording"
+                    case .paused:
+                        return "subdub.action.resume_recording"
+                    default:
+                        return "subdub.action.start_recording"
+                    }
+                }()
+                let isDisabled = viewModel.state == .preparing || viewModel.state == .exporting
+
+                Button(action: action) {
+                    Image(systemName: iconName)
+                        .frame(width: 32, height: 32)
+                        .foregroundStyle(Color.red)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(L10n.tr(helpKey))
+                .disabled(isDisabled)
+                .opacity(isDisabled ? 0.38 : 1)
             }
 
-            if viewModel.state == .paused {
-                iconButton(
-                    systemName: "play.fill",
-                    help: L10n.tr("subdub.action.resume_recording"),
-                    action: viewModel.continueRecording
-                )
+            // 停止按钮：recording/paused 时显示。
+            if viewModel.state == .recording || viewModel.state == .paused {
                 iconButton(
                     systemName: "stop.fill",
                     help: L10n.tr("subdub.action.stop_recording"),
@@ -1386,13 +1406,6 @@ private struct VideoDubbingPanel: View {
             )
 
             if viewModel.hasAudio {
-                iconButton(
-                    systemName: viewModel.isPreviewPlaying ? "pause.fill" : "play.fill",
-                    help: viewModel.isPreviewPlaying
-                        ? L10n.tr("subdub.action.pause_dubbed_video")
-                        : L10n.tr("subdub.action.play_dubbed_video"),
-                    action: viewModel.toggleRecordedPreview
-                )
                 iconButton(
                     systemName: "arrow.down.circle",
                     help: L10n.tr("subdub.action.save_audio"),
@@ -1411,6 +1424,8 @@ private struct VideoDubbingPanel: View {
     }
 
     private var videoPreview: some View {
+        // 跟其他 3 个 tab 的视频画面大小一致（按 previewSize 固定宽度）。
+        // videoPreview 容器撑满 HStack 剩余（贴 panel 右边缘），视频画面在容器内贴左。
         let previewSize = subDubVideoPreviewSize(for: viewModel.sourceVideoSize)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -1422,42 +1437,33 @@ private struct VideoDubbingPanel: View {
                     .foregroundStyle(.secondary)
             }
 
-            SubDubPlayerView(player: viewModel.player)
-                .frame(width: previewSize.width, height: previewSize.height)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .contextMenu {
-                    Button(L10n.tr("subdub.action.remove_video")) {
-                        onRemoveVideo()
+            // Keep the preview column stable across tabs. The source image keeps
+            // its aspect ratio, while the column itself remains left-aligned.
+            HStack(spacing: 0) {
+                SubDubPlayerView(player: viewModel.player)
+                    .frame(width: previewSize.width, height: previewSize.height)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contextMenu {
+                        Button(L10n.tr("subdub.action.remove_video")) {
+                            onRemoveVideo()
+                        }
+                        Button(L10n.tr("subdub.action.reselect_video")) {
+                            onImportVideo()
+                        }
                     }
-                    Button(L10n.tr("subdub.action.reselect_video")) {
-                        onImportVideo()
-                    }
-                }
-
-            HStack(spacing: 8) {
-                iconButton(
-                    systemName: viewModel.player.timeControlStatus == .playing ? "pause.fill" : "play.fill",
-                    help: viewModel.player.timeControlStatus == .playing
-                        ? L10n.tr("subdub.action.pause")
-                        : L10n.tr("subdub.action.play"),
-                    action: viewModel.togglePlayback,
-                    isDisabled: !viewModel.isPlayerReady || viewModel.state == .recording || viewModel.state == .paused
-                )
-                Slider(
-                    value: Binding(
-                        get: { viewModel.playbackPosition },
-                        set: { viewModel.seek(to: $0) }
-                    ),
-                    in: 0...max(viewModel.sourceDuration, 0.1)
-                )
-                .disabled(!viewModel.isPlayerReady || viewModel.state == .recording || viewModel.state == .paused)
+                Spacer(minLength: 0)
             }
         }
-        .frame(width: 520, alignment: .topLeading)
+        .frame(
+            width: subDubVideoPreviewMaxWidth,
+            height: subDubVideoPreviewMaxHeight + 30,
+            alignment: .topLeading
+        )
     }
 
     private var dubbingConfigurationContentHeight: CGFloat {
-        subDubVideoPreviewSize(for: viewModel.sourceVideoSize).height + 47
+        // 顶部文件名行(~22) + spacing(8)，与视频预览区保持等高
+        subDubVideoPreviewSize(for: viewModel.sourceVideoSize).height + 30
     }
 
     private var dubbingTimeline: some View {
@@ -1467,9 +1473,7 @@ private struct VideoDubbingPanel: View {
                 position: viewModel.playbackPosition,
                 sourceWaveformSamples: viewModel.sourceWaveformSamples,
                 dubbingWaveformSamples: viewModel.waveformSamples,
-                liveWaveformSamples: viewModel.liveWaveformSamples,
-                selection: viewModel.selectedDubbingRange,
-                onSelectionChanged: viewModel.setSelectedDubbingRange
+                liveWaveformSamples: viewModel.liveWaveformSamples
             )
             .frame(height: 72)
             .padding(.top, 22)
@@ -1481,9 +1485,17 @@ private struct VideoDubbingPanel: View {
 
             SubDubTimelinePlayhead(
                 duration: viewModel.sourceDuration,
-                position: viewModel.playbackPosition
+                position: viewModel.playbackPosition,
+                isDraggable: viewModel.state != .recording && viewModel.sourceDuration > 0,
+                onScrubEnded: { finalPosition in
+                    if viewModel.state == .paused {
+                        // 暂停时拖动：只 seek player，不自动录音、不开新段、不改 range。
+                        viewModel.seek(to: finalPosition)
+                    } else {
+                        viewModel.seekToRecordingStart(at: finalPosition)
+                    }
+                }
             )
-            .allowsHitTesting(false)
         }
         .frame(height: 94)
         .padding(.horizontal, 8)
@@ -1493,44 +1505,6 @@ private struct VideoDubbingPanel: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-        }
-    }
-
-    private var selectionControls: some View {
-        HStack(spacing: 8) {
-            Text(L10n.tr("subdub.video.selection.label"))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            TextField("00:00", text: $viewModel.selectionStartText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 72)
-                .onSubmit { viewModel.updateSelectionFromInputs() }
-
-            Text(L10n.tr("subdub.video.selection.to"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            TextField("00:00", text: $viewModel.selectionEndText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 72)
-                .onSubmit { viewModel.updateSelectionFromInputs() }
-
-            if viewModel.selectedDubbingRange != nil {
-                Text(viewModel.selectionText)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                Button {
-                    viewModel.clearSelectedDubbingRange()
-                } label: {
-                    Image(systemName: "xmark.circle")
-                }
-                .buttonStyle(.plain)
-                .help(L10n.tr("subdub.video.selection.clear"))
-            }
-
-            Spacer(minLength: 0)
         }
     }
 }
@@ -2514,8 +2488,12 @@ private struct SubtitleBurnTimelineView: View {
                 SubDubTimelineRuler(duration: duration)
                     .frame(height: 22)
 
-                SubDubTimelinePlayhead(duration: duration, position: position)
-                    .allowsHitTesting(false)
+                SubDubTimelinePlayhead(
+                    duration: duration,
+                    position: position,
+                    isDraggable: false,
+                    onScrubEnded: { _ in }
+                )
             }
             .overlay {
                 GeometryReader { proxy in
@@ -3275,117 +3253,79 @@ private struct SubDubWaveformView: View {
     let sourceWaveformSamples: [Double]
     let dubbingWaveformSamples: [Double]
     let liveWaveformSamples: [Double]
-    let selection: VideoDubbingRange?
-    let onSelectionChanged: (Double, Double) -> Void
-
-    @State private var dragAnchorTime: Double?
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                Canvas { context, size in
-                    let barCount = max(32, Int(size.width / 6))
-                    let progress = duration > 0
-                        ? min(max(position / duration, 0), 1)
-                        : 0
-                    let sourceColor = Color.secondary.opacity(0.48)
-                    let dubbingColor = Color.accentColor.opacity(0.92)
-                    let selectionColor = Color.accentColor.opacity(0.12)
+        Canvas { context, size in
+            let barCount = max(32, Int(size.width / 6))
+            let progress = duration > 0
+                ? min(max(position / duration, 0), 1)
+                : 0
+            let sourceColor = Color.secondary.opacity(0.48)
+            let dubbingColor = Color.accentColor.opacity(0.92)
 
-                    if let selection, duration > 0 {
-                        let startX = CGFloat(min(max(selection.startTime / duration, 0), 1)) * size.width
-                        let endX = CGFloat(min(max(selection.endTime / duration, 0), 1)) * size.width
-                        let selectionRect = CGRect(
-                            x: min(startX, endX),
-                            y: 0,
-                            width: abs(endX - startX),
-                            height: size.height
-                        )
-                        context.fill(Path(selectionRect), with: .color(selectionColor))
-                    }
+            var baseline = Path()
+            baseline.move(to: CGPoint(x: 8, y: size.height / 2))
+            baseline.addLine(to: CGPoint(x: size.width - 8, y: size.height / 2))
+            context.stroke(
+                baseline,
+                with: .color(Color.secondary.opacity(0.42)),
+                style: StrokeStyle(lineWidth: 0.75, lineCap: .round, dash: [1, 3])
+            )
 
-                    var baseline = Path()
-                    baseline.move(to: CGPoint(x: 8, y: size.height / 2))
-                    baseline.addLine(to: CGPoint(x: size.width - 8, y: size.height / 2))
-                    context.stroke(
-                        baseline,
-                        with: .color(Color.secondary.opacity(0.42)),
-                        style: StrokeStyle(lineWidth: 0.75, lineCap: .round, dash: [1, 3])
+            func drawBars(_ samples: [Double], color: Color, opacity: Double = 1) {
+                guard !samples.isEmpty else { return }
+                for index in 0..<barCount {
+                    let fraction = Double(index) / Double(max(barCount - 1, 1))
+                    let start = min(
+                        samples.count - 1,
+                        Int(Double(index) / Double(barCount) * Double(samples.count))
                     )
-
-                    func drawBars(_ samples: [Double], color: Color, opacity: Double = 1) {
-                        guard !samples.isEmpty else { return }
-                        for index in 0..<barCount {
-                            let fraction = Double(index) / Double(max(barCount - 1, 1))
-                            let start = min(
-                                samples.count - 1,
-                                Int(Double(index) / Double(barCount) * Double(samples.count))
-                            )
-                            let end = min(
-                                samples.count,
-                                max(start + 1, Int(Double(index + 1) / Double(barCount) * Double(samples.count)))
-                            )
-                            let value = samples[start..<end].max() ?? 0
-                            guard value > 0.02 else { continue }
-                            let barHeight = min(size.height * 0.86, size.height * (0.04 + value * 0.82))
-                            let x = CGFloat(fraction) * size.width
-                            let rect = CGRect(
-                                x: x,
-                                y: (size.height - barHeight) / 2,
-                                width: 2,
-                                height: max(2, barHeight)
-                            )
-                            let barColor = fraction <= progress ? color : color.opacity(0.42 * opacity)
-                            context.fill(
-                                Path(roundedRect: rect, cornerRadius: 1),
-                                with: .color(barColor.opacity(opacity))
-                            )
-                        }
-                    }
-
-                    drawBars(sourceWaveformSamples, color: sourceColor)
-                    drawBars(dubbingWaveformSamples, color: dubbingColor)
-                    drawBars(liveWaveformSamples, color: dubbingColor)
+                    let end = min(
+                        samples.count,
+                        max(start + 1, Int(Double(index + 1) / Double(barCount) * Double(samples.count)))
+                    )
+                    let value = samples[start..<end].max() ?? 0
+                    guard value > 0.02 else { continue }
+                    let barHeight = min(size.height * 0.86, size.height * (0.04 + value * 0.82))
+                    let x = CGFloat(fraction) * size.width
+                    let rect = CGRect(
+                        x: x,
+                        y: (size.height - barHeight) / 2,
+                        width: 2,
+                        height: max(2, barHeight)
+                    )
+                    let barColor = fraction <= progress ? color : color.opacity(0.42 * opacity)
+                    context.fill(
+                        Path(roundedRect: rect, cornerRadius: 1),
+                        with: .color(barColor.opacity(opacity))
+                    )
                 }
-
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 2)
-                            .onChanged { value in
-                                guard duration > 0 else { return }
-                                if dragAnchorTime == nil {
-                                    dragAnchorTime = time(at: value.startLocation.x, width: proxy.size.width)
-                                }
-                                guard let dragAnchorTime else { return }
-                                let current = time(at: value.location.x, width: proxy.size.width)
-                                onSelectionChanged(
-                                    min(dragAnchorTime, current),
-                                    max(dragAnchorTime, current)
-                                )
-                            }
-                            .onEnded { _ in
-                                dragAnchorTime = nil
-                            }
-                    )
             }
-        }
-    }
 
-    private func time(at x: CGFloat, width: CGFloat) -> Double {
-        let normalized = min(max(x / max(width, 1), 0), 1)
-        return normalized * duration
+            drawBars(sourceWaveformSamples, color: sourceColor)
+            drawBars(dubbingWaveformSamples, color: dubbingColor)
+            drawBars(liveWaveformSamples, color: dubbingColor)
+        }
     }
 }
 
 private struct SubDubTimelinePlayhead: View {
     let duration: Double
     let position: Double
+    let isDraggable: Bool
+    let onScrubEnded: (Double) -> Void
+
+    @State private var dragPreview: Double?
+
+    /// 视觉位置：拖动时跟随手指，松手后回落到 VM 真实位置。
+    private var visualPosition: Double {
+        dragPreview ?? position
+    }
 
     var body: some View {
         GeometryReader { proxy in
             let progress = duration > 0
-                ? min(max(position / duration, 0), 1)
+                ? min(max(visualPosition / duration, 0), 1)
                 : 0
             let lineWidth = 1.5
             let x = lineWidth / 2 + CGFloat(progress) * max(proxy.size.width - lineWidth, 0)
@@ -3404,6 +3344,29 @@ private struct SubDubTimelinePlayhead: View {
                             .stroke(Color.accentColor, lineWidth: 1.5)
                     }
                     .position(x: x, y: 5.5)
+
+                // 放在最上层的透明命中层，覆盖整个时间轴。不要依赖
+                // playhead 线本身的窄布局，否则用户必须精确点中 1.5pt 的线。
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                guard isDraggable, duration > 0 else { return }
+                                let width = max(proxy.size.width, 1)
+                                let normalized = min(max(value.location.x / width, 0), 1)
+                                dragPreview = normalized * duration
+                            }
+                            .onEnded { value in
+                                guard isDraggable, duration > 0 else { return }
+                                let width = max(proxy.size.width, 1)
+                                let normalized = min(max(value.location.x / width, 0), 1)
+                                let finalPosition = normalized * duration
+                                dragPreview = nil
+                                onScrubEnded(finalPosition)
+                            }
+                    )
             }
         }
     }

@@ -13,6 +13,7 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var hostingController: NSHostingController<SubscriptionWindowView>?
     private var currentViewModel: SubscriptionViewModel?
+    private var appCoordinator: AppCoordinator?
     private var onClose: (() -> Void)?
     private var diagnosticsKeyMonitor: Any?
 
@@ -22,15 +23,31 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
 
     func show(
         subscriptionViewModel: SubscriptionViewModel,
+        appCoordinator: AppCoordinator,
         onClose: @escaping () -> Void,
         on screen: NSScreen?
     ) {
         currentViewModel = subscriptionViewModel
+        self.appCoordinator = appCoordinator
         self.onClose = onClose
+
+        // 单实例守卫：窗口已显示时，只激活现有窗口，不再走 bootstrap / 重建流程。
+        // 防止快速多次点击入口触发多次 refreshEntitlements / loadProducts。
+        if let existing = window, existing.isVisible {
+            if existing.isMiniaturized {
+                existing.deminiaturize(nil)
+            }
+            existing.makeKeyAndOrderFront(nil)
+            existing.orderFrontRegardless()
+            positionWindowAtCenter(existing, on: screen)
+            installDiagnosticsKeyMonitorIfNeeded()
+            return
+        }
 
         let window = window ?? makeWindow()
         let rootView = SubscriptionWindowView(
             subscriptionViewModel: subscriptionViewModel,
+            appCoordinator: appCoordinator,
             onClose: { [weak self] in
                 self?.requestClose()
             }
@@ -65,7 +82,7 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
         let window = NSWindow(
             contentRect: NSRect(
                 origin: .zero,
-                size: SubscriptionWindowLayout.windowSize(showingDiagnostics: false)
+                size: SubscriptionWindowLayout.windowSize()
             ),
             styleMask: [.titled, .closable],
             backing: .buffered,
@@ -97,8 +114,9 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
     }
 
     private func installDiagnosticsKeyMonitorIfNeeded() {
-#if DEBUG || DEMOFLOW_EXTERNAL_CHANNEL
-        guard diagnosticsKeyMonitor == nil else { return }
+#if DEBUG
+        guard currentViewModel?.isLocalSubscriptionTestResetMode == true,
+              diagnosticsKeyMonitor == nil else { return }
         diagnosticsKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self,
                   self.window?.isKeyWindow == true,
@@ -125,12 +143,9 @@ final class SubscriptionWindowController: NSObject, NSWindowDelegate {
 
     private func resizeWindowForCurrentDiagnosticsMode(_ window: NSWindow) {
         window.setContentSize(
-            SubscriptionWindowLayout.windowSize(
-                showingDiagnostics: currentViewModel?.isSubscriptionDiagnosticsVisible == true
-            )
+            SubscriptionWindowLayout.windowSize()
         )
     }
-
     private func positionWindowAtCenter(_ window: NSWindow, on preferredScreen: NSScreen?) {
         guard let screen = preferredScreen ?? window.screen ?? NSScreen.main ?? NSScreen.screens.first else {
             window.center()

@@ -1628,7 +1628,12 @@ struct VideoCuttingModalView: View {
         let title = L10n.tr("legacy.key_157")
         NSApp.windows
             .filter { $0.identifier?.rawValue == windowID || $0.title == title || $0.title == "Smart Cutting" || $0.title == "智能裁剪" }
-            .forEach { $0.title = title }
+            .forEach {
+                if let windowID {
+                    $0.identifier = NSUserInterfaceItemIdentifier(windowID)
+                }
+                $0.title = title
+            }
 #endif
     }
 }

@@ -122,3 +122,15 @@ In the MAS version, the online URL and companion-video download entries are hidd
 5. Verify: `./DemoFlow/ThirdParty/yt-dlp/arm64/yt-dlp --version`
 
 Only Release builds use this file. AppStore builds are unaffected.
+
+## Subscription Scheme Matrix (fixed)
+
+| Scheme | Purpose | Upload rule |
+|---|---|---|
+| `DemoFlowLocalStoreKit` | Local real StoreKit purchase/restore using `DemoFlowLocalStoreKit.storekit`; no diagnostics or reset button | Never upload |
+| `DemoFlowLocalStoreKitTestReset` | Debug free-state recording using the same `DemoFlowLocalStoreKit.storekit`; app-owned reset and diagnostics only | Never upload |
+| `DemoFlowSandbox` | Signed local App Store Sandbox check | Not the final upload scheme |
+| `DemoFlowTestFlight` | Archive and upload TestFlight for real-product verification; no trial or diagnostics | Upload to TestFlight |
+| `DemoFlow` | Same formal runtime code as TestFlight; Archive uses `AppStore` | Upload for App Store submission |
+
+Always validate externally with `DemoFlowTestFlight` first, then archive the formal App Store build with `DemoFlow`. Never upload a Scheme bound to any `.storekit` file or carrying Debug force-free/reset arguments.

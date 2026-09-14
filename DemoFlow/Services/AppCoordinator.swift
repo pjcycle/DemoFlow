@@ -114,6 +114,8 @@ final class AppCoordinator: ObservableObject {
             processPendingReviewPromptsIfNeeded()
         }
     }
+    /// 菜单"视频裁切"请求打开智能裁切弹窗（不打开后台窗口）。ContentView 监听此标志。
+    @Published var videoCuttingShouldOpen: Bool = false
     @Published var languageOption: AppLanguageOption = .auto {
         didSet {
             guard languageOption != oldValue else { return }
@@ -193,6 +195,9 @@ final class AppCoordinator: ObservableObject {
     private var drawSystemDefinedMonitor: Any?
     private var pendingDrawCaptureRefreshTask: Task<Void, Never>?
     private var isSuppressingPiPHideCallback = false
+    private var isCleaningUpAutoStartedPiP = false
+    private var didAutoStartPiPForRecording = false
+    private var pipLayoutBeforeAutoRecording: PiPLayoutState?
     private var pendingPiPFilmStopTrigger: PiPFilmStopTrigger?
     private var windowOcclusionToastDismissTask: Task<Void, Never>?
     private var armedRecordingCaptureMode: RecordingCaptureMode = .fullScreen
@@ -335,6 +340,23 @@ final class AppCoordinator: ObservableObject {
                 if self.isSuppressingPiPHideCallback {
                     self.isSuppressingPiPHideCallback = false
                     self.pipPreviewRuntime.stopPreview()
+                } else if self.isCleaningUpAutoStartedPiP {
+                    self.isCleaningUpAutoStartedPiP = false
+                    self.didAutoStartPiPForRecording = false
+                    if let savedLayout = self.pipLayoutBeforeAutoRecording {
+                        self.pipLayout = savedLayout
+                    }
+                    self.pipLayoutBeforeAutoRecording = nil
+                    self.pipPreviewRuntime.stopPreview()
+                } else if self.didAutoStartPiPForRecording {
+                    // The user closed the automatically opened PiP while recording.
+                    // It no longer belongs to this recording session.
+                    self.didAutoStartPiPForRecording = false
+                    if let savedLayout = self.pipLayoutBeforeAutoRecording {
+                        self.pipLayout = savedLayout
+                    }
+                    self.pipLayoutBeforeAutoRecording = nil
+                    self.pipPreviewRuntime.stopPreview()
                 } else if self.isPiPFilmRecording || self.isPiPFilmPreparing {
                     self.stopPiPFilmRecording(trigger: .close)
                 } else {
@@ -367,6 +389,12 @@ final class AppCoordinator: ObservableObject {
         }
         self.recordingControlController.onMicrophoneToggleRequested = { [weak self] in
             self?.handleRecordingControlMicrophoneToggle()
+        }
+        self.recordingControlController.onMicrophonePickerRequested = { [weak self] in
+            self?.handleRecordingControlMicrophonePicker()
+        }
+        self.recordingControlController.onSettingsToggleRequested = { [weak self] in
+            self?.toggleMainWindowFromRecordingControl()
         }
         self.recordingControlController.onRegionToggleRequested = { [weak self] in
             self?.handleRecordingControlRegionToggle()
@@ -607,9 +635,23 @@ final class AppCoordinator: ObservableObject {
         isPrivacyNoticePresented = false
     }
 
+        /// 隐私政策 + 使用条款 统一走外部链接（GitHub Pages），不再用本地 sheet。
+    private static let userAgreementURLString = "https://pjcycle.github.io/pjln/userAgreement"
+    private static let privacyPolicyURLString = "https://pjcycle.github.io/pjln/"
+
+    /// 设置页"隐私政策"按钮：打开 GitHub Pages。
     func openPrivacyPolicyURL() {
         privacyPolicyOpenErrorMessage = nil
-        isPrivacyPolicySheetPresented = true
+        if let url = URL(string: Self.privacyPolicyURLString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// 菜单/订阅弹窗/设置页"使用条款"按钮调用：打开 EULA 外部链接。
+    func openUserAgreementURL() {
+        if let url = URL(string: Self.userAgreementURLString) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func dismissPrivacyPolicySheet() {
@@ -632,6 +674,7 @@ final class AppCoordinator: ObservableObject {
             ?? NSScreen.screens.first
         subscriptionWindowController.show(
             subscriptionViewModel: subscriptionViewModel,
+            appCoordinator: self,
             onClose: { [weak self] in
                 self?.dismissSubscriptionWindow()
             },
@@ -1663,6 +1706,21 @@ final class AppCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // All Recording uses an app-window whitelist. A SwiftUI utility window
+        // (for example the Smart Cutting window) can appear after the stream
+        // has started, so refresh the filter when a DemoFlow window becomes
+        // active instead of waiting for a PiP/drawing change to trigger it.
+        NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                guard let self,
+                      self.isAllRecordingEnabled,
+                      let window = notification.object as? NSWindow,
+                      NSApp.windows.contains(where: { $0 === window }) else { return }
+                self.refreshRecordingWindowCaptureIfNeeded()
+            }
+            .store(in: &cancellables)
+
         pipPreviewRuntime.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -1791,18 +1849,78 @@ final class AppCoordinator: ObservableObject {
     }
 
     func showMainWindow() {
+        // The view owns the openWindow action and brings the singleton instance
+        // to the front without creating another background control window.
         NSApp.activate(ignoringOtherApps: true)
-        for window in NSApp.windows where !(window is NSPanel) {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-        }
+        NotificationCenter.default.post(name: .demoFlowShouldOpenMainWindow, object: nil)
     }
 
     func openAppSettingsFromMenuBar() {
         selectedSettingsSection = .recording
         showMainWindow()
+    }
+
+    /// 菜单栏"录屏控件"项 — 弹/关录屏控件浮窗
+    func toggleRecordingControlOverlayFromMenuBar() {
+        if recordingControlController.isVisible {
+            recordingControlController.hide()
+        } else if let screen = NSScreen.main ?? NSScreen.screens.first {
+            // Opening the overlay from the menu must also refresh its display
+            // model. Otherwise the second column keeps the default "-- x --"
+            // placeholder until recording is armed.
+            focusRecordingStartControl(preferredScreen: screen)
+        }
+    }
+
+    /// 菜单栏"视频裁切"项 — 打开后台窗口并定位到视频裁切
+    func openVideoCuttingSectionFromMenuBar() {
+        // 直接弹出智能裁切弹窗（VideoCuttingModalView），不打开后台 ContentView。
+        // ContentView 通过 onReceive 监听 videoCuttingShouldOpen 来响应。
+        videoCuttingShouldOpen = true
+    }
+
+    /// 菜单栏"配音字幕"项 — 打开后台窗口并定位到配音字幕
+    func openSubDubSectionFromMenuBar() {
+        toggleMainWindowSectionFromMenuBar(.subDub)
+    }
+
+    /// 菜单栏"系统设置"项 — 打开后台窗口并定位到系统设置
+    func openAppSettingsSectionFromMenuBar() {
+        toggleMainWindowSectionFromMenuBar(.appSettings)
+    }
+
+    /// 菜单栏后台模块统一切换：同一入口再次点击时关闭当前唯一后台窗口。
+    func toggleMainWindowSectionFromMenuBar(_ section: SettingsSection) {
+        let mainWindow = NSApp.windows.first { $0.title == "DemoFlow" }
+        if let mainWindow, mainWindow.isVisible,
+           selectedSettingsSection == section {
+            mainWindow.orderOut(nil)
+            return
+        }
+        selectedSettingsSection = section
+        if let mainWindow, mainWindow.isVisible {
+            NSApp.activate(ignoringOtherApps: true)
+            mainWindow.makeKeyAndOrderFront(nil)
+        } else {
+            showMainWindow()
+        }
+    }
+
+    /// 录屏控件齿轮：用户主动开关唯一的后台配置窗口，并默认定位到设置页。
+    func toggleMainWindowFromRecordingControl() {
+        if let window = NSApp.windows.first(where: {
+            $0.title == "DemoFlow" && $0.isVisible
+        }) {
+            window.orderOut(nil)
+            return
+        }
+        selectedSettingsSection = .appSettings
+        showMainWindow()
+    }
+
+    /// 菜单栏"退出"项 — 退出 App
+    func quitAppFromMenuBar() {
+        NSApp.terminate(nil)
     }
 
     private func showRecordingOutputLocationSettings() {
@@ -1895,6 +2013,7 @@ final class AppCoordinator: ObservableObject {
             if recordingSessionStopIntent != .none || recordingControlMode == .paused {
                 return
             }
+            cleanupAutoStartedPiPAfterRecording()
             isRecordingArmed = false
             stopRecordingSessionTimer()
             recordingControlMode = .ready
@@ -1915,6 +2034,7 @@ final class AppCoordinator: ObservableObject {
             if recordingSessionStopIntent != .none || recordingControlMode == .paused {
                 return
             }
+            cleanupAutoStartedPiPAfterRecording()
             isRecordingArmed = false
             stopRecordingSessionTimer()
             recordingControlMode = .ready
@@ -1977,8 +2097,23 @@ final class AppCoordinator: ObservableObject {
                     return
                 }
             }
+            if armedRecordingCaptureMode == .window {
+                guard pendingWindowSelection != nil else {
+                    statusMessage = L10n.tr("recording.window.error.unavailable")
+                    updateRecordingControlDisplayModel()
+                    updateRecordingControlSurface()
+                    return
+                }
+                // Freeze the selected application before the async permission
+                // request. Otherwise the control-bar click can be consumed by
+                // the still-active window picker as a new/deselection click.
+                lockWindowSelectionForRecording()
+            }
             runRecordingPermissionRequest(
                 onDenied: {
+                    if self.armedRecordingCaptureMode == .window {
+                        self.presentWindowSelectionIfNeeded()
+                    }
                     self.recordingControlMode = .ready
                     self.updateRecordingControlDisplayModel()
                     self.updateRecordingControlSurface()
@@ -2026,6 +2161,30 @@ final class AppCoordinator: ObservableObject {
         recorder.setMicrophoneMuted(recordingMicrophoneMuted)
         updateRecordingControlDisplayModel()
         updateRecordingControlSurface()
+    }
+
+    private func handleRecordingControlMicrophonePicker() {
+        guard recordingControlMode == .ready else { return }
+        audioEngine.refreshSources()
+        recordingControlController.showMicrophonePicker(
+            sources: audioEngine.sources,
+            selectedSourceID: audioEngine.selectedSourceID,
+            isAuthorized: isAudioAuthorized,
+            onRequestAccess: { [weak self] in
+                self?.audioEngine.requestMicrophoneAccess { [weak self] in
+                    guard let self else { return }
+                    self.updateRecordingControlDisplayModel()
+                    self.updateRecordingControlSurface()
+                }
+            },
+            onSelect: { [weak self] source in
+                guard let self else { return }
+                guard source.isAvailable else { return }
+                self.audioEngine.selectSource(withID: source.id)
+                self.updateRecordingControlDisplayModel()
+                self.updateRecordingControlSurface()
+            }
+        )
     }
 
     private func handleRecordingControlRegionToggle() {
@@ -2182,6 +2341,11 @@ final class AppCoordinator: ObservableObject {
 
         audioEngine.stopMonitoring()
         pipLayout.aspectRatio = pipAspectRatio
+        await autoStartPiPForRecordingIfNeeded(
+            captureMode: captureMode,
+            regionSelection: activeRecordingRegionSelection,
+            windowSelection: activeRecordingWindowSelection
+        )
         shouldRestoreMainWindowAfterRecording = !isAllRecordingEnabled
         if !isAllRecordingEnabled {
             hideMainWindowForRecording()
@@ -2198,10 +2362,6 @@ final class AppCoordinator: ObservableObject {
         )
         recordingHasMicrophoneInput = request.microphoneDeviceID != nil
         let screen = NSScreen.main ?? NSScreen.screens.first
-        // 窗口录制一旦开始录制，锁定窗口选择（不能再切换）
-        if captureMode == .window {
-            lockWindowSelectionForRecording()
-        }
         await recorder.startRecording(request: request, preferredScreen: screen)
         if recorder.state.isRecording {
             recordingControlMode = .recording
@@ -2215,6 +2375,7 @@ final class AppCoordinator: ObservableObject {
             }
             refreshRecordingWindowCaptureIfNeeded()
         } else {
+            cleanupAutoStartedPiPAfterRecording()
             recordingControlMode = .ready
             isRecordingArmed = false
             recordingMicrophoneMuted = false
@@ -2233,6 +2394,154 @@ final class AppCoordinator: ObservableObject {
             }
             restoreMainWindowAfterRecording()
         }
+    }
+
+    private func autoStartPiPForRecordingIfNeeded(
+        captureMode: RecordingCaptureMode,
+        regionSelection: RecordingRegionSelection?,
+        windowSelection: RecordingWindowSelection?
+    ) async {
+        guard !isPiPPreviewVisible,
+              isCameraAuthorized else { return }
+
+        pipPreviewRuntime.refreshSources()
+        guard let camera = pipPreviewRuntime.sources.first(where: \.isAvailable) else {
+            pipStatusMessage = L10n.tr("legacy.pip_26")
+            return
+        }
+        if pipPreviewRuntime.selectedSourceID == nil
+            || !pipPreviewRuntime.sources.contains(where: {
+                $0.id == pipPreviewRuntime.selectedSourceID && $0.isAvailable
+            }) {
+            pipPreviewRuntime.selectSource(withID: camera.id)
+        }
+
+        guard let target = recordingTargetRect(
+            captureMode: captureMode,
+            regionSelection: regionSelection,
+            windowSelection: windowSelection
+        ) else { return }
+        let targetScreen = target.screen
+
+        let layout = autoPiPLayout(in: target.rect, screen: targetScreen)
+        // Keep the user's normal PiP placement/size intact. The recording layout
+        // is transient and is restored when this recording-owned PiP is closed.
+        let previousLayout = pipLayout
+        pipPreviewRuntime.applyPreviewAudioConfig(pipAudioPreviewConfig)
+        pipPreviewRuntime.startPreviewIfNeeded()
+        let didShow = pipController.show(
+            on: targetScreen,
+            layout: layout,
+            allowsCompactSize: true
+        )
+        guard didShow else {
+            pipStatusMessage = L10n.tr("legacy.pip_space")
+            return
+        }
+        pipLayoutBeforeAutoRecording = previousLayout
+        // Recording composition and ScreenCaptureKit use this same transient
+        // layout, while cleanup restores the user's normal placement.
+        pipLayout = layout
+        didAutoStartPiPForRecording = true
+    }
+
+    private func cleanupAutoStartedPiPAfterRecording() {
+        guard didAutoStartPiPForRecording else { return }
+        didAutoStartPiPForRecording = false
+        let savedLayout = pipLayoutBeforeAutoRecording
+        guard isPiPPreviewVisible || pipController.isVisible else {
+            if let savedLayout { pipLayout = savedLayout }
+            pipLayoutBeforeAutoRecording = nil
+            pipPreviewRuntime.stopPreview()
+            return
+        }
+        isCleaningUpAutoStartedPiP = true
+        hidePiPPreview()
+        if !pipController.isVisible {
+            isCleaningUpAutoStartedPiP = false
+            if let savedLayout { pipLayout = savedLayout }
+            pipLayoutBeforeAutoRecording = nil
+            pipPreviewRuntime.stopPreview()
+        }
+    }
+
+    private struct RecordingTargetRect {
+        let rect: CGRect
+        let screen: NSScreen
+    }
+
+    private func recordingTargetRect(
+        captureMode: RecordingCaptureMode,
+        regionSelection: RecordingRegionSelection?,
+        windowSelection: RecordingWindowSelection?
+    ) -> RecordingTargetRect? {
+        switch captureMode {
+        case .fullScreen:
+            guard let screen = NSScreen.main ?? NSScreen.screens.first else { return nil }
+            return RecordingTargetRect(rect: screen.visibleFrame, screen: screen)
+        case .region:
+            guard let selection = regionSelection,
+                  let screen = NSScreen.screen(with: selection.displayID) else { return nil }
+            let local = selection.rectInDisplayPoints.standardized
+            let cocoaRect = CGRect(
+                x: screen.frame.minX + local.minX,
+                y: screen.frame.minY + (screen.frame.height - local.maxY),
+                width: local.width,
+                height: local.height
+            )
+            return RecordingTargetRect(rect: cocoaRect, screen: screen)
+        case .window:
+            guard let selection = windowSelection,
+                  let screen = NSScreen.screen(with: selection.displayID) else { return nil }
+            let local = selection.frameInDisplayPoints.standardized
+            let cocoaRect = CGRect(
+                x: screen.frame.minX + local.minX,
+                y: screen.frame.minY + (screen.frame.height - local.maxY),
+                width: local.width,
+                height: local.height
+            )
+            return RecordingTargetRect(rect: cocoaRect, screen: screen)
+        }
+    }
+
+    private func autoPiPLayout(in targetRect: CGRect, screen: NSScreen) -> PiPLayoutState {
+        let visible = screen.visibleFrame
+        let safeMargin: CGFloat = 16
+        let availableWidth = max(1, targetRect.width - safeMargin * 2)
+        let availableHeight = max(1, targetRect.height - safeMargin * 2)
+        let currentWidth = max(1, pipLayout.normalizedRect.width * visible.width)
+        let currentHeight = max(1, pipLayout.normalizedRect.height * visible.height)
+        let width: CGFloat
+        let height: CGFloat
+        if pipAspectRatio == .auto {
+            let scale = min(
+                1,
+                availableWidth / currentWidth,
+                availableHeight / currentHeight
+            )
+            width = currentWidth * scale
+            height = currentHeight * scale
+        } else {
+            let aspect = pipAspectRatio.widthOverHeight
+            let preferredWidth = max(currentHeight * aspect, 1)
+            width = min(preferredWidth, availableWidth, availableHeight * aspect)
+            height = min(availableHeight, width / aspect)
+        }
+        let origin = CGPoint(
+            x: targetRect.minX + safeMargin,
+            y: targetRect.minY + safeMargin
+        )
+        let frame = CGRect(x: origin.x, y: origin.y, width: width, height: height)
+        let normalized = CGRect(
+            x: (frame.minX - visible.minX) / max(visible.width, 1),
+            y: (frame.minY - visible.minY) / max(visible.height, 1),
+            width: frame.width / max(visible.width, 1),
+            height: frame.height / max(visible.height, 1)
+        )
+        return PiPLayoutState(
+            normalizedRect: PiPGeometry.clampNormalized(normalized),
+            aspectRatio: pipAspectRatio
+        )
     }
 
     private func pauseRecordingSessionSegment() async {
@@ -2287,6 +2596,7 @@ final class AppCoordinator: ObservableObject {
         guard recordingControlMode != .stopping else { return }
         guard recorderState.isRecording || !recordingSessionSegmentURLs.isEmpty || recorder.lastOutputURL != nil else {
             statusMessage = L10n.tr("legacy.key_192")
+            cleanupAutoStartedPiPAfterRecording()
             recordingControlMode = .ready
             isRecordingArmed = false
             updateRecordingControlDisplayModel()
@@ -2330,6 +2640,7 @@ final class AppCoordinator: ObservableObject {
         recordingWindowSelectionController.stopContinuousListening()
         pendingWindowSelection = nil
         resetRecordingSessionStateForIdle()
+        cleanupAutoStartedPiPAfterRecording()
         if isAudioAuthorized {
             audioEngine.startMonitoringIfNeeded()
         }
@@ -2465,6 +2776,9 @@ final class AppCoordinator: ObservableObject {
             || (isAudioAuthorized && audioEngine.selectedSourceID != nil)
         recordingControlDisplayModel.canToggleMicrophone = recordingControlMode == .recording
             && recordingHasMicrophoneInput
+        recordingControlDisplayModel.microphoneSourceName = audioEngine.sources
+            .first(where: { $0.id == audioEngine.selectedSourceID })?.name ?? ""
+        recordingControlDisplayModel.canSelectMicrophone = recordingControlMode == .ready
         recordingControlDisplayModel.canClose = recordingControlMode != .stopping
         syncRecordingMenuBarPresentation(with: elapsed)
     }
@@ -3173,6 +3487,8 @@ final class AppCoordinator: ObservableObject {
 extension Notification.Name {
     static let demoFlowMenuBarCoordinatorReady = Notification.Name("DemoFlowMenuBarCoordinatorReady")
     static let demoFlowRecordingDidFinalizeOutput = Notification.Name("DemoFlowRecordingDidFinalizeOutput")
+    static let demoFlowShouldOpenMainWindow = Notification.Name("DemoFlowShouldOpenMainWindow")
+    static let demoFlowMainWindowUserRequested = Notification.Name("DemoFlowMainWindowUserRequested")
 }
 
 @MainActor
@@ -3180,14 +3496,18 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
     private static let autosaveName = "pjln.top.demoflow.menuBarRecording"
     private var statusItem: NSStatusItem?
     private let menu = NSMenu()
-    private let recordingToggleItem = NSMenuItem()
+    private let recordingControlItem = NSMenuItem()
     private let pipPreviewToggleItem = NSMenuItem()
     private let pipRecordingToggleItem = NSMenuItem()
     private let screenDrawToggleItem = NSMenuItem()
-    private let recordingSettingsItem = NSMenuItem()
+    private let videoCuttingItem = NSMenuItem()
+    private let subDubItem = NSMenuItem()
+    private let appSettingsItem = NSMenuItem()
+    private let quitItem = NSMenuItem()
     private let recordingStatusView = MenuBarRecordingStatusView()
     private weak var appCoordinator: AppCoordinator?
     private var isInstalled = false
+    private var isMenuOpen = false
     private var coordinatorObserver: NSObjectProtocol?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -3241,33 +3561,51 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
 
-        recordingToggleItem.target = self
-        recordingToggleItem.action = #selector(toggleRecordingFromMenu)
-        recordingToggleItem.keyEquivalent = "r"
-        recordingToggleItem.keyEquivalentModifierMask = [.command, .option, .control]
-        menu.addItem(recordingToggleItem)
+        // 1. 录屏控件（弹/关录屏控件浮窗）
+        recordingControlItem.target = self
+        recordingControlItem.action = #selector(toggleRecordingControlFromMenu)
+        menu.addItem(recordingControlItem)
 
+        // 2. PIP 预览（保留快捷键 ⌃⌘P）
         pipPreviewToggleItem.target = self
         pipPreviewToggleItem.action = #selector(togglePiPPreviewFromMenu)
         pipPreviewToggleItem.keyEquivalent = "p"
         pipPreviewToggleItem.keyEquivalentModifierMask = [.command, .control]
         menu.addItem(pipPreviewToggleItem)
 
+        // 3. PIP 录像（保留快捷键 ⌃⌥⌘P）
         pipRecordingToggleItem.target = self
         pipRecordingToggleItem.action = #selector(togglePiPRecordingFromMenu)
         pipRecordingToggleItem.keyEquivalent = "p"
         pipRecordingToggleItem.keyEquivalentModifierMask = [.command, .option, .control]
         menu.addItem(pipRecordingToggleItem)
 
+        // 4. 屏幕标注（保留快捷键 ⌃⌘S）
         screenDrawToggleItem.target = self
         screenDrawToggleItem.action = #selector(toggleScreenDrawFromMenu)
         screenDrawToggleItem.keyEquivalent = "s"
         screenDrawToggleItem.keyEquivalentModifierMask = [.command, .control]
         menu.addItem(screenDrawToggleItem)
 
-        recordingSettingsItem.target = self
-        recordingSettingsItem.action = #selector(openRecordingSettingsFromMenu)
-        menu.addItem(recordingSettingsItem)
+        // 5. 视频裁切（打开后台配置对应模块）
+        videoCuttingItem.target = self
+        videoCuttingItem.action = #selector(openVideoCuttingFromMenu)
+        menu.addItem(videoCuttingItem)
+
+        // 6. 配音字幕（打开后台配置对应模块）
+        subDubItem.target = self
+        subDubItem.action = #selector(openSubDubFromMenu)
+        menu.addItem(subDubItem)
+
+        // 7. 系统设置（打开后台配置对应模块）
+        appSettingsItem.target = self
+        appSettingsItem.action = #selector(openAppSettingsSectionFromMenu)
+        menu.addItem(appSettingsItem)
+
+        // 8. 退出
+        quitItem.target = self
+        quitItem.action = #selector(quitAppFromMenu)
+        menu.addItem(quitItem)
 
         statusItem?.menu = menu
         statusItem?.autosaveName = Self.autosaveName
@@ -3275,14 +3613,32 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+        refreshMenuItems()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
         refreshMenuItems()
     }
 
     private func refreshMenuItems() {
-        applyStatusButtonAppearance()
-        statusItem?.menu = isRecordingStatusControlsVisible ? nil : menu
-        recordingToggleItem.title = L10n.tr("menu.recording_toggle")
-        recordingToggleItem.isEnabled = (appCoordinator?.canStartRecording ?? false) || (appCoordinator?.canStopRecording ?? false)
+        // Changing the status button image/length or its subviews while AppKit
+        // tracks the menu can dismiss that menu, especially when the app is
+        // activated from the background. Freeze the button presentation until
+        // menuDidClose; menu item state itself can still be refreshed safely.
+        if !isMenuOpen {
+            applyStatusButtonAppearance()
+        }
+        // Reassigning an NSStatusItem menu while AppKit is tracking it dismisses
+        // the menu. Background activation can publish coordinator changes during
+        // the opening click, so only update the attachment outside that window.
+        if !isMenuOpen, statusItem?.menu !== menu {
+            statusItem?.menu = menu
+        }
+
+        recordingControlItem.title = L10n.tr("menu.recording_control_toggle")
+        recordingControlItem.isEnabled = true
 
         pipPreviewToggleItem.title = L10n.tr("menu.pip_preview_toggle")
         pipPreviewToggleItem.isEnabled = true
@@ -3295,8 +3651,17 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
         screenDrawToggleItem.title = L10n.tr("menu.screen_draw_toggle")
         screenDrawToggleItem.isEnabled = true
 
-        recordingSettingsItem.title = L10n.tr("menu.recording_settings")
-        recordingSettingsItem.isEnabled = true
+        videoCuttingItem.title = L10n.tr("menu.video_cutting")
+        videoCuttingItem.isEnabled = true
+
+        subDubItem.title = L10n.tr("menu.sub_dub")
+        subDubItem.isEnabled = true
+
+        appSettingsItem.title = L10n.tr("menu.app_settings")
+        appSettingsItem.isEnabled = true
+
+        quitItem.title = L10n.tr("menu.quit")
+        quitItem.isEnabled = true
     }
 
     private func bindCoordinatorState() {
@@ -3355,29 +3720,17 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
     private func applyStatusButtonAppearance() {
         guard let button = statusItem?.button else { return }
 
-        if isRecordingStatusControlsVisible {
-            let elapsedDisplay = appCoordinator?.recordingMenuBarElapsedDisplay ?? "00:00"
-            let isPaused = appCoordinator?.recordingMenuBarMode == .paused
-            installRecordingStatusViewIfNeeded(in: button)
-            statusItem?.length = MenuBarRecordingStatusView.preferredLength(for: elapsedDisplay)
-            recordingStatusView.render(
-                elapsedDisplay: elapsedDisplay,
-                isPaused: isPaused
-            )
-            button.image = nil
-            button.contentTintColor = nil
-            button.imagePosition = .noImage
-        } else if let image = NSImage(named: "MenuIcon") {
-            uninstallRecordingStatusViewIfNeeded()
-            statusItem?.length = NSStatusItem.squareLength
+        // The menu bar icon is a permanent menu entry point. Recording controls
+        // live in their own overlay and must never replace or detach this menu.
+        uninstallRecordingStatusViewIfNeeded()
+        statusItem?.length = NSStatusItem.squareLength
+        if let image = NSImage(named: "MenuIcon") {
             let menuIcon = (image.copy() as? NSImage) ?? image
             menuIcon.isTemplate = false
             menuIcon.size = NSSize(width: 18, height: 18)
             button.image = menuIcon
             button.contentTintColor = nil
         } else {
-            uninstallRecordingStatusViewIfNeeded()
-            statusItem?.length = NSStatusItem.squareLength
             let image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "DemoFlow")
             image?.isTemplate = false
             image?.size = NSSize(width: 18, height: 18)
@@ -3386,14 +3739,12 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
             button.imagePosition = .imageOnly
         }
 
-        if !isRecordingStatusControlsVisible {
-            button.imageScaling = .scaleProportionallyUpOrDown
-            button.imagePosition = .imageOnly
-        }
+        button.imageScaling = .scaleProportionallyUpOrDown
+        button.imagePosition = .imageOnly
     }
 
-    @objc private func toggleRecordingFromMenu() {
-        appCoordinator?.toggleRecordingFromMenuBar()
+    @objc private func toggleRecordingControlFromMenu() {
+        appCoordinator?.toggleRecordingControlOverlayFromMenuBar()
         refreshMenuItems()
     }
 
@@ -3412,9 +3763,23 @@ final class MenuBarRecordingController: NSObject, NSMenuDelegate {
         refreshMenuItems()
     }
 
-    @objc private func openRecordingSettingsFromMenu() {
-        appCoordinator?.openAppSettingsFromMenuBar()
+    @objc private func openVideoCuttingFromMenu() {
+        appCoordinator?.openVideoCuttingSectionFromMenuBar()
         refreshMenuItems()
+    }
+
+    @objc private func openSubDubFromMenu() {
+        appCoordinator?.openSubDubSectionFromMenuBar()
+        refreshMenuItems()
+    }
+
+    @objc private func openAppSettingsSectionFromMenu() {
+        appCoordinator?.openAppSettingsSectionFromMenuBar()
+        refreshMenuItems()
+    }
+
+    @objc private func quitAppFromMenu() {
+        appCoordinator?.quitAppFromMenuBar()
     }
 
     deinit {

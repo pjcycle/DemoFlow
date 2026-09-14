@@ -175,7 +175,10 @@ struct RecordingSettingsView: View {
                 )
         }
         .toggleStyle(.checkbox)
-        .disabled(appCoordinator.recorderState.isBusy || appCoordinator.recorderState.isRecording || appCoordinator.isRecordingArmed)
+        // The recording control is only armed at this point. Keep the option
+        // editable until the actual stream starts so the capture request uses
+        // the user's latest choice.
+        .disabled(appCoordinator.recorderState.isBusy || appCoordinator.recorderState.isRecording)
         .controlSize(.small)
     }
 

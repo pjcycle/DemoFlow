@@ -69,7 +69,7 @@ struct SubDubExportService {
         )
         do {
             _ = try await runner.run(command: command)
-            try await validateTranscriptionAudio(outputURL)
+            try validateTranscriptionAudio(outputURL)
         } catch {
             try? fileManager.removeItem(at: outputURL)
             throw SubDubError.serviceFailed(error.localizedDescription)
@@ -112,12 +112,14 @@ struct SubDubExportService {
     }
 
     func makeDubbingMixdown(
+        sourceVideoURL: URL?,
         sourceAudioURL: URL?,
         segments: [VideoDubbingSegment],
         duration: Double,
         outputURL: URL
     ) async throws {
         try await makeDubbingMixdownWithFFmpeg(
+            sourceVideoURL: sourceVideoURL,
             sourceAudioURL: sourceAudioURL,
             segments: segments,
             duration: duration,
@@ -424,6 +426,7 @@ struct SubDubExportService {
     }
 
     private func makeDubbingMixdownWithFFmpeg(
+        sourceVideoURL: URL?,
         sourceAudioURL: URL?,
         segments: [VideoDubbingSegment],
         duration: Double,
@@ -439,10 +442,11 @@ struct SubDubExportService {
 
         let tools = try binaryService.ensureReady()
         var arguments = ["-hide_banner", "-loglevel", "error", "-y"]
+        let sourceInputURL = sourceAudioURL ?? sourceVideoURL
         let sourceInputIndex: Int?
-        if let sourceAudioURL {
+        if let sourceInputURL {
             sourceInputIndex = 0
-            arguments += ["-i", sourceAudioURL.path]
+            arguments += ["-i", sourceInputURL.path]
         } else {
             sourceInputIndex = nil
         }

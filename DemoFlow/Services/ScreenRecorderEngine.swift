@@ -945,6 +945,7 @@ extension ScreenRecorderEngine: SCStreamOutput {
 
         var bufferToWrite = sampleBuffer
         if outputType == .screen, let compositor = self.windowRecordingCompositor {
+            // compositor.process 已标 nonisolated，可直接在 nonisolated context 调用
             bufferToWrite = compositor.process(sampleBuffer: sampleBuffer)
         }
 

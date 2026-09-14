@@ -47,6 +47,11 @@ struct LanguageSettingsView: View {
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
+                    Button(L10n.tr("subscription.paywall.terms")) {
+                        appCoordinator.openUserAgreementURL()
+                    }
+                    .buttonStyle(.bordered)
+
                     Button(L10n.tr("privacy.notice.view")) {
                         appCoordinator.openPrivacyPolicyURL()
                     }

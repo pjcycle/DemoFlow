@@ -41,6 +41,7 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
     private var pendingScaleDelta: CGFloat = 0
     private var isPanelMovingOrResizing = false
     private var needsFrontmostPassAfterTransition = false
+    private var allowsCompactSize = false
 
     override init() {
         super.init()
@@ -57,9 +58,18 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func show(on screen: NSScreen, layout: PiPLayoutState) -> Bool {
+    func show(
+        on screen: NSScreen,
+        layout: PiPLayoutState,
+        allowsCompactSize: Bool = false
+    ) -> Bool {
         hostScreen = screen
-        let normalizedLayout = resolvedLayout(layout, in: screen)
+        self.allowsCompactSize = allowsCompactSize
+        let normalizedLayout = resolvedLayout(
+            layout,
+            in: screen,
+            allowsCompactSize: allowsCompactSize
+        )
         layoutState = normalizedLayout
         print("[PiPWindow] show begin aspect=\(normalizedLayout.aspectRatio.rawValue) normalized=\(NSStringFromRect(normalizedLayout.normalizedRect)) visibleFrame=\(NSStringFromRect(screen.visibleFrame))")
 
@@ -71,7 +81,11 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
             self?.syncVisibility(visible)
         }
         panel.delegate = self
-        applySizingConstraints(to: panel, aspectRatio: normalizedLayout.aspectRatio)
+        applySizingConstraints(
+            to: panel,
+            aspectRatio: normalizedLayout.aspectRatio,
+            allowsCompactSize: allowsCompactSize
+        )
         let desiredFrame = frame(for: normalizedLayout, in: screen)
         let fittedFrame = clamped(frame: desiredFrame, in: screen.visibleFrame)
         print("[PiPWindow] frame desired=\(NSStringFromRect(desiredFrame)) fitted=\(NSStringFromRect(fittedFrame))")
@@ -278,9 +292,19 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
         syncLayoutFromWindow(immediately: true)
     }
 
-    private func resolvedLayout(_ layout: PiPLayoutState, in screen: NSScreen) -> PiPLayoutState {
+    private func resolvedLayout(
+        _ layout: PiPLayoutState,
+        in screen: NSScreen,
+        allowsCompactSize: Bool = false
+    ) -> PiPLayoutState {
         if panel == nil, layout == .default {
             return defaultSquareLayout(in: screen)
+        }
+        if allowsCompactSize {
+            return PiPLayoutState(
+                normalizedRect: PiPGeometry.clampNormalized(layout.normalizedRect),
+                aspectRatio: layout.aspectRatio
+            )
         }
         return PiPGeometry.normalizeLayout(layout, screenSize: screen.visibleFrame.size)
     }
@@ -344,7 +368,15 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
 
     private func frame(for layout: PiPLayoutState, in screen: NSScreen) -> CGRect {
         let screenRect = screen.visibleFrame
-        let normalized = PiPGeometry.normalizeLayout(layout, screenSize: screenRect.size).normalizedRect.standardized
+        let normalized: CGRect
+        if allowsCompactSize {
+            normalized = PiPGeometry.clampNormalized(layout.normalizedRect).standardized
+        } else {
+            normalized = PiPGeometry.normalizeLayout(
+                layout,
+                screenSize: screenRect.size
+            ).normalizedRect.standardized
+        }
         let width = normalized.width * screenRect.width
         let height = normalized.height * screenRect.height
         return CGRect(
@@ -410,8 +442,12 @@ final class PiPOverlayWindowController: NSObject, ObservableObject {
         panel.level = windowConfig.isAlwaysOnTop ? .mainMenu : .normal
     }
 
-    private func applySizingConstraints(to panel: NSPanel, aspectRatio: PiPAspectRatio) {
-        let size = minimumSize(for: aspectRatio)
+    private func applySizingConstraints(
+        to panel: NSPanel,
+        aspectRatio: PiPAspectRatio,
+        allowsCompactSize: Bool = false
+    ) {
+        let size = allowsCompactSize ? CGSize(width: 1, height: 1) : minimumSize(for: aspectRatio)
         panel.contentMinSize = size
         panel.minSize = size
         panel.contentMaxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)

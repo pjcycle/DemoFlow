@@ -94,6 +94,19 @@ enum SubscriptionPlan: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// 订阅时长文案（用于在订阅页明确告知时长 / 是否自动续订，满足 App Store Review
+    /// Guideline 3.1.2(c) 对"Length of subscription"的强制展示要求）。
+    var lengthKey: String {
+        switch self {
+        case .monthly:
+            return "subscription.plan.monthly.length"
+        case .yearly:
+            return "subscription.plan.yearly.length"
+        case .lifetime:
+            return "subscription.plan.lifetime.length"
+        }
+    }
+
     var highlightKey: String {
         switch self {
         case .monthly:
@@ -105,44 +118,41 @@ enum SubscriptionPlan: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    var badgeTextKey: String? {
+    /// 用于真实 SKU 对比的参考方案。无更便宜 SKU 可对比时返回 nil。
+    var comparisonReferencePlan: SubscriptionPlan? {
         switch self {
         case .monthly:
-            return "subscription.plan.monthly.badge"
+            return nil
         case .yearly:
-            return "subscription.plan.yearly.badge"
+            return .monthly
         case .lifetime:
-            return "subscription.plan.lifetime.badge"
+            return .yearly
         }
     }
 
-    var priceText: String {
+    /// 对比金额的倍数。
+    /// yearly 的对比基准 = 12 个月月付总额（年付 vs 付 12 个月月付）；
+    /// lifetime 的对比基准 = 3 年年付总额（买断 vs 付 3 年年付）。
+    var comparisonMultiplier: Int {
         switch self {
         case .monthly:
-            return "$1.99"
+            return 1
         case .yearly:
-            return "$19.99"
+            return 12
         case .lifetime:
-            return "$49.99"
+            return 3
         }
     }
 
-    var compareAtPriceText: String {
-        let amount: Decimal
+    /// 划线价前缀的 L10n key（如终身卡的"3 年"）。
+    /// 返回 nil 表示不添加前缀。
+    var comparisonPrefixKey: String? {
         switch self {
-        case .monthly:
-            amount = 4.99
-        case .yearly:
-            amount = 39.99
+        case .monthly, .yearly:
+            return nil
         case .lifetime:
-            amount = 99.99
+            return "subscription.plan.lifetime.comparison_prefix"
         }
-
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = "USD"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter.string(from: NSDecimalNumber(decimal: amount)) ?? "$\(amount)"
     }
 
     var isRecommended: Bool {

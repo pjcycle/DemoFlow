@@ -15,9 +15,6 @@ struct OutputLocationSettingsView: View {
 
     var body: some View {
         settingsCard
-            .sheet(isPresented: privacyPolicySheetBinding) {
-                SettingsPrivacyPolicySheet()
-            }
             .sheet(isPresented: openSourceLicensesSheetBinding) {
                 SettingsOpenSourceLicensesSheet()
             }
@@ -36,6 +33,14 @@ struct OutputLocationSettingsView: View {
                 systemImage: "crown.fill"
             ) {
                 appCoordinator.openSubscriptionWindow()
+            }
+            Divider()
+            actionRow(
+                title: L10n.tr("settings.terms.title"),
+                subtitle: L10n.tr("settings.terms.subtitle"),
+                systemImage: "doc.text"
+            ) {
+                appCoordinator.openUserAgreementURL()
             }
             Divider()
             actionRow(
@@ -181,17 +186,6 @@ struct OutputLocationSettingsView: View {
             return path
         }
         return L10n.tr("output.location.workspace.empty")
-    }
-
-    private var privacyPolicySheetBinding: Binding<Bool> {
-        Binding(
-            get: { appCoordinator.isPrivacyPolicySheetPresented },
-            set: { isPresented in
-                if !isPresented {
-                    appCoordinator.dismissPrivacyPolicySheet()
-                }
-            }
-        )
     }
 
     private var openSourceLicensesSheetBinding: Binding<Bool> {

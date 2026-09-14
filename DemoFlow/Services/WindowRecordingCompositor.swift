@@ -13,13 +13,14 @@ import AppKit
 import CoreImage
 import Foundation
 
-final class WindowRecordingCompositor {
-    private let ciContext: CIContext
-    private let targetPixelBufferPool: CVPixelBufferPool?
-    private let cameraFrameLock = NSLock()
-    private var latestCameraFrame: CGImage?
-    private let pipFraction: CGFloat = 0.25
-    private let pipPadding: CGFloat = 12
+// @unchecked Sendable: 内部状态由 NSLock 保护，可从任何线程（含 SCStreamOutput 的 nonisolated 回调）安全访问。
+final class WindowRecordingCompositor: @unchecked Sendable {
+    nonisolated private let ciContext: CIContext
+    nonisolated(unsafe) private let targetPixelBufferPool: CVPixelBufferPool?
+    nonisolated private let cameraFrameLock = NSLock()
+    nonisolated(unsafe) private var latestCameraFrame: CGImage?
+    nonisolated private let pipFraction: CGFloat = 0.25
+    nonisolated private let pipPadding: CGFloat = 12
 
     init?() {
         let options: [CIContextOption: Any] = [
@@ -30,14 +31,14 @@ final class WindowRecordingCompositor {
         targetPixelBufferPool = nil // 按需创建
     }
 
-    func updateLatestCameraFrame(_ cgImage: CGImage?) {
+    nonisolated func updateLatestCameraFrame(_ cgImage: CGImage?) {
         cameraFrameLock.lock()
         latestCameraFrame = cgImage
         cameraFrameLock.unlock()
     }
 
     /// 返回可能已合成 PiP 的新 sampleBuffer；如果 PiP 未启用或 camera 帧未到则直接返回原 sampleBuffer
-    func process(sampleBuffer: CMSampleBuffer) -> CMSampleBuffer {
+    nonisolated func process(sampleBuffer: CMSampleBuffer) -> CMSampleBuffer {
         guard CMSampleBufferIsValid(sampleBuffer) else { return sampleBuffer }
         guard let screenPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return sampleBuffer }
 
@@ -59,7 +60,7 @@ final class WindowRecordingCompositor {
         return replaceImageBuffer(sampleBuffer: sampleBuffer, newImageBuffer: compositedPixelBuffer) ?? sampleBuffer
     }
 
-    private func composite(screenPixelBuffer: CVPixelBuffer, cameraFrame: CGImage) -> CVPixelBuffer? {
+    nonisolated private func composite(screenPixelBuffer: CVPixelBuffer, cameraFrame: CGImage) -> CVPixelBuffer? {
         let screenWidth = CVPixelBufferGetWidth(screenPixelBuffer)
         let screenHeight = CVPixelBufferGetHeight(screenPixelBuffer)
         guard screenWidth >= 64, screenHeight >= 64 else { return nil }
@@ -79,7 +80,7 @@ final class WindowRecordingCompositor {
         )
     }
 
-    private func drawInto(
+    nonisolated private func drawInto(
         screenPixelBuffer: CVPixelBuffer,
         cameraFrame: CGImage,
         pipRect: CGRect
@@ -128,7 +129,7 @@ final class WindowRecordingCompositor {
         return screenPixelBuffer
     }
 
-    private func replaceImageBuffer(sampleBuffer: CMSampleBuffer, newImageBuffer: CVPixelBuffer) -> CMSampleBuffer? {
+    nonisolated private func replaceImageBuffer(sampleBuffer: CMSampleBuffer, newImageBuffer: CVPixelBuffer) -> CMSampleBuffer? {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
         var timingInfo = CMSampleTimingInfo()
         CMSampleBufferGetSampleTimingInfo(sampleBuffer, at: 0, timingInfoOut: &timingInfo)

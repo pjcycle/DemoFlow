@@ -80,25 +80,20 @@ Hotkeys:
 
 - The primary action is `Purchase` for free users. Existing members can only choose a higher tier, where the action becomes `Upgrade Subscription`; the current and lower tiers are gray and disabled.
 - Monthly and yearly memberships show whole days remaining in the subscription window. A lifetime purchase shows `Lifetime SVIP`.
-- Every free user can claim one `Free 7-Day Trial`. Eligibility is held in Keychain as an anonymous app-generated installation ID and claim record. No hardware identifier is read or uploaded, and uninstalling does not reset the trial.
+- The current version does not offer a separate free trial. Free users can choose monthly, yearly, or lifetime access; purchases and restores use Apple StoreKit.
 - The live purchase price comes from the App Store storefront, such as CNY in China. Crossed-out marketing reference prices remain in USD.
 
 ### Local Debug Subscription
 
-The local membership fallback is off by default and must be explicitly enabled. The recommended path is the dedicated `DemoFlowDebugSubscriptionFallback` scheme:
+Local debugging uses two separate schemes: `DemoFlowLocalStoreKit` performs real local StoreKit purchase/restore only, with no diagnostics and no reset button. `DemoFlowLocalStoreKitTestReset` is for free-state recording/reset; after a local purchase it can show and clear Debug information. Neither scheme is uploadable; StoreKit transaction history is managed by Xcode's Transaction Manager.
 
-1. Select `DemoFlowDebugSubscriptionFallback` in Xcode.
-2. Click `Run`.
-3. Open the subscription window and choose `Debug VIP (7 days)` to verify post-subscription flows with an independent local VIP.
-4. Before switching back, click `Clear Debug Info` in the subscription window. Then use `DemoFlowLocalStoreKit` or `DemoFlow` to test real local StoreKit products.
+Distribution rules are fixed: `DemoFlowSandbox` is only for local App Store Sandbox checks; `DemoFlowTestFlight` is used to upload TestFlight; `DemoFlow` is used for the final App Store submission and its Archive action is fixed to `AppStore`. These three distribution schemes never output diagnostics or expose a reset button.
 
-To enable it manually, open `Product > Scheme > Edit Scheme > Run > Arguments` and add:
+The project provides two local schemes: `DemoFlowLocalStoreKit` tests real local StoreKit purchases and restores without a debug surface; `DemoFlowLocalStoreKitTestReset` is for free-state recording and UI testing, and displays the reset/diagnostic surface. It clears DemoFlow's app-owned local test records; active `.storekit` transactions must be removed through Xcode's Transaction Manager. The surface is compiled out of Sandbox, TestFlight, and App Store builds.
 
-```text
--DemoFlowEnableDebugSubscriptionFallback
-```
+### Scheme and distribution rules
 
-When using the fallback argument manually, do not also enable `-DemoFlowLocalStoreKit` or a `.storekit` configuration. Removing the argument does not erase the saved local Debug trial; click `Clear Debug Info` first. In a Debug build it clears the fallback, diagnostics log, and local 7-day trial record. It cannot revoke a local StoreKit transaction; reset StoreKit transaction history from Xcode's `Debug > StoreKit > Manage Transactions` when one remains active. The diagnostics switch is independent: use `-DemoFlowEnableSubscriptionDiagnostics`, or press `Cmd+Option+D` while the subscription window is focused.
+`DemoFlowLocalStoreKit` is Debug-only for local purchase and restore, without diagnostics or a reset button. `DemoFlowLocalStoreKitTestReset` is Debug-only for free-state recording, diagnostics, and clearing app-owned test data. Neither is uploadable. `DemoFlowSandbox`, `DemoFlowTestFlight`, and the `DemoFlow` Run/Archive paths use the formal code path with no `.storekit`, diagnostics, or reset button; `DemoFlow` Archive is fixed to `AppStore`.
 
 ## Requirements
 

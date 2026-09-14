@@ -8,10 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		7D8C2A212FCCB00000A7D022 /* DemoFlow.storekit in Resources */ = {isa = PBXBuildFile; fileRef = 7D8C2A202FCCB00000A7D020 /* DemoFlow.storekit */; };
+		7D8C2A232FCCB00000A7D024 /* DemoFlowLocalStoreKit.storekit in Resources */ = {isa = PBXBuildFile; fileRef = 7D8C2A222FCCB00000A7D023 /* DemoFlowLocalStoreKit.storekit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		7D8C2A202FCCB00000A7D020 /* DemoFlow.storekit */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = com.apple.dt.storekit; path = DemoFlow.storekit; sourceTree = "<group>"; };
+		7D8C2A222FCCB00000A7D023 /* DemoFlowLocalStoreKit.storekit */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = com.apple.dt.storekit; path = DemoFlowLocalStoreKit.storekit; sourceTree = "<group>"; };
 		7DA5EA7F2FBC5898000B44BD /* DemoFlow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DemoFlow.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -38,7 +40,8 @@
 			isa = PBXGroup;
 			children = (
 				7D8C2A202FCCB00000A7D020 /* DemoFlow.storekit */,
-				7DA5EA812FBC5898000B44BD /* DemoFlow */,
+				7D8C2A222FCCB00000A7D023 /* DemoFlowLocalStoreKit.storekit */,
+				7DA5EA812FBC5899000B44BD /* DemoFlow */,
 				7DA5EA802FBC5898000B44BD /* Products */,
 			);
 			sourceTree = "<group>";
@@ -118,6 +121,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				7D8C2A212FCCB00000A7D022 /* DemoFlow.storekit in Resources */,
+				7D8C2A232FCCB00000A7D024 /* DemoFlowLocalStoreKit.storekit in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -144,7 +148,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "/bin/zsh \"${SRCROOT}/Scripts/sign_embedded_tools.sh\"\n";
+			shellScript = "if [ \"${CONFIGURATION}\" != \"Debug\" ]; then\n  /bin/rm -f \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/DemoFlow.storekit\"\n  /bin/rm -f \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/DemoFlowLocalStoreKit.storekit\"\nfi\n/bin/zsh \"${SRCROOT}/Scripts/sign_embedded_tools.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -200,7 +204,11 @@
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				EXCLUDED_SOURCE_FILE_NAMES = "yt-dlp*";
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"yt-dlp*",
+					"DemoFlow.storekit",
+					"DemoFlowLocalStoreKit.storekit",
+				);
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -233,7 +241,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CONFIGURATION_BUILD_DIR = "$(BUILD_DIR)/$(CONFIGURATION)";
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 16;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = WZZACQ5JCC;
 				ENABLE_APP_SANDBOX = YES;
@@ -252,7 +260,11 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				ENTITLEMENTS_REQUIRED = YES;
-				EXCLUDED_SOURCE_FILE_NAMES = "yt-dlp*";
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"yt-dlp*",
+					"DemoFlow.storekit",
+					"DemoFlowLocalStoreKit.storekit",
+				);
 				INCLUDE_YT_DLP = NO;
 				INFOPLIST_FILE = DemoFlowInfo.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -264,7 +276,7 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/DemoFlow/ThirdParty/whisper/arm64",
 				);
-				MARKETING_VERSION = 1.1.7;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = pjln.top.demoflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -287,10 +299,15 @@
 		7D8C2A132FCC900000A7D004 /* TestFlight */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				EXCLUDED_SOURCE_FILE_NAMES = "yt-dlp*";
+				DEVELOPMENT_TEAM = WZZACQ5JCC;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"yt-dlp*",
+					"DemoFlow.storekit",
+					"DemoFlowLocalStoreKit.storekit",
+				);
 				INCLUDE_YT_DLP = NO;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEMOFLOW_EXTERNAL_CHANNEL $(inherited)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 			};
 			name = TestFlight;
 		};
@@ -306,7 +323,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CONFIGURATION_BUILD_DIR = "$(BUILD_DIR)/$(CONFIGURATION)";
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 16;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = WZZACQ5JCC;
 				ENABLE_APP_SANDBOX = YES;
@@ -318,7 +335,11 @@
 				ENABLE_RESOURCE_ACCESS_CAMERA = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				ENTITLEMENTS_REQUIRED = YES;
-				EXCLUDED_SOURCE_FILE_NAMES = "yt-dlp*";
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"yt-dlp*",
+					"DemoFlow.storekit",
+					"DemoFlowLocalStoreKit.storekit",
+				);
 				INCLUDE_YT_DLP = NO;
 				INFOPLIST_FILE = DemoFlowInfo.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -330,7 +351,7 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/DemoFlow/ThirdParty/whisper/arm64",
 				);
-				MARKETING_VERSION = 1.1.7;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = pjln.top.demoflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -342,7 +363,7 @@
 				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEMOFLOW_EXTERNAL_CHANNEL $(inherited)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -473,7 +494,7 @@
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEMOFLOW_EXTERNAL_CHANNEL $(inherited)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
@@ -490,7 +511,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CONFIGURATION_BUILD_DIR = "$(BUILD_DIR)/$(CONFIGURATION)";
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 16;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = WZZACQ5JCC;
 				ENABLE_APP_SANDBOX = NO;
@@ -519,7 +540,7 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/DemoFlow/ThirdParty/whisper/arm64",
 				);
-				MARKETING_VERSION = 1.1.7;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = pjln.top.demoflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -552,7 +573,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CONFIGURATION_BUILD_DIR = "$(BUILD_DIR)/$(CONFIGURATION)";
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 16;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = WZZACQ5JCC;
 				ENABLE_APP_SANDBOX = YES;
@@ -581,7 +602,7 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/DemoFlow/ThirdParty/whisper/arm64",
 				);
-				MARKETING_VERSION = 1.1.7;
+				MARKETING_VERSION = 1.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = pjln.top.demoflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -593,7 +614,7 @@
 				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEMOFLOW_EXTERNAL_CHANNEL $(inherited)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -21,9 +21,6 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     @Published private(set) var liveWaveformSamples: [Double] = []
     @Published private(set) var isPreviewPlaying = false
     @Published private(set) var dubbingSegments: [VideoDubbingSegment] = []
-    @Published private(set) var selectedDubbingRange: VideoDubbingRange?
-    @Published var selectionStartText = ""
-    @Published var selectionEndText = ""
 
     let player = AVPlayer()
 
@@ -90,13 +87,6 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         "\(formatTime(playbackPosition)) / \(formatTime(sourceDuration))"
     }
 
-    var selectionText: String {
-        guard let selectedDubbingRange else {
-            return L10n.tr("subdub.video.selection.none")
-        }
-        return "\(formatTime(selectedDubbingRange.startTime)) - \(formatTime(selectedDubbingRange.endTime))"
-    }
-
     func configureSubscriptionAccess(
         subscriptionViewModel: SubscriptionViewModel,
         onRequireSubscription: @escaping () -> Void
@@ -128,6 +118,9 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     ) {
         guard duration > 0 else { return }
         if self.sourceURL == url, self.sessionDirectory == sessionDirectory {
+            if sourceVideoSize.width <= 0 || sourceVideoSize.height <= 0 {
+                refreshSourceVideoSize(for: url)
+            }
             if let sourceAudioURL {
                 self.sourceAudioURL = sourceAudioURL
             }
@@ -152,12 +145,13 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         removeTemporaryAudio()
         self.sessionDirectory = sessionDirectory
         self.sourceURL = url
+        sourceVideoSize = .zero
+        refreshSourceVideoSize(for: url)
         self.sourceAudioURL = sourceAudioURL
         sourceDuration = duration
         playbackPosition = 0
         self.sourceWaveformSamples = sourceWaveformSamples
-        clearSelectedDubbingRange()
-        exportURL = nil
+                exportURL = nil
         isPlayerReady = false
         state = .preparing
         statusMessage = L10n.tr("subdub.status.importing")
@@ -170,6 +164,23 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             isPlayerReady = true
             state = .ready
             statusMessage = L10n.f("subdub.status.imported", url.lastPathComponent)
+        }
+    }
+
+    private func refreshSourceVideoSize(for url: URL) {
+        Task { @MainActor [weak self] in
+            let asset = AVURLAsset(url: url)
+            guard let track = try? await AVAssetAsyncLoaders.firstTrack(
+                in: asset,
+                mediaType: .video
+            ),
+            let size = try? await AVAssetAsyncLoaders.orientedSize(of: track),
+            size.width > 0,
+            size.height > 0,
+            self?.sourceURL == url else {
+                return
+            }
+            self?.sourceVideoSize = size
         }
     }
 
@@ -207,8 +218,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         playbackPosition = 0
         isPlayerReady = false
         sourceWaveformSamples.removeAll(keepingCapacity: true)
-        clearSelectedDubbingRange()
-        state = .idle
+                state = .idle
         statusMessage = L10n.tr("subdub.status.video_removed")
     }
 
@@ -223,35 +233,6 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
                 self?.importVideo(from: url)
             }
         }
-    }
-
-    func setSelectedDubbingRange(startTime: Double, endTime: Double) {
-        guard sourceDuration > 0 else { return }
-        let start = min(max(startTime, 0), max(sourceDuration - 0.1, 0))
-        let end = min(max(endTime, start + 0.1), sourceDuration)
-        guard end > start else { return }
-        selectedDubbingRange = VideoDubbingRange(startTime: start, endTime: end)
-        selectionStartText = formatTime(start)
-        selectionEndText = formatTime(end)
-    }
-
-    func updateSelectionFromInputs() {
-        guard sourceDuration > 0 else { return }
-        guard let start = parseTime(selectionStartText),
-              let end = parseTime(selectionEndText),
-              end > start,
-              start >= 0,
-              end <= sourceDuration else {
-            statusMessage = L10n.tr("subdub.video.selection.invalid")
-            return
-        }
-        setSelectedDubbingRange(startTime: start, endTime: end)
-    }
-
-    func clearSelectedDubbingRange() {
-        selectedDubbingRange = nil
-        selectionStartText = ""
-        selectionEndText = ""
     }
 
     func prepareDubbing() {
@@ -292,8 +273,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         recorder = nil
         pendingTakeValidation = false
         removeTemporaryAudio()
-        clearSelectedDubbingRange()
-        activeRecordingRange = nil
+                activeRecordingRange = nil
         activeTakeURL = nil
         player.pause()
         player.isMuted = false
@@ -315,14 +295,20 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             return
         }
         guard state == .ready || state == .failed || state == .finished || state == .succeeded else { return }
-        let range = selectedDubbingRange ?? VideoDubbingRange(
-            startTime: 0,
+        // 从当前播放线位置开始录，endTime 取视频末尾。
+        let range = VideoDubbingRange(
+            startTime: playbackPosition,
             endTime: sourceDuration
         )
         guard range.isValid else {
-            statusMessage = L10n.tr("subdub.video.selection.invalid")
+            statusMessage = L10n.tr("subdub.error.input_missing")
             return
         }
+        // Lock the action before the async seek/preroll work begins. Otherwise
+        // a second click can create another AVAudioRecorder while the first
+        // one is still being prepared, which can terminate the audio stack.
+        state = .preparing
+        statusMessage = L10n.tr("subdub.video.status.preparing")
         Task { await seekAndStartRecording(in: range) }
     }
 
@@ -414,6 +400,24 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     }
 
     func seek(to seconds: Double) {
+        // 录制中禁止拖动；暂停时允许（用户预览播放位置），但不启动新录音、不改 selectedDubbingRange。
+        guard isPlayerReady,
+              sourceDuration > 0,
+              state != .recording else { return }
+        let target = min(max(seconds, 0), sourceDuration)
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        playbackPosition = target
+    }
+
+    /// 拖动播放头到指定位置，自动把 selectedDubbingRange 的 startTime 更新到该位置。
+    /// 拖动播放头到指定位置，让用户"拖到哪就从哪开始录"。
+    /// 录制中（recording）禁止拖动；暂停（paused）拖动时只 seek player，不改 range，请用 seek(to:)。
+    /// 选区功能已移除：endTime 直接取 sourceDuration，不再沿用旧的 selectedDubbingRange。
+    func seekToRecordingStart(at seconds: Double) {
         guard isPlayerReady,
               sourceDuration > 0,
               state != .recording,
@@ -538,8 +542,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             sourceWaveformSamples.removeAll(keepingCapacity: true)
             waveformSamples.removeAll(keepingCapacity: true)
             liveWaveformSamples.removeAll(keepingCapacity: true)
-            clearSelectedDubbingRange()
-            activeRecordingRange = nil
+                        activeRecordingRange = nil
             activeTakeURL = nil
             isPreviewPlaying = false
             exportURL = nil
@@ -573,13 +576,13 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
     private func requestMicrophoneAndStart(in range: VideoDubbingRange) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            startRecorder(in: range)
+            Task { await startRecorder(in: range) }
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     if granted {
-                        self.startRecorder(in: range)
+                        Task { await self.startRecorder(in: range) }
                     } else {
                         self.state = .failed
                         self.activeRecordingRange = nil
@@ -594,7 +597,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         }
     }
 
-    private func startRecorder(in range: VideoDubbingRange) {
+    private func startRecorder(in range: VideoDubbingRange) async {
         guard let sessionDirectory else {
             statusMessage = L10n.tr("subdub.error.output_unavailable")
             state = .failed
@@ -613,7 +616,25 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             let nextRecorder = try AVAudioRecorder(url: url, settings: settings)
             nextRecorder.delegate = self
             nextRecorder.isMeteringEnabled = true
-            guard nextRecorder.prepareToRecord(), nextRecorder.record() else {
+            guard nextRecorder.prepareToRecord() else {
+                throw SubDubError.recordingFailed(L10n.tr("subdub.error.recording_failed_generic"))
+            }
+
+            // Prime the local player before scheduling both clocks. A short lead
+            // time gives the capture device and player enough time to start at
+            // the same visible timeline position instead of starting serially.
+            await player.preroll(atRate: 1.0)
+            guard activeRecordingRange == range, state == .preparing else {
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+
+            // Use the immediate start APIs here. AVAudioRecorder.record(atTime:)
+            // combined with AVPlayer.setRate(_:time:atHostTime:) is not reliable
+            // on macOS and may raise an Objective-C exception for an invalid or
+            // unavailable clock time. Starting both on the same main-actor turn
+            // keeps the offset small without risking a process-level crash.
+            guard nextRecorder.record() else {
                 throw SubDubError.recordingFailed(L10n.tr("subdub.error.recording_failed_generic"))
             }
             recorder = nextRecorder
@@ -687,6 +708,7 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             }
             let mixdownURL = sessionDirectory.appendingPathComponent("Mixdown-\(UUID().uuidString).m4a")
             try await exportService.makeDubbingMixdown(
+                sourceVideoURL: sourceURL,
                 sourceAudioURL: sourceAudioURL,
                 segments: updatedSegments,
                 duration: sourceDuration,
@@ -883,7 +905,9 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
         let composition = AVMutableComposition()
         let duration = CMTime(seconds: sourceDuration, preferredTimescale: 600)
 
-        guard let sourceTrack = try await sourceAsset.loadTracks(withMediaType: .video).first,
+        // 视频轨（必需，失败则抛错）
+        let videoTracks = (try? await sourceAsset.loadTracks(withMediaType: .video)) ?? []
+        guard let sourceTrack = videoTracks.first,
               let videoTrack = composition.addMutableTrack(
                 withMediaType: .video,
                 preferredTrackID: kCMPersistentTrackID_Invalid
@@ -895,29 +919,41 @@ final class VideoDubbingViewModel: NSObject, ObservableObject, @preconcurrency A
             of: sourceTrack,
             at: .zero
         )
-        videoTrack.preferredTransform = try await sourceTrack.load(.preferredTransform)
+        // preferredTransform 失败时用 identity（视频可能不正，但能播放）
+        videoTrack.preferredTransform = (try? await sourceTrack.load(.preferredTransform)) ?? .identity
 
-        if let sourceAudioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first,
+        // 音频轨（partial-dubbing 核心：插入 mixdown 音频）
+        // 修复：loadTracks / load duration 失败时 log 不抛错，确保 audio track 仍插入
+        let audioTracks = (try? await audioAsset.loadTracks(withMediaType: .audio)) ?? []
+        if let sourceAudioTrack = audioTracks.first,
            let audioTrack = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
            ) {
-            let audioDuration = try await audioAsset.load(.duration)
+            let audioDuration = (try? await audioAsset.load(.duration)) ?? duration
             let insertedSeconds = min(max(audioDuration.seconds, 0), sourceDuration)
             if insertedSeconds > 0 {
-                try audioTrack.insertTimeRange(
-                    CMTimeRange(
-                        start: .zero,
-                        duration: CMTime(seconds: insertedSeconds, preferredTimescale: 600)
-                    ),
-                    of: sourceAudioTrack,
-                    at: .zero
-                )
+                do {
+                    try audioTrack.insertTimeRange(
+                        CMTimeRange(
+                            start: .zero,
+                            duration: CMTime(seconds: insertedSeconds, preferredTimescale: 600)
+                        ),
+                        of: sourceAudioTrack,
+                        at: .zero
+                    )
+                } catch {
+                    print("[dubbing] preview audio insert failed: \(error.localizedDescription)")
+                }
             }
+        } else {
+            print("[dubbing] preview audio track missing; mixdown file may be empty")
         }
 
+        // 修复：强制解除静音 + 恢复音量，确保播放有声音
         player.pause()
         player.isMuted = false
+        player.volume = 1.0
         isPreviewPlaying = false
         player.replaceCurrentItem(with: AVPlayerItem(asset: composition))
         await player.seek(to: .zero)

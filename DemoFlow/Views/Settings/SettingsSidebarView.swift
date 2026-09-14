@@ -143,9 +143,11 @@ struct SettingsSidebarView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(section.title)
                             .font(.subheadline.weight(.semibold))
-                        Text(section.sidebarSubtitle)
-                            .font(.caption)
-                            .foregroundStyle(isSelected ? Color.white.opacity(0.82) : .secondary)
+                        if section != .appSettings {
+                            Text(section.sidebarSubtitle)
+                                .font(.caption)
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.82) : .secondary)
+                        }
                     }
                 }
 
