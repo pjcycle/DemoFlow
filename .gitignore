@@ -36,3 +36,4 @@ Build/
 # 生成文档干掉
 AGENTS.md
 SPEC.md
+DemoFlow/ThirdParty/whisper/models/ggml-base.bin
