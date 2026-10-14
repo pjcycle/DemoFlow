@@ -120,7 +120,11 @@ final class VideoCuttingComposeExportEngine {
         }
 
         let videoComposition = AVMutableVideoComposition()
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        let frameRate = max(1, min(project.frameRate.isFinite ? project.frameRate : 30, 120))
+        videoComposition.frameDuration = CMTime(
+            seconds: 1.0 / frameRate,
+            preferredTimescale: 600
+        )
         videoComposition.renderSize = renderSize
         videoComposition.instructions = instructions
 

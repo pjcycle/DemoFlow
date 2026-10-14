@@ -29,6 +29,7 @@ final class AudioReplacementViewModel: ObservableObject {
     @Published private(set) var replacementAudioURL: URL?
     @Published private(set) var importedAudioURL: URL?
     @Published private(set) var cueStatuses: [UUID: AudioReplacementCueStatus] = [:]
+    @Published private(set) var cueFailureMessages: [UUID: String] = [:]
 
     private let workspace = SubDubWorkspaceService()
     private let exportService = SubDubExportService()
@@ -40,6 +41,11 @@ final class AudioReplacementViewModel: ObservableObject {
     private var timeObserverToken: Any?
     private var activeTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
+    private var pendingPreviewMode: AudioPreviewMode?
+    // A cancelled TTS/FFmpeg task may finish one callback after a retry has
+    // already started. This token prevents that stale task from publishing
+    // its state or replacing files belonging to the newer attempt.
+    private var operationToken = UUID()
     private weak var subscriptionViewModel: SubscriptionViewModel?
     private var onRequireSubscription: (() -> Void)?
 
@@ -74,8 +80,16 @@ final class AudioReplacementViewModel: ObservableObject {
 
     var hasSource: Bool { sourceURL != nil && sourceDuration > 0 }
     var hasCues: Bool { !cues.isEmpty }
-    var hasReplacementAudio: Bool { replacementAudioURL != nil }
-    var hasImportedAudio: Bool { importedAudioURL != nil }
+    /// The replacement mode is only usable when the mixdown still exists.
+    /// A manifest can outlive its session files, so checking the URL alone
+    /// would leave the mode looking available while preview construction fails.
+    var hasReplacementAudio: Bool {
+        replacementAudioFileURL != nil
+    }
+    var hasImportedAudio: Bool {
+        guard let importedAudioURL else { return false }
+        return isNonEmptyAudioFile(at: importedAudioURL)
+    }
     var overlayWaveformSamples: [Double] {
         guard let mode = overlayWaveformMode else { return [] }
         switch mode {
@@ -111,7 +125,7 @@ final class AudioReplacementViewModel: ObservableObject {
     }
     var cueCount: Int { cues.count }
     var generatedCueCount: Int {
-        cueStatuses.values.filter { $0 == .generated }.count
+        cues.filter(hasGeneratedAudio).count
     }
     var timelineStatus: String {
         cueCount > 0
@@ -124,12 +138,13 @@ final class AudioReplacementViewModel: ObservableObject {
     var canExport: Bool {
         guard hasSource, hasCues, !state.isBusy else { return false }
         if previewMode == .imported {
-            return importedAudioURL != nil
+            return hasImportedAudio
         }
         return hasReplacementAudio && allCuesGenerated
     }
     var canAudioReplaceExport: Bool {
-        hasSource && !state.isBusy && selectedExportAudioURL != nil
+        guard hasSource, !state.isBusy, let url = selectedExportAudioURL else { return false }
+        return isNonEmptyAudioFile(at: url)
     }
     var selectedCue: SubtitleTimelineCue? {
         cues.first { $0.id == selectedCueID }
@@ -236,7 +251,20 @@ final class AudioReplacementViewModel: ObservableObject {
 
     func generateAllAudio() {
         guard requireSubscriptionAccess() else { return }
-        startGeneration(for: cues.map(\.id))
+        let pendingIDs = cues.filter { !hasGeneratedAudio($0) }.map(\.id)
+        if pendingIDs.isEmpty {
+            guard !hasReplacementAudio,
+                  let sessionDirectory = timelineSession.sessionDirectory else {
+                statusMessage = L10n.tr("subdub.audio_replacement.status.ready")
+                return
+            }
+            startReplacementMixdownForPreview(
+                in: sessionDirectory.appendingPathComponent("AudioReplacement", isDirectory: true),
+                restoring: previewMode
+            )
+            return
+        }
+        startGeneration(for: pendingIDs)
     }
 
     func regenerateCue(_ id: UUID) {
@@ -332,14 +360,23 @@ final class AudioReplacementViewModel: ObservableObject {
     }
 
     func cancelCurrentTask() {
+        pendingPreviewMode = nil
+        operationToken = UUID()
         activeTask?.cancel()
         activeTask = nil
+        resetGeneratingCueStatuses()
+        if previewMode == .replacement && !hasReplacementAudio {
+            previewMode = .original
+            reloadPreview()
+        }
         state = .ready
         statusMessage = L10n.tr("subdub.audio_replacement.status.cancelled")
         persistManifest()
     }
 
     func clearReplacementAudio() {
+        pendingPreviewMode = nil
+        operationToken = UUID()
         activeTask?.cancel()
         activeTask = nil
         if let sessionDirectory = timelineSession.sessionDirectory {
@@ -357,6 +394,7 @@ final class AudioReplacementViewModel: ObservableObject {
         importedWaveformSamples = []
         importedWaveformDuration = 0
         cueStatuses = Dictionary(uniqueKeysWithValues: cues.map { ($0.id, .pending) })
+        cueFailureMessages = [:]
         previewMode = .original
         state = hasSource ? .ready : .idle
         statusMessage = L10n.tr("subdub.audio_replacement.status.idle")
@@ -364,8 +402,64 @@ final class AudioReplacementViewModel: ObservableObject {
     }
 
     func setPreviewMode(_ mode: AudioPreviewMode) {
-        guard availablePreviewModes.contains(mode) else { return }
+        guard hasSource else {
+            statusMessage = L10n.tr("subdub.error.input_missing")
+            return
+        }
+        switch mode {
+        case .replacement:
+            // A restored manifest can contain a valid mixdown while the
+            // published URL has not been rebound yet. Resolve it on demand so
+            // switching tabs or reopening a session does not disable preview.
+            if let url = replacementAudioFileURL {
+                replacementAudioURL = url
+                draft.replacementAudioURL = url
+            } else {
+                let missingIDs = cues.filter { !hasGeneratedAudio($0) }.map(\.id)
+                guard missingIDs.isEmpty else {
+                    guard !state.isBusy else {
+                        statusMessage = L10n.tr("subdub.audio_replacement.status.generating")
+                        return
+                    }
+                    guard requireSubscriptionAccess() else { return }
+                    pendingPreviewMode = .replacement
+                    startGeneration(for: missingIDs)
+                    if !state.isBusy {
+                        pendingPreviewMode = nil
+                    }
+                    return
+                }
+                guard !state.isBusy,
+                      let sessionDirectory = timelineSession.sessionDirectory else {
+                    statusMessage = L10n.tr("subdub.audio_replacement.status.mixing")
+                    return
+                }
+                let previousMode = previewMode
+                previewMode = .replacement
+                startReplacementMixdownForPreview(
+                    in: sessionDirectory.appendingPathComponent(
+                        "AudioReplacement",
+                        isDirectory: true
+                    ),
+                    restoring: previousMode
+                )
+                return
+            }
+        case .imported where !hasImportedAudio:
+            statusMessage = L10n.tr("subdub.audio_replacement.status.imported_not_ready")
+            return
+        default:
+            break
+        }
         previewMode = mode
+        switch mode {
+        case .original:
+            statusMessage = L10n.tr("subdub.audio_replacement.status.preview_original")
+        case .replacement:
+            statusMessage = L10n.tr("subdub.audio_replacement.status.preview_replacement")
+        case .imported:
+            statusMessage = L10n.tr("subdub.audio_replacement.status.preview_imported")
+        }
         reloadPreview()
     }
 
@@ -509,11 +603,27 @@ final class AudioReplacementViewModel: ObservableObject {
     }
 
     private var allCuesGenerated: Bool {
-        !cues.isEmpty && cues.allSatisfy { cueStatuses[$0.id] == .generated }
+        !cues.isEmpty && cues.allSatisfy(hasGeneratedAudio)
+    }
+
+    private func hasGeneratedAudio(_ cue: SubtitleTimelineCue) -> Bool {
+        guard cueStatuses[cue.id] == .generated,
+              let url = draft.cueAudioURLs[cue.id] else { return false }
+        return isNonEmptyAudioFile(at: url)
+    }
+
+    private func isNonEmptyAudioFile(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber,
+              size.int64Value > 0 else {
+            return false
+        }
+        return true
     }
 
     private var selectedExportAudioURL: URL? {
-        previewMode == .imported ? importedAudioURL : replacementAudioURL
+        previewMode == .imported ? importedAudioURL : replacementAudioFileURL
     }
 
     private func startGeneration(for ids: [UUID]) {
@@ -527,13 +637,16 @@ final class AudioReplacementViewModel: ObservableObject {
             return
         }
         do {
-            try validateCuesForReplacement()
+            try validateCuesForReplacement(only: Set(ids))
         } catch {
             statusMessage = error.localizedDescription
             return
         }
 
+        let token = UUID()
+        operationToken = token
         activeTask?.cancel()
+        clearReplacementMixdown()
         let language = languageMode
         let voiceIdentifier = selectedVoiceIdentifier
         let speechRate = rate
@@ -551,6 +664,7 @@ final class AudioReplacementViewModel: ObservableObject {
 
                 for id in ids {
                     try Task.checkCancellation()
+                    guard operationToken == token else { throw CancellationError() }
                     guard let cue = cues.first(where: { $0.id == id }) else { continue }
                     cueStatuses[id] = .generating
                     do {
@@ -560,25 +674,35 @@ final class AudioReplacementViewModel: ObservableObject {
                             locale: locale
                         )
                         let rawDestination = directory.appendingPathComponent("cue_\(id.uuidString).caf")
-                        let rawURL = try await speechService.synthesize(
+                        let fittedDestination = directory.appendingPathComponent("fit_\(id.uuidString).wav")
+                        // AVAudioFile does not reliably overwrite a partially
+                        // written file left by an interrupted TTS attempt.
+                        try? FileManager.default.removeItem(at: rawDestination)
+                        try? FileManager.default.removeItem(at: fittedDestination)
+                        draft.cueAudioURLs[id] = nil
+                        draft.cueSignatures[id] = nil
+                        draft.cueStatuses[id] = .generating
+                        cueFailureMessages[id] = nil
+                        let rawURL = try await synthesizeWithRetry(
                             text: cue.text,
                             voiceIdentifier: resolvedVoice,
                             rate: speechRate,
                             outputURL: rawDestination
                         )
                         try Task.checkCancellation()
-                        let fittedDestination = directory.appendingPathComponent("fit_\(id.uuidString).wav")
-                        try? FileManager.default.removeItem(at: fittedDestination)
+                        guard operationToken == token else { throw CancellationError() }
                         try await exportService.fitAudioToDuration(
                             sourceURL: rawURL,
                             targetDuration: cue.duration,
                             outputURL: fittedDestination
                         )
                         try Task.checkCancellation()
+                        guard operationToken == token else { throw CancellationError() }
                         draft.cueAudioURLs[id] = fittedDestination
                         draft.cueSignatures[id] = signature(for: cue)
                         draft.cueStatuses[id] = .generated
                         cueStatuses[id] = .generated
+                        cueFailureMessages[id] = nil
                         persistManifest()
                     } catch is CancellationError {
                         throw CancellationError()
@@ -586,33 +710,65 @@ final class AudioReplacementViewModel: ObservableObject {
                         failedCount += 1
                         cueStatuses[id] = .failed
                         draft.cueStatuses[id] = .failed
+                        cueFailureMessages[id] = error.localizedDescription
                         persistManifest()
                         statusMessage = L10n.f("subdub.status.tts_failed", error.localizedDescription)
                     }
                 }
 
                 guard failedCount == 0 else {
+                    guard operationToken == token else { throw CancellationError() }
+                    pendingPreviewMode = nil
                     state = .failed
+                    statusMessage = L10n.f(
+                        "subdub.audio_replacement.status.partial_ready",
+                        generatedCueCount,
+                        cueCount
+                    )
                     return
                 }
-                try await rebuildReplacementAudio(in: directory)
-                state = .ready
-                statusMessage = L10n.tr("subdub.audio_replacement.status.ready")
+                guard operationToken == token else { throw CancellationError() }
+                if allCuesGenerated {
+                    try await rebuildReplacementAudio(in: directory, token: token)
+                    if pendingPreviewMode == .replacement {
+                        pendingPreviewMode = nil
+                        previewMode = .replacement
+                        reloadPreview()
+                    }
+                    state = .ready
+                    statusMessage = L10n.tr("subdub.audio_replacement.status.ready")
+                } else {
+                    pendingPreviewMode = nil
+                    state = .ready
+                    statusMessage = L10n.f(
+                        "subdub.audio_replacement.status.partial_ready",
+                        generatedCueCount,
+                        cueCount
+                    )
+                }
                 persistManifest()
             } catch is CancellationError {
+                guard operationToken == token else { return }
+                pendingPreviewMode = nil
                 state = .ready
                 statusMessage = L10n.tr("subdub.audio_replacement.status.cancelled")
             } catch {
+                guard operationToken == token else { return }
+                pendingPreviewMode = nil
                 state = .failed
                 statusMessage = L10n.f("subdub.status.tts_failed", error.localizedDescription)
             }
         }
     }
 
-    private func rebuildReplacementAudio(in directory: URL) async throws {
+    private func rebuildReplacementAudio(in directory: URL, token: UUID? = nil) async throws {
+        if let token, operationToken != token {
+            throw CancellationError()
+        }
         let segments = cues.compactMap { cue -> AudioReplacementSegment? in
             guard cueStatuses[cue.id] == .generated,
-                  let audioURL = draft.cueAudioURLs[cue.id] else { return nil }
+                  let audioURL = draft.cueAudioURLs[cue.id],
+                  isNonEmptyAudioFile(at: audioURL) else { return nil }
             return AudioReplacementSegment(
                 id: cue.id,
                 audioURL: audioURL,
@@ -633,14 +789,121 @@ final class AudioReplacementViewModel: ObservableObject {
             duration: sourceDuration,
             outputURL: outputURL
         )
+        if let token, operationToken != token {
+            throw CancellationError()
+        }
         draft.replacementAudioURL = outputURL
         replacementAudioURL = outputURL
         let waveform = await loadWaveform(from: outputURL)
+        if let token, operationToken != token {
+            throw CancellationError()
+        }
         replacementWaveformSamples = waveform.samples
         replacementWaveformDuration = waveform.duration
         persistManifest()
+        // Generating an audio file must not implicitly change the preview
+        // selection. The user chooses Original/Replacement explicitly; only
+        // refresh the player when replacement mode was already selected.
         if previewMode == .replacement {
             reloadPreview()
+        }
+    }
+
+    private func synthesizeWithRetry(
+        text: String,
+        voiceIdentifier: String,
+        rate: Double,
+        outputURL: URL,
+        maxAttempts: Int = 3
+    ) async throws -> URL {
+        var lastError: Error?
+        for attempt in 1...max(1, maxAttempts) {
+            try Task.checkCancellation()
+            try? FileManager.default.removeItem(at: outputURL)
+            do {
+                _ = try await speechService.synthesize(
+                    text: text,
+                    voiceIdentifier: voiceIdentifier,
+                    rate: rate,
+                    outputURL: outputURL
+                )
+                guard isNonEmptyAudioFile(at: outputURL) else {
+                    throw SubDubError.speechOutputMissing
+                }
+                return outputURL
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                guard attempt < maxAttempts, shouldRetrySpeechError(error) else {
+                    throw error
+                }
+                try await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+        throw lastError ?? SubDubError.speechOutputMissing
+    }
+
+    private func shouldRetrySpeechError(_ error: Error) -> Bool {
+        guard let error = error as? SubDubError else { return true }
+        switch error {
+        case .emptyText, .speechVoiceMissing, .audioReplacementTiming:
+            return false
+        default:
+            return true
+        }
+    }
+
+    private func clearReplacementMixdown() {
+        if let sessionDirectory = timelineSession.sessionDirectory {
+            let outputURL = sessionDirectory
+                .appendingPathComponent("AudioReplacement", isDirectory: true)
+                .appendingPathComponent("replacement_audio.m4a")
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+        if let replacementAudioURL {
+            try? FileManager.default.removeItem(at: replacementAudioURL)
+        }
+        replacementAudioURL = nil
+        draft.replacementAudioURL = nil
+        replacementWaveformSamples = []
+        replacementWaveformDuration = 0
+        if previewMode == .replacement {
+            previewMode = .original
+            reloadPreview()
+        }
+    }
+
+    private func startReplacementMixdownForPreview(
+        in directory: URL,
+        restoring previousMode: AudioPreviewMode
+    ) {
+        let token = UUID()
+        operationToken = token
+        activeTask?.cancel()
+        state = .mixing
+        statusMessage = L10n.tr("subdub.audio_replacement.status.mixing")
+        activeTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await rebuildReplacementAudio(in: directory, token: token)
+                guard !Task.isCancelled, operationToken == token else { return }
+                state = .ready
+                statusMessage = L10n.tr("subdub.audio_replacement.status.ready")
+                persistManifest()
+            } catch is CancellationError {
+                guard operationToken == token else { return }
+                previewMode = previousMode
+                reloadPreview()
+                state = .ready
+                statusMessage = L10n.tr("subdub.audio_replacement.status.cancelled")
+            } catch {
+                guard operationToken == token else { return }
+                previewMode = previousMode
+                reloadPreview()
+                state = .failed
+                statusMessage = L10n.f("subdub.status.tts_failed", error.localizedDescription)
+            }
         }
     }
 
@@ -706,6 +969,7 @@ final class AudioReplacementViewModel: ObservableObject {
         draft.cueAudioURLs = nextURLs
         draft.cueStatuses = nextStatuses
         cueStatuses = nextStatuses
+        cueFailureMessages = [:]
         if !allCuesGenerated {
             replacementAudioURL = nil
             draft.replacementAudioURL = nil
@@ -720,10 +984,14 @@ final class AudioReplacementViewModel: ObservableObject {
     }
 
     private func invalidateCue(_ id: UUID) {
+        operationToken = UUID()
+        activeTask?.cancel()
+        activeTask = nil
         draft.cueAudioURLs[id] = nil
         draft.cueSignatures[id] = nil
         draft.cueStatuses[id] = .pending
         cueStatuses[id] = .pending
+        cueFailureMessages[id] = nil
         replacementAudioURL = nil
         draft.replacementAudioURL = nil
         replacementWaveformSamples = []
@@ -732,10 +1000,13 @@ final class AudioReplacementViewModel: ObservableObject {
             previewMode = .original
             reloadPreview()
         }
+        state = hasSource ? .ready : .idle
         persistManifest()
     }
 
     private func clearRuntimeAudioState() {
+        pendingPreviewMode = nil
+        operationToken = UUID()
         activeTask?.cancel()
         activeTask = nil
         draft = AudioReplacementDraft()
@@ -746,6 +1017,7 @@ final class AudioReplacementViewModel: ObservableObject {
         importedWaveformSamples = []
         importedWaveformDuration = 0
         cueStatuses = [:]
+        cueFailureMessages = [:]
         previewMode = .original
         state = .idle
         isPlayerReady = false
@@ -755,8 +1027,13 @@ final class AudioReplacementViewModel: ObservableObject {
     }
 
     private func invalidateGeneratedAudio() {
-        let hadGeneratedAudio = cueStatuses.values.contains { $0 == .generated }
+        operationToken = UUID()
+        activeTask?.cancel()
+        activeTask = nil
+        resetGeneratingCueStatuses()
+        let hadGeneratedAudio = cues.contains(where: hasGeneratedAudio)
         guard hadGeneratedAudio || replacementAudioURL != nil else {
+            state = hasSource ? .ready : .idle
             persistManifest()
             return
         }
@@ -784,6 +1061,13 @@ final class AudioReplacementViewModel: ObservableObject {
         }
         state = hasSource ? .ready : .idle
         persistManifest()
+    }
+
+    private func resetGeneratingCueStatuses() {
+        for cue in cues where cueStatuses[cue.id] == .generating {
+            cueStatuses[cue.id] = .pending
+            draft.cueStatuses[cue.id] = .pending
+        }
     }
 
     private func restoreManifestIfPresent() {
@@ -815,7 +1099,7 @@ final class AudioReplacementViewModel: ObservableObject {
                 guard let fileName = cue.audioFileName else { continue }
                 let audioURL = directory.appendingPathComponent(fileName).standardizedFileURL
                 guard audioURL.deletingLastPathComponent() == directory.standardizedFileURL,
-                      FileManager.default.fileExists(atPath: audioURL.path) else { continue }
+                      isNonEmptyAudioFile(at: audioURL) else { continue }
                 draft.cueAudioURLs[cue.id] = audioURL
                 draft.cueSignatures[cue.id] = cue.signature
                 draft.cueStatuses[cue.id] = cue.status
@@ -826,7 +1110,7 @@ final class AudioReplacementViewModel: ObservableObject {
             if let fileName = manifest.replacementAudioFileName {
                 let audioURL = directory.appendingPathComponent(fileName).standardizedFileURL
                 if audioURL.deletingLastPathComponent() == directory.standardizedFileURL,
-                   FileManager.default.fileExists(atPath: audioURL.path) {
+                   isNonEmptyAudioFile(at: audioURL) {
                     replacementAudioURL = audioURL
                     draft.replacementAudioURL = audioURL
                     Task { [weak self] in
@@ -953,6 +1237,14 @@ final class AudioReplacementViewModel: ObservableObject {
         }
     }
 
+    private var replacementAudioFileURL: URL? {
+        let candidates = [replacementAudioURL, draft.replacementAudioURL]
+            .compactMap { $0 }
+        return candidates.first(where: {
+            isNonEmptyAudioFile(at: $0)
+        })
+    }
+
     private var overlayWaveformMode: AudioPreviewMode? {
         switch previewMode {
         case .replacement where !replacementWaveformSamples.isEmpty:
@@ -1008,8 +1300,16 @@ final class AudioReplacementViewModel: ObservableObject {
             : "en-US"
     }
 
-    private func validateCuesForReplacement() throws {
+    private func validateCuesForReplacement(only selectedIDs: Set<UUID>? = nil) throws {
         guard hasSource, !cues.isEmpty else {
+            throw SubDubError.audioReplacementValidationFailed(
+                L10n.tr("subdub.audio_replacement.status.invalid_input")
+            )
+        }
+        let targetCues = selectedIDs.map { ids in
+            cues.filter { ids.contains($0.id) }
+        } ?? cues
+        guard !targetCues.isEmpty else {
             throw SubDubError.audioReplacementValidationFailed(
                 L10n.tr("subdub.audio_replacement.status.invalid_input")
             )
@@ -1017,6 +1317,11 @@ final class AudioReplacementViewModel: ObservableObject {
         let sortedCues = cues.sorted { $0.startTime < $1.startTime }
         var previousEnd = 0.0
         for cue in sortedCues {
+            let shouldValidate = selectedIDs == nil || selectedIDs?.contains(cue.id) == true
+            guard shouldValidate else {
+                previousEnd = max(previousEnd, cue.endTime)
+                continue
+            }
             let text = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty,
                   text != L10n.tr("subdub.subtitle_burn.default_text"),
@@ -1050,7 +1355,18 @@ final class AudioReplacementViewModel: ObservableObject {
     }
 
     func cueStatusText(for id: UUID) -> String {
-        invalidateCueStatusText(cueStatuses[id] ?? .pending)
+        invalidateCueStatusText(effectiveCueStatus(for: id))
+    }
+
+    func effectiveCueStatus(for id: UUID) -> AudioReplacementCueStatus {
+        let status = cueStatuses[id] ?? .pending
+        guard status == .generated,
+              let cue = cues.first(where: { $0.id == id }) else { return status }
+        return hasGeneratedAudio(cue) ? .generated : .pending
+    }
+
+    func cueFailureMessage(for id: UUID) -> String? {
+        cueFailureMessages[id]
     }
 
     private func parseTime(_ value: String) -> Double? {

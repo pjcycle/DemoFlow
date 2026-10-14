@@ -168,6 +168,10 @@ final class AppCoordinator: ObservableObject {
     @Published private(set) var privacyPolicyOpenErrorMessage: String?
     @Published private(set) var isOpenSourceLicensesSheetPresented = false
     @Published private(set) var isReviewPromptVisible = false
+    /// Holds the latest completed screen recording until the main SwiftUI
+    /// scene has consumed it. A notification alone can be missed when the
+    /// video-cutting window is already open or the main window is restoring.
+    @Published private(set) var pendingRecordingOutputURL: URL?
 
     let audioEngine: AudioInputEngine
     let pipPreviewRuntime: PiPPreviewRuntime
@@ -986,11 +990,13 @@ final class AppCoordinator: ObservableObject {
     }
 
     func openRecordingOutputDirectory() {
-        guard let directory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
+        guard let accessToken = DemoFlowOutputDirectoryPolicy.makeRecordingsAccessToken(),
+              let directory = DemoFlowOutputDirectoryPolicy.recordingsBookmarkedDirectory() else {
             statusMessage = L10n.tr("output.recording.unset_toast")
             showRecordingOutputLocationSettings()
             return
         }
+        defer { accessToken.stop() }
         if let outputURL = recorder.lastOutputURL {
             NSWorkspace.shared.activateFileViewerSelecting([outputURL])
         } else {
@@ -1864,12 +1870,26 @@ final class AppCoordinator: ObservableObject {
     func toggleRecordingControlOverlayFromMenuBar() {
         if recordingControlController.isVisible {
             recordingControlController.hide()
-        } else if let screen = NSScreen.main ?? NSScreen.screens.first {
-            // Opening the overlay from the menu must also refresh its display
-            // model. Otherwise the second column keeps the default "-- x --"
-            // placeholder until recording is armed.
-            focusRecordingStartControl(preferredScreen: screen)
+        } else if recorderState.isRecording || recordingControlMode == .paused {
+            // If the user hid the floating controls during an active session,
+            // this menu item must bring the existing session controls back;
+            // trying to arm a second recording would be rejected as busy.
+            focusRecordingStartControl(preferredScreen: NSScreen.main ?? NSScreen.screens.first)
+        } else {
+            // Do not merely show the floating panel here: without arming,
+            // handleRecordingControlRecordToggle() correctly rejects the
+            // Record button because no capture mode/permission is prepared.
+            startRecordingFromCurrentConfig(
+                preferredScreen: NSScreen.main ?? NSScreen.screens.first
+            )
         }
+    }
+
+    func consumePendingRecordingOutput(_ outputURL: URL) {
+        guard pendingRecordingOutputURL?.standardizedFileURL == outputURL.standardizedFileURL else {
+            return
+        }
+        pendingRecordingOutputURL = nil
     }
 
     /// 菜单栏"视频裁切"项 — 打开后台窗口并定位到视频裁切
@@ -2646,6 +2666,10 @@ final class AppCoordinator: ObservableObject {
         }
         restoreMainWindowAfterRecording()
         if let finalizedOutputURL {
+            // Persist the hand-off before posting the best-effort notification.
+            // ContentView can now consume the output even if it was not mounted
+            // at the exact moment the recording finalized.
+            pendingRecordingOutputURL = finalizedOutputURL
             NotificationCenter.default.post(
                 name: .demoFlowRecordingDidFinalizeOutput,
                 object: finalizedOutputURL

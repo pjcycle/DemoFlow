@@ -91,6 +91,32 @@ struct SubDubWorkspaceService {
     }
 
     @MainActor
+    func pickVideoCompositionURLs() -> [URL]? {
+        let panel = NSOpenPanel()
+        panel.title = L10n.tr("subdub.video_composition.action.import")
+        panel.allowedContentTypes = [
+            .mpeg4Movie,
+            .quickTimeMovie,
+            UTType(filenameExtension: "m4v") ?? .movie
+        ]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.directoryURL = DemoFlowOutputDirectoryPolicy.preferredVideoCuttingImportDirectory()
+        guard panel.runModal() == .OK else { return nil }
+        return panel.urls
+    }
+
+    @MainActor
+    func pickVideoCompositionImageURL() -> URL? {
+        pickURL(
+            title: L10n.tr("subdub.video_composition.cover.action.import_image"),
+            types: [.png, .jpeg],
+            directory: DemoFlowOutputDirectoryPolicy.preferredVideoCuttingImportDirectory()
+        )
+    }
+
+    @MainActor
     func pickAudioURL() -> URL? {
         pickURL(
             title: L10n.tr("subdub.action.import_audio"),

@@ -214,17 +214,23 @@ struct SubDubExportService {
         }
 
         let speed = sourceDuration / targetDuration
-        guard speed <= 2.0 else {
-            throw SubDubError.audioReplacementTiming(
-                String(format: "%.2f 秒语音无法放入 %.2f 秒区间", sourceDuration, targetDuration)
-            )
-        }
 
         let tools = try binaryService.ensureReady()
         try prepareOutput(outputURL)
         var filters: [String] = []
         if speed > 1.001 {
-            filters.append("atempo=\(ffmpegSeconds(speed))")
+            // FFmpeg's atempo filter accepts at most 2x per instance. Short
+            // subtitle ranges used to fail deterministically when the TTS
+            // result needed more than 2x compression. Chain 2x filters so a
+            // retry can actually succeed instead of repeating the same error.
+            var remainingSpeed = speed
+            while remainingSpeed > 2.0 {
+                filters.append("atempo=2.0")
+                remainingSpeed /= 2.0
+            }
+            if remainingSpeed > 1.001 {
+                filters.append("atempo=\(ffmpegSeconds(remainingSpeed))")
+            }
         }
         filters.append("apad=whole_dur=\(ffmpegSeconds(targetDuration))")
         filters.append("atrim=duration=\(ffmpegSeconds(targetDuration))")

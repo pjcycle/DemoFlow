@@ -9,7 +9,7 @@
 [![CI](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/pjcycle/DemoFlow/actions/workflows/ci.yml)
 
 DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄像头、屏幕画笔、视频裁剪，以及通过既有“音频提取（MP3）”入口承载的统一音频工具台。
-同时提供独立的“配音字幕”工作台，包含视频配音、视频转换、字幕烧制和音频替换；四个页面共用同一视频导入会话。
+同时提供独立的“配音字幕”工作台，包含视频配音、视频转换、字幕烧制、音频替换和视频拼接；相关页面共用同一视频导入会话。
 
 ## 模块
 
@@ -69,9 +69,9 @@ DemoFlow 是一款 macOS 实用工具套件，包含屏幕录制、画中画摄�
 
 ### 配音字幕（第 6 模块）
 
-- 页面固定包含 `视频配音 / 视频转换 / 字幕烧制 / 音频替换` 四个 Tab
-- 四个 Tab 共用同一视频导入与临时会话，切换页面后仍使用同一载入视频和字幕时间轴
-- 视频转换支持 `MP4 / MOV / M4V / WebM` 输入和 `MP4 / MOV / WebM` 输出，成品自动写入统一工作区的 `Vido/`；WebM 转为 MP4/MOV 后可载入四 Tab 共享会话
+- 页面固定包含 `视频配音 / 视频转换 / 字幕烧制 / 音频替换 / 视频拼接` 五个 Tab
+- 五个 Tab 共用同一视频导入与临时会话；视频拼接还支持多素材缩略图轨道合成，并可导入 PNG/JPEG 或截取当前视频画面作为 0.5–30 秒封面片段
+- 视频转换支持 `MP4 / MOV / M4V / WebM` 输入和 `MP4 / MOV / WebM` 输出，成品自动写入统一工作区的 `Vido/`；WebM 转为 MP4/MOV 后可载入共享会话
 - 视频转换页在左侧配置顶部提供“格式转换 / 水印去除”内部模式；两种模式都按字幕烧制风格提供左侧配置、右侧视频预览和底部源音轨波形
 - 水印去除支持多个手动固定区域与本地 FFmpeg 当前帧真实预览；新增或点击区域会打开替换水印库，每个区域可独立应用已保存的静态 PNG 和文字样式，整段处理顺序固定为去除 -> PNG -> 文字。PNG 原图与文字样式持久化在输出工作区的 `Watermarks/Images/` 和 `watermark-library.json`，PNG 导入限制为不超过 `10MB` 且最长边不超过 `4096` 像素，合规图片保留透明通道，区域位置仅属于当前视频会话。成品以 H.264/AAC MP4 写入 `Vido/` 后自动重新载入为干净的共享会话；仅支持 MP4/MOV/M4V，WebM 需先转换为 MP4/MOV
 - 字幕烧制使用本地 FFmpeg 与 Whisper.cpp，音频替换使用本地 Apple TTS
@@ -168,3 +168,4 @@ xcodebuild -project DemoFlow.xcodeproj -scheme DemoFlow -destination 'platform=m
 ## 许可
 
 MIT。详见 [LICENSE](LICENSE)。
+配音字幕工具台包含视频配音、视频转换、字幕烧制、音频替换和视频拼接五个 Tab。视频拼接支持多段 MP4/MOV/M4V 缩略图排序与合成。

@@ -198,15 +198,21 @@ final class AudioExtractViewModel: ObservableObject {
         let installDependencies = installDependencies
 #if DEMOFLOW_EXTERNAL_CHANNEL
         let shouldDownloadVideo = sourceType == .onlineURL && downloadVideo
-#else
-        let shouldDownloadVideo = false
-#endif
         let resolvedOutputURL = DemoFlowExportFileNamer.availableOutputURL(
             in: outputDirectoryURL,
             prefix: "e",
             fileExtension: "mp3",
             reservedExtensions: shouldDownloadVideo ? ["mp4", "mov", "webm"] : []
         )
+#else
+        let shouldDownloadVideo = false
+        let resolvedOutputURL = DemoFlowExportFileNamer.availableOutputURL(
+            in: outputDirectoryURL,
+            prefix: "e",
+            fileExtension: "mp3",
+            reservedExtensions: []
+        )
+#endif
 
         extractionTask?.cancel()
         extractionTask = Task {

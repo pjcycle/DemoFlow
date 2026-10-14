@@ -34,6 +34,7 @@ struct VideoTimelineFFmpegProject {
     let isAudioMuted: Bool
     let outputURL: URL
     let performanceProfile: VideoCuttingFFmpegProject.PerformanceProfile
+    let frameRate: Double
 }
 
 struct FFmpegToolPaths {

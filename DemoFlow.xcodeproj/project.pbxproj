@@ -205,6 +205,10 @@
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				EXCLUDED_SOURCE_FILE_NAMES = (
+					"ffmpeg*",
+					"ffprobe*",
+					"whisper-cli",
+					"ggml-base.bin",
 					"yt-dlp*",
 					"DemoFlow.storekit",
 					"DemoFlowLocalStoreKit.storekit",
@@ -232,6 +236,7 @@
 		7D8C2A122FCC900000A7D003 /* AppStore */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
@@ -261,6 +266,10 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				ENTITLEMENTS_REQUIRED = YES;
 				EXCLUDED_SOURCE_FILE_NAMES = (
+					"ffmpeg*",
+					"ffprobe*",
+					"whisper-cli",
+					"ggml-base.bin",
 					"yt-dlp*",
 					"DemoFlow.storekit",
 					"DemoFlowLocalStoreKit.storekit",
@@ -299,8 +308,13 @@
 		7D8C2A132FCC900000A7D004 /* TestFlight */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
 				DEVELOPMENT_TEAM = WZZACQ5JCC;
 				EXCLUDED_SOURCE_FILE_NAMES = (
+					"ffmpeg*",
+					"ffprobe*",
+					"whisper-cli",
+					"ggml-base.bin",
 					"yt-dlp*",
 					"DemoFlow.storekit",
 					"DemoFlowLocalStoreKit.storekit",
@@ -314,6 +328,7 @@
 		7D8C2A142FCC900000A7D005 /* TestFlight */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
@@ -336,6 +351,10 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				ENTITLEMENTS_REQUIRED = YES;
 				EXCLUDED_SOURCE_FILE_NAMES = (
+					"ffmpeg*",
+					"ffprobe*",
+					"whisper-cli",
+					"ggml-base.bin",
 					"yt-dlp*",
 					"DemoFlow.storekit",
 					"DemoFlowLocalStoreKit.storekit",

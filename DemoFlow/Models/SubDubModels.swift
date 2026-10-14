@@ -8,6 +8,7 @@ enum SubDubTab: String, CaseIterable, Identifiable {
     case videoConversion
     case subtitleBurning
     case audioReplacement
+    case videoComposition
 
     var id: String { rawValue }
 
@@ -17,6 +18,7 @@ enum SubDubTab: String, CaseIterable, Identifiable {
         case .videoConversion: return "subdub.tab.video_conversion"
         case .subtitleBurning: return "subdub.tab.subtitle_burning"
         case .audioReplacement: return "subdub.tab.audio_replacement"
+        case .videoComposition: return "subdub.tab.video_composition"
         }
     }
 
@@ -26,6 +28,7 @@ enum SubDubTab: String, CaseIterable, Identifiable {
         case .videoConversion: return "arrow.triangle.2.circlepath"
         case .subtitleBurning: return "captions.bubble"
         case .audioReplacement: return "waveform.badge.plus"
+        case .videoComposition: return "rectangle.stack.badge.play"
         }
     }
 }

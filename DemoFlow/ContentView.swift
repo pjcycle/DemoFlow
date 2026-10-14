@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct ContentView: View {
     private static let sidebarLaunchWidth: CGFloat = 200
@@ -70,6 +71,7 @@ struct ContentView: View {
                 videoCuttingViewModel.onPrimaryExportCompleted = { [weak coordinator] _ in
                     coordinator?.recordCompletedVideoExport()
                 }
+                importPendingRecordingOutputIfNeeded()
             }
             .onChange(of: width) { _, newWidth in
                 let measuredWidth = max(newWidth, 1)
@@ -86,10 +88,10 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .demoFlowRecordingDidFinalizeOutput)) { notification in
             guard let outputURL = notification.object as? URL else { return }
-            hasUserOpenedVideoCutting = true
-            appCoordinator.selectedSettingsSection = .videoCutting
-            openVideoCuttingWindow()
-            videoCuttingViewModel.importFromRecordingOutput(outputURL)
+            importRecordingOutput(outputURL)
+        }
+        .onReceive(appCoordinator.$pendingRecordingOutputURL.compactMap { $0 }) { outputURL in
+            importRecordingOutput(outputURL)
         }
         .onChange(of: appCoordinator.videoCuttingShouldOpen) { _, shouldOpen in
             guard shouldOpen else { return }
@@ -103,6 +105,22 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .demoFlowShouldOpenMainWindow)) { _ in
             openWindow(id: "main-window")
+        }
+    }
+
+    private func importPendingRecordingOutputIfNeeded() {
+        guard let outputURL = appCoordinator.pendingRecordingOutputURL else { return }
+        importRecordingOutput(outputURL)
+    }
+
+    private func importRecordingOutput(_ outputURL: URL) {
+        let normalizedURL = outputURL.standardizedFileURL
+        guard normalizedURL.isFileURL else { return }
+        hasUserOpenedVideoCutting = true
+        appCoordinator.selectedSettingsSection = .videoCutting
+        openVideoCuttingWindow()
+        if videoCuttingViewModel.importFromRecordingOutput(normalizedURL) {
+            appCoordinator.consumePendingRecordingOutput(normalizedURL)
         }
     }
 

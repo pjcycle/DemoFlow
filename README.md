@@ -167,3 +167,4 @@ See [BUILD_CHANNELS.md](BUILD_CHANNELS.md) for details.
 ## License
 
 MIT. See [LICENSE](LICENSE) for details.
+配音字幕工具台包含视频配音、视频转换、字幕烧制、音频替换和视频拼接五个 Tab。视频拼接支持多段 MP4/MOV/M4V 缩略图排序与合成，也支持导入 PNG/JPEG 或截取当前视频画面生成封面片段。

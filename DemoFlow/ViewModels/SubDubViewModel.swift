@@ -11,11 +11,13 @@ final class SubDubViewModel: ObservableObject {
     let watermarkRemovalViewModel: WatermarkRemovalViewModel
     let subtitleBurnViewModel: SubtitleBurnViewModel
     let audioReplacementViewModel: AudioReplacementViewModel
+    let videoCompositionViewModel: VideoCompositionViewModel
     let timelineSession: SubDubTimelineSession
 
     private let workspace = SubDubWorkspaceService()
     private var timelineCancellable: AnyCancellable?
     private var pendingWatermarkReloadURL: URL?
+    private var pendingCompositionAdditionalURLs: [URL] = []
 
     init() {
         timelineSession = SubDubTimelineSession()
@@ -24,8 +26,12 @@ final class SubDubViewModel: ObservableObject {
         watermarkRemovalViewModel = WatermarkRemovalViewModel(timelineSession: timelineSession)
         subtitleBurnViewModel = SubtitleBurnViewModel(timelineSession: timelineSession)
         audioReplacementViewModel = AudioReplacementViewModel(timelineSession: timelineSession)
+        videoCompositionViewModel = VideoCompositionViewModel()
         watermarkRemovalViewModel.onProcessedVideoReady = { [weak self] url in
             self?.replaceSharedVideoAfterWatermarkRemoval(with: url)
+        }
+        videoCompositionViewModel.onCompositionCompleted = { [weak self] url in
+            self?.replaceSharedVideoAfterComposition(with: url)
         }
         subtitleBurnViewModel.onVideoImportResult = { [weak self] url, result in
             self?.handleVideoImportResult(url: url, result: result)
@@ -47,6 +53,7 @@ final class SubDubViewModel: ObservableObject {
                 : videoConversionViewModel.statusMessage
         case .subtitleBurning: return subtitleBurnViewModel.statusMessage
         case .audioReplacement: return audioReplacementViewModel.statusMessage
+        case .videoComposition: return videoCompositionViewModel.statusMessage
         }
     }
 
@@ -77,6 +84,82 @@ final class SubDubViewModel: ObservableObject {
         }
         videoConversionViewModel.prepareForSharedImport()
         subtitleBurnViewModel.importVideo(from: url)
+    }
+
+    // MARK: - Video composition shared import
+
+    /// Import the first composition source through the normal shared-video
+    /// pipeline so all five SubDub tabs immediately see the same playable
+    /// video. Additional selections are queued until that shared session is
+    /// ready, then appended only to the composition timeline.
+    func importCompositionByPanel() {
+        guard let urls = workspace.pickVideoCompositionURLs(), !urls.isEmpty else {
+            videoCompositionViewModel.reportImportCancelled()
+            return
+        }
+        importCompositionVideos(urls)
+    }
+
+    func importCompositionDroppedProviders(_ providers: [NSItemProvider]) {
+        guard !providers.isEmpty else { return }
+        let identifiers = [
+            UTType.mpeg4Movie.identifier,
+            UTType.quickTimeMovie.identifier,
+            UTType.movie.identifier,
+            UTType.fileURL.identifier
+        ]
+        let group = DispatchGroup()
+        var loaded: [(Int, URL)] = []
+        let lock = NSLock()
+        for (index, provider) in providers.enumerated() {
+            guard let identifier = identifiers.first(where: {
+                provider.hasItemConformingToTypeIdentifier($0)
+            }) else { continue }
+            group.enter()
+            provider.loadFileRepresentation(forTypeIdentifier: identifier) { url, _ in
+                if let url {
+                    lock.lock()
+                    loaded.append((index, url))
+                    lock.unlock()
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { [weak self] in
+            let urls = loaded.sorted { $0.0 < $1.0 }.map(\.1)
+            self?.importCompositionVideos(urls)
+        }
+    }
+
+    func importCompositionVideos(_ urls: [URL]) {
+        let supported = urls.filter {
+            ["mp4", "mov", "m4v"].contains($0.pathExtension.lowercased())
+        }
+        guard !supported.isEmpty else {
+            videoCompositionViewModel.reportUnsupportedImport()
+            return
+        }
+
+        // If another tab already owns a shared source, seed that source first
+        // even when the composition tab has not been shown yet. New imports
+        // then become appended composition clips instead of replacing the
+        // shared video.
+        adoptSharedVideoIfNeeded()
+        if videoCompositionViewModel.hasSource {
+            videoCompositionViewModel.importVideos(urls: supported)
+            return
+        }
+
+        let first = supported[0]
+        pendingCompositionAdditionalURLs.append(contentsOf: supported.dropFirst())
+        importVideo(from: first)
+    }
+
+    /// Refresh the composition tab from the current shared source. Called on
+    /// tab appearance as well as timeline-session changes so switching tabs
+    /// never leaves a stale preview behind.
+    func synchronizeCompositionWithSharedVideo() {
+        adoptSharedVideoIfNeeded()
     }
 
     func importConvertedVideoIntoSharedSession() {
@@ -137,10 +220,35 @@ final class SubDubViewModel: ObservableObject {
     }
 
     func removeSharedVideo() {
+        pendingCompositionAdditionalURLs.removeAll()
+        videoCompositionViewModel.clearProject()
         videoConversionViewModel.clearSharedVideo()
         watermarkRemovalViewModel.resetForNewSharedVideo()
         videoDubbingViewModel.clearSharedVideo()
         subtitleBurnViewModel.removeVideo()
+    }
+
+    func replaceSharedVideoAfterComposition(with url: URL) {
+        guard let accessToken = DemoFlowOutputDirectoryPolicy.makeVideoCutsAccessToken() else {
+            videoCompositionViewModel.reportWorkspaceUnavailable()
+            return
+        }
+
+        // Keep the previous shared session intact until the new import
+        // succeeds.  This avoids losing the old source on an import failure;
+        // each tab's source-bound draft is reset by its session observer once
+        // the new shared project is configured below.
+        videoDubbingViewModel.stopPlaybackForSourceReplacement()
+        videoConversionViewModel.cancelCurrentTask()
+        subtitleBurnViewModel.cancelCurrentTask()
+        subtitleBurnViewModel.stopPlaybackForSourceReplacement()
+        audioReplacementViewModel.cancelCurrentTask()
+        audioReplacementViewModel.stopPlayback()
+        videoConversionViewModel.prepareForSharedImport()
+        subtitleBurnViewModel.importVideo(
+            from: url.standardizedFileURL,
+            retainingAccessToken: accessToken
+        )
     }
 
     func configureSubscriptionAccess(
@@ -167,6 +275,10 @@ final class SubDubViewModel: ObservableObject {
             subscriptionViewModel: subscriptionViewModel,
             onRequireSubscription: onRequireSubscription
         )
+        videoCompositionViewModel.configureSubscriptionAccess(
+            subscriptionViewModel: subscriptionViewModel,
+            onRequireSubscription: onRequireSubscription
+        )
     }
 
     private func adoptSharedVideoIfNeeded() {
@@ -182,16 +294,43 @@ final class SubDubViewModel: ObservableObject {
             sourceAudioURL: timelineSession.sourceAudioURL,
             sourceWaveformSamples: timelineSession.sourceWaveformSamples
         )
+        videoCompositionViewModel.adoptSharedVideo(
+            url: videoURL,
+            duration: timelineSession.sourceDuration,
+            sessionDirectory: sessionDirectory,
+            hasAudioTrack: timelineSession.hasSourceAudioTrack
+        )
+        flushPendingCompositionAdditionalURLs()
+    }
+
+    private func flushPendingCompositionAdditionalURLs() {
+        guard !pendingCompositionAdditionalURLs.isEmpty,
+              timelineSession.videoURL != nil,
+              videoCompositionViewModel.hasSource else { return }
+        let pending = pendingCompositionAdditionalURLs
+        pendingCompositionAdditionalURLs.removeAll()
+        videoCompositionViewModel.importVideos(urls: pending)
     }
 
     private func handleVideoImportResult(url: URL, result: Result<Void, Error>) {
-        guard url.standardizedFileURL == pendingWatermarkReloadURL else { return }
-        pendingWatermarkReloadURL = nil
-        switch result {
-        case .success:
-            watermarkRemovalViewModel.markCurrentVideoAsProcessed()
-        case .failure:
-            watermarkRemovalViewModel.markReloadFailed()
+        if url.standardizedFileURL == pendingWatermarkReloadURL {
+            pendingWatermarkReloadURL = nil
+            switch result {
+            case .success:
+                watermarkRemovalViewModel.markCurrentVideoAsProcessed()
+            case .failure:
+                watermarkRemovalViewModel.markReloadFailed()
+            }
+        }
+        if case .success = result {
+            // The subtitle-burn importer is the owner of the shared session.
+            // Once it succeeds, mirror that source into composition and flush
+            // any additional files selected in the same import operation.
+            adoptSharedVideoIfNeeded()
+        } else if !pendingCompositionAdditionalURLs.isEmpty {
+            // The first shared import failed or was cancelled; do not carry
+            // stale append selections into the next composition import.
+            pendingCompositionAdditionalURLs.removeAll()
         }
     }
 }

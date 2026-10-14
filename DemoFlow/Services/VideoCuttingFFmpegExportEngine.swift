@@ -80,6 +80,8 @@ final class VideoCuttingFFmpegExportEngine {
 
         let crop = VideoCropGeometry.clampNormalizedRect(project.cropRectNormalized.cgRect)
         let hasAudio = project.clips.contains(where: \.hasAudioTrack)
+        let frameRate = max(1, min(project.frameRate.isFinite ? project.frameRate : 30, 120))
+        let frameRateText = formatFilterNumber(frameRate)
         let renderWidth = project.renderSize.map { max(2, Int($0.width.rounded())) }
         let renderHeight = project.renderSize.map { max(2, Int($0.height.rounded())) }
         let blankWidth = renderWidth ?? 1920
@@ -96,7 +98,7 @@ final class VideoCuttingFFmpegExportEngine {
             let gapDuration = clipStart - timelineCursor
             if gapDuration > 0.0005 {
                 filters.append(
-                    "color=c=black:s=\(blankWidth)x\(blankHeight):r=30:d=\(formatTime(gapDuration))[vgap\(sequenceIndex)]"
+                    "color=c=black:s=\(blankWidth)x\(blankHeight):r=\(frameRateText):d=\(formatTime(gapDuration))[vgap\(sequenceIndex)]"
                 )
                 videoLabels.append("[vgap\(sequenceIndex)]")
                 if hasAudio {
@@ -119,7 +121,7 @@ final class VideoCuttingFFmpegExportEngine {
                 videoChain += ",scale=\(renderWidth):\(renderHeight):force_original_aspect_ratio=decrease"
                 videoChain += ",pad=\(renderWidth):\(renderHeight):(ow-iw)/2:(oh-ih)/2"
             }
-            videoChain += ",setsar=1,fps=30[v\(index)]"
+            videoChain += ",setsar=1,fps=\(frameRateText)[v\(index)]"
             filters.append(videoChain)
             videoLabels.append("[v\(index)]")
             timelineCursor = max(timelineCursor, clipStart + clip.durationSeconds)

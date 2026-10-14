@@ -59,19 +59,25 @@ struct VideoTimelineClip: Identifiable, Equatable {
     let sourceStartSeconds: Double
     let sourceEndSeconds: Double
     let hasAudioTrack: Bool
+    /// A cover is a project-level leading clip.  Keeping this explicit avoids
+    /// inferring cover state from a temporary file name and lets the editor
+    /// enforce that a composition can contain at most one cover.
+    let isCover: Bool
 
     init(
         id: UUID = UUID(),
         sourceURL: URL,
         sourceStartSeconds: Double,
         sourceEndSeconds: Double,
-        hasAudioTrack: Bool
+        hasAudioTrack: Bool,
+        isCover: Bool = false
     ) {
         self.id = id
         self.sourceURL = sourceURL.standardizedFileURL
         self.sourceStartSeconds = max(0, sourceStartSeconds)
         self.sourceEndSeconds = max(sourceStartSeconds, sourceEndSeconds)
         self.hasAudioTrack = hasAudioTrack
+        self.isCover = isCover
     }
 
     var durationSeconds: Double {
@@ -90,7 +96,8 @@ struct VideoTimelineClip: Identifiable, Equatable {
             sourceURL: sourceURL,
             sourceStartSeconds: start,
             sourceEndSeconds: end,
-            hasAudioTrack: hasAudioTrack
+            hasAudioTrack: hasAudioTrack,
+            isCover: false
         )
     }
 }

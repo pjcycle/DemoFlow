@@ -44,6 +44,17 @@ enum SubscriptionWindowLayout {
         return true
 #endif
     }
+
+    /// Purchase cancellation is useful while exercising the local reset
+    /// scheme, but is not a user-facing status in TestFlight or App Store
+    /// builds. Keep the entire status row hidden in those environments.
+    static var showsPurchaseStatusMessage: Bool {
+#if DEBUG
+        return ProcessInfo.processInfo.arguments.contains("-DemoFlowLocalStoreKitTestReset")
+#else
+        return false
+#endif
+    }
     static let contentPadding: CGFloat = 16
     static let topInset: CGFloat = 30
     static let sectionSpacing: CGFloat = 12
@@ -233,7 +244,8 @@ struct SubscriptionWindowView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
-                if !subscriptionViewModel.isProUnlocked,
+                if SubscriptionWindowLayout.showsPurchaseStatusMessage,
+                   !subscriptionViewModel.isProUnlocked,
                    !SubscriptionWindowLayout.isRecordingMode,
                    !SubscriptionWindowLayout.suppressLocalStoreKitDebugSurface {
                     statusPill(subscriptionViewModel.statusMessage ?? L10n.tr("subscription.status.loading"))

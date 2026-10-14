@@ -84,6 +84,10 @@ final class VideoCuttingViewModel: ObservableObject {
     private var timelineRedoStack: [TimelineEditSnapshot] = []
     private var pendingReloadPlaybackPosition: Double?
     private var loadingVideoURL: URL?
+    /// A recording output lives inside the user-selected workspace. Keep the
+    /// security-scoped access alive for the whole editing session; the
+    /// recorder's write token is released as soon as recording stops.
+    private var sourceSecurityScopeToken: OutputLocationAccessToken?
     private var videoLoadGenerationID = UUID()
     private var originalTimelineSourceDuration: Double = 0
     private var timelineDurationOverride: Double?
@@ -230,13 +234,23 @@ final class VideoCuttingViewModel: ObservableObject {
         }
     }
 
-    func importFromRecordingOutput(_ outputURL: URL) {
+    @discardableResult
+    func importFromRecordingOutput(_ outputURL: URL) -> Bool {
         let normalizedURL = outputURL.standardizedFileURL
-        guard FileManager.default.fileExists(atPath: normalizedURL.path) else {
-            statusMessage = L10n.tr("legacy.key_53")
-            return
+        if sourceURL?.standardizedFileURL == normalizedURL || loadingVideoURL == normalizedURL {
+            return true
         }
-        loadVideo(url: normalizedURL)
+
+        sourceSecurityScopeToken?.stop()
+        sourceSecurityScopeToken = DemoFlowOutputDirectoryPolicy.makeVideoCutsAccessToken()
+        let canAccessOutput = FileManager.default.fileExists(atPath: normalizedURL.path)
+            || sourceSecurityScopeToken != nil
+        guard canAccessOutput else {
+            statusMessage = L10n.tr("legacy.key_53")
+            return false
+        }
+        loadVideo(url: normalizedURL, keepSecurityScope: true)
+        return true
     }
 
     func autoImportLatestRecentRecordingIfNeeded(within seconds: TimeInterval = 600) {
@@ -244,7 +258,15 @@ final class VideoCuttingViewModel: ObservableObject {
         // can arrive in either order. While the first load is still resolving
         // metadata, sourceURL is nil, so also guard the in-flight URL here.
         guard sourceURL == nil, loadingVideoURL == nil else { return }
-        guard let recentURL = latestRecentRecordingURL(within: seconds) else { return }
+        // Directory enumeration also requires the workspace security scope.
+        // The recorder releases its write token before this window appears,
+        // so briefly reopen the scope while locating the newest recording.
+        let discoveryToken = DemoFlowOutputDirectoryPolicy.makeVideoCutsAccessToken()
+        guard let recentURL = latestRecentRecordingURL(within: seconds) else {
+            discoveryToken?.stop()
+            return
+        }
+        discoveryToken?.stop()
         importFromRecordingOutput(recentURL)
     }
 
@@ -259,6 +281,8 @@ final class VideoCuttingViewModel: ObservableObject {
         }
 
         sourceURL = nil
+        sourceSecurityScopeToken?.stop()
+        sourceSecurityScopeToken = nil
         sourceDuration = 0
         originalTimelineSourceDuration = 0
         timelineDurationOverride = nil
@@ -360,6 +384,9 @@ final class VideoCuttingViewModel: ObservableObject {
             return
         }
 
+        // Keep the existing sampled frames; splitting must not decode or
+        // redistribute the thumbnail strip. The view sizes each cached frame
+        // by its source-time interval after the clip boundary changes.
         let sourceThumbnails = timelineClipThumbnails[location.clip.id] ?? timelineThumbnails
         let timelineStart = timelineStartSeconds(for: location.clip) ?? max(0, splitSeconds - location.localSeconds)
         timelineClipStartSeconds.removeValue(forKey: location.clip.id)
@@ -1021,9 +1048,7 @@ final class VideoCuttingViewModel: ObservableObject {
             thumbnail.seconds >= clip.sourceStartSeconds - epsilon &&
                 thumbnail.seconds <= clip.sourceEndSeconds + epsilon
         }
-        if !matching.isEmpty {
-            return matching
-        }
+        if !matching.isEmpty { return matching }
 
         guard let nearest = thumbnails.min(by: {
             abs($0.seconds - (clip.sourceStartSeconds + clip.sourceEndSeconds) / 2) <
@@ -1527,7 +1552,11 @@ final class VideoCuttingViewModel: ObservableObject {
         return candidates.max(by: { $0.date < $1.date })?.url
     }
 
-    private func loadVideo(url: URL) {
+    private func loadVideo(url: URL, keepSecurityScope: Bool = false) {
+        if !keepSecurityScope {
+            sourceSecurityScopeToken?.stop()
+            sourceSecurityScopeToken = nil
+        }
         guard importService.isSupportedVideo(url: url) else {
             statusMessage = L10n.tr("legacy.mp4_mov")
             return
@@ -1555,6 +1584,8 @@ final class VideoCuttingViewModel: ObservableObject {
                     await MainActor.run {
                         guard self.videoLoadGenerationID == generationID else { return }
                         self.loadingVideoURL = nil
+                        self.sourceSecurityScopeToken?.stop()
+                        self.sourceSecurityScopeToken = nil
                         self.statusMessage = L10n.tr("legacy.key_51")
                     }
                     return
@@ -1620,6 +1651,8 @@ final class VideoCuttingViewModel: ObservableObject {
                     guard self.videoLoadGenerationID == generationID else { return }
                     self.loadingVideoURL = nil
                     self.pendingReloadPlaybackPosition = nil
+                    self.sourceSecurityScopeToken?.stop()
+                    self.sourceSecurityScopeToken = nil
                     self.statusMessage = L10n.f("fmt.video.import_failed", error.localizedDescription)
                 }
             }
@@ -2042,7 +2075,8 @@ final class VideoCuttingViewModel: ObservableObject {
             audioProcessingConfig: applyAudioProcessing ? audioProcessingConfig : .default,
             isAudioMuted: false,
             outputURL: outputURL,
-            performanceProfile: performanceProfile
+            performanceProfile: performanceProfile,
+            frameRate: 30
         )
 
         if isFFmpegReady {

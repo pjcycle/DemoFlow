@@ -47,7 +47,32 @@ struct VideoCuttingModalView: View {
     @ObservedObject var viewModel: VideoCuttingViewModel
     @ObservedObject var appCoordinator: AppCoordinator
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.colorScheme) private var colorScheme
     let windowID: String?
+
+    private var themeForeground: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var themeBackground: Color {
+        Color(nsColor: .windowBackgroundColor)
+    }
+
+    private var themePanelBackground: Color {
+        Color(nsColor: .underPageBackgroundColor)
+    }
+
+    private var themeSurfaceBackground: Color {
+        Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var themeTrackBackground: Color {
+        Color(nsColor: .textBackgroundColor)
+    }
+
+    private var themeBorder: Color {
+        Color(nsColor: .separatorColor)
+    }
 
     @State private var cropDragStartRect: CGRect?
     @State private var hoveredCropHandle: VideoCropHandle?
@@ -96,11 +121,11 @@ struct VideoCuttingModalView: View {
     var body: some View {
         VStack(spacing: 0) {
             bodyContent
-            Divider().overlay(Color.black.opacity(0.35))
+            Divider().overlay(themeBorder.opacity(0.35))
             bottomBar
         }
         .frame(minWidth: modalMinWidth, minHeight: modalMinHeight)
-        .background(Color(red: 0.08, green: 0.09, blue: 0.11))
+        .background(themeBackground)
         .onDrop(of: dropTypeIdentifiers, isTargeted: nil) { providers in
             viewModel.handleDrop(providers: providers)
             return true
@@ -121,7 +146,7 @@ struct VideoCuttingModalView: View {
     private var bodyContent: some View {
         HStack(spacing: 0) {
             previewPanel
-            Divider().overlay(Color.black.opacity(0.35))
+            Divider().overlay(themeBorder.opacity(0.35))
             sidePanel
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -156,13 +181,13 @@ struct VideoCuttingModalView: View {
                     .foregroundStyle(Color.cyan.opacity(0.95))
                 Text(L10n.tr("legacy.key_54"))
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(Color.white.opacity(0.92))
+                    .foregroundStyle(themeForeground.opacity(0.92))
                 Text(L10n.tr("legacy.key_133"))
                     .font(.body)
-                    .foregroundStyle(Color.white.opacity(0.45))
+                    .foregroundStyle(themeForeground.opacity(0.45))
                 Text(L10n.tr("legacy.key_213"))
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(Color.white.opacity(0.96))
+                    .foregroundStyle(themeForeground.opacity(0.96))
                     .padding(.horizontal, 18)
                     .padding(.vertical, 8)
                     .background(Color.cyan.opacity(0.85))
@@ -173,11 +198,11 @@ struct VideoCuttingModalView: View {
         }
         .buttonStyle(.plain)
         .frame(width: importDropZoneSize.width, height: importDropZoneSize.height)
-        .background(Color.white.opacity(0.04))
+        .background(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.35 : 0.9))
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .stroke(style: StrokeStyle(lineWidth: 2, dash: [6, 6]))
-                .foregroundStyle(Color.white.opacity(0.2))
+                .foregroundStyle(themeBorder.opacity(0.7))
         )
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .contextMenu {
@@ -473,7 +498,7 @@ struct VideoCuttingModalView: View {
         .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 12)
-        .background(Color.black.opacity(0.62))
+        .background(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.92 : 0.98))
     }
 
     private var playbackToolbar: some View {
@@ -483,7 +508,7 @@ struct VideoCuttingModalView: View {
             } label: {
                 Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
                     .font(.title3)
-                    .foregroundStyle(Color.white.opacity(0.95))
+                    .foregroundStyle(themeForeground.opacity(0.95))
             }
             .buttonStyle(.plain)
 
@@ -493,10 +518,10 @@ struct VideoCuttingModalView: View {
 
             Text("/")
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(Color.white.opacity(0.45))
+                .foregroundStyle(themeForeground.opacity(0.45))
             Text(viewModel.totalDurationText)
                 .font(.system(.body, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.72))
+                .foregroundStyle(themeForeground.opacity(0.72))
 
             Button {
                 viewModel.completeTimelineEditsAndReload()
@@ -518,7 +543,7 @@ struct VideoCuttingModalView: View {
         HStack(spacing: 8) {
             Text(L10n.tr("legacy.key_12"))
                 .font(.caption)
-                .foregroundStyle(Color.white.opacity(0.62))
+                .foregroundStyle(themeForeground.opacity(0.62))
 
             TextField("0", text: $viewModel.keepStartText)
                 .textFieldStyle(.roundedBorder)
@@ -529,7 +554,7 @@ struct VideoCuttingModalView: View {
 
             Text(L10n.tr("legacy.key_13"))
                 .font(.caption)
-                .foregroundStyle(Color.white.opacity(0.62))
+                .foregroundStyle(themeForeground.opacity(0.62))
 
             TextField("0", text: $viewModel.keepEndText)
                 .textFieldStyle(.roundedBorder)
@@ -543,6 +568,7 @@ struct VideoCuttingModalView: View {
             } label: {
                 Image(systemName: "return")
                     .font(.headline.weight(.semibold))
+                    .foregroundStyle(themeForeground.opacity(0.9))
                     .frame(width: 18, height: 18)
             }
             .buttonStyle(.plain)
@@ -557,6 +583,7 @@ struct VideoCuttingModalView: View {
             } label: {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.headline.weight(.semibold))
+                    .foregroundStyle(themeForeground.opacity(0.9))
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)
@@ -568,6 +595,7 @@ struct VideoCuttingModalView: View {
             } label: {
                 Image(systemName: "arrow.uturn.forward")
                     .font(.headline.weight(.semibold))
+                    .foregroundStyle(themeForeground.opacity(0.9))
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)
@@ -580,6 +608,7 @@ struct VideoCuttingModalView: View {
                 Image(systemName: "scissors")
                     .rotationEffect(.degrees(90))
                     .font(.headline.weight(.semibold))
+                    .foregroundStyle(themeForeground.opacity(0.9))
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)
@@ -591,6 +620,7 @@ struct VideoCuttingModalView: View {
             } label: {
                 Image(systemName: viewModel.isPlaybackMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                     .font(.headline.weight(.semibold))
+                    .foregroundStyle(themeForeground.opacity(0.9))
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)
@@ -665,7 +695,7 @@ struct VideoCuttingModalView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                        .stroke(themeBorder.opacity(0.5), lineWidth: 1)
                 )
             }
             .frame(height: totalHeight)
@@ -680,7 +710,7 @@ struct VideoCuttingModalView: View {
 
         return ZStack(alignment: .topLeading) {
             Rectangle()
-                .fill(Color.white.opacity(0.06))
+                .fill(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.9 : 0.98))
 
             ForEach(0...tickCount, id: \.self) { index in
                 let seconds = min(Double(index) * step, duration)
@@ -689,12 +719,12 @@ struct VideoCuttingModalView: View {
 
                 Text(formatTimelineTick(seconds))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(Color.white.opacity(0.78))
+                    .foregroundStyle(themeForeground.opacity(0.78))
                     .fixedSize()
                     .position(x: labelX, y: 8)
 
                 Rectangle()
-                    .fill(Color.white.opacity(0.55))
+                    .fill(themeForeground.opacity(0.55))
                     .frame(width: 1, height: 8)
                     .position(x: tickX, y: timelineRulerHeight - 4)
             }
@@ -709,7 +739,7 @@ struct VideoCuttingModalView: View {
                     if seconds < duration {
                         let tickX = CGFloat(seconds / duration) * width
                         Rectangle()
-                            .fill(Color.white.opacity(0.30))
+                            .fill(themeForeground.opacity(0.30))
                             .frame(width: 1, height: 4)
                             .position(x: tickX, y: timelineRulerHeight - 2)
                     }
@@ -722,15 +752,15 @@ struct VideoCuttingModalView: View {
     private func timelineBlankRuler(width: CGFloat) -> some View {
         ZStack {
             Rectangle()
-                .fill(Color.white.opacity(0.025))
+                .fill(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.45 : 0.9))
                 .overlay(
                     Rectangle()
                         .stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                        .foregroundStyle(Color.white.opacity(0.14))
+                        .foregroundStyle(themeBorder.opacity(0.55))
                 )
             Text(L10n.tr("video.cut.timeline.drop_zone"))
                 .font(.caption2)
-                .foregroundStyle(Color.white.opacity(0.34))
+                .foregroundStyle(themeForeground.opacity(0.5))
         }
         .frame(width: width, height: timelineRulerHeight)
     }
@@ -739,7 +769,7 @@ struct VideoCuttingModalView: View {
         HStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.black.opacity(0.82))
+                    .fill(themeTrackBackground)
                 ForEach(Array(viewModel.timelineClips.enumerated()), id: \.element.id) { index, clip in
                     let frame = timelineClipFrame(
                         for: clip,
@@ -789,6 +819,7 @@ struct VideoCuttingModalView: View {
                                 viewModel.deleteTimelineClip(clipID)
                             } label: {
                                 Image(systemName: "trash")
+                                    .foregroundStyle(Color.red.opacity(0.95))
                             }
                         }
                     }
@@ -804,14 +835,14 @@ struct VideoCuttingModalView: View {
     private func timelineBlankDropZone(width: CGFloat, height: CGFloat) -> some View {
         ZStack {
             Rectangle()
-                .fill(Color.white.opacity(0.025))
+                .fill(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.45 : 0.9))
                 .overlay(
                     Rectangle()
                         .stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                        .foregroundStyle(Color.white.opacity(0.14))
+                        .foregroundStyle(themeBorder.opacity(0.55))
                 )
             Image(systemName: "arrow.right.to.line.compact")
-                .foregroundStyle(Color.white.opacity(0.24))
+                .foregroundStyle(themeForeground.opacity(0.38))
         }
         .frame(width: width, height: height)
         .contentShape(Rectangle())
@@ -939,10 +970,10 @@ struct VideoCuttingModalView: View {
 
             Text(timelineClipEditLabel(clip))
                 .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(Color.white.opacity(0.96))
+                .foregroundStyle(themeForeground.opacity(0.96))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background(Color.black.opacity(0.78))
+                .background(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.96 : 0.98))
                 .overlay(
                     Capsule()
                         .stroke(Color.cyan.opacity(0.85), lineWidth: 1)
@@ -967,7 +998,7 @@ struct VideoCuttingModalView: View {
                 Image(systemName: "scissors")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(Color.orange.opacity(0.98))
-                    .background(Color.black.opacity(0.72).clipShape(Circle()))
+                    .background(themeSurfaceBackground.opacity(0.9).clipShape(Circle()))
                     .offset(x: x - 8, y: -7)
             }
         }
@@ -1017,16 +1048,27 @@ struct VideoCuttingModalView: View {
         let isSelected = viewModel.selectedTimelineClipID == clip.id
         return ZStack(alignment: .bottomLeading) {
             if thumbnails.isEmpty {
-                Color.white.opacity(0.08)
+                themeSurfaceBackground.opacity(colorScheme == .dark ? 0.25 : 0.8)
             } else {
-                let thumbnailWidth = width / CGFloat(max(thumbnails.count, 1))
+                let thumbnailWidths = timelineThumbnailWidths(
+                    thumbnails,
+                    for: clip,
+                    totalWidth: width
+                )
                 HStack(spacing: 0) {
-                    ForEach(thumbnails) { thumbnail in
-                        Image(decorative: thumbnail.image, scale: 1)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: thumbnailWidth, height: height)
-                            .clipped()
+                    ForEach(Array(thumbnails.enumerated()), id: \.element.id) { index, thumbnail in
+                        // Keep each sampled frame inside a fixed tile. A
+                        // short remainder after splitting must not make one
+                        // frame look like a stretched thumbnail strip.
+                        ZStack {
+                            Color.black
+                            Image(decorative: thumbnail.image, scale: 1)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(width: thumbnailWidths[index], height: height)
+                        .clipped()
                     }
                 }
             }
@@ -1047,6 +1089,48 @@ struct VideoCuttingModalView: View {
         )
         .opacity(draggedTimelineClipID == clip.id ? 0.45 : 1)
         .help(timelineClipTooltip(clip, index: index))
+    }
+
+    private func timelineThumbnailWidths(
+        _ thumbnails: [VideoTimelineThumbnail],
+        for clip: VideoTimelineClip,
+        totalWidth: CGFloat
+    ) -> [CGFloat] {
+        guard !thumbnails.isEmpty, clip.durationSeconds > 0 else {
+            return [max(0, totalWidth)]
+        }
+
+        if thumbnails.count == 1 {
+            return [max(0, totalWidth)]
+        }
+
+        let start = clip.sourceStartSeconds
+        let end = clip.sourceEndSeconds
+        let sampleTimes = thumbnails.map { min(max($0.seconds, start), end) }
+        var boundaries = [start]
+        for index in 1..<sampleTimes.count {
+            boundaries.append((sampleTimes[index - 1] + sampleTimes[index]) / 2)
+        }
+        boundaries.append(end)
+
+        let durations = (0..<thumbnails.count).map { index in
+            max(0, boundaries[index + 1] - boundaries[index])
+        }
+        let totalDuration = durations.reduce(0, +)
+        guard totalDuration > 0 else {
+            return Array(repeating: totalWidth / CGFloat(thumbnails.count), count: thumbnails.count)
+        }
+        var widths = durations.map { totalWidth * CGFloat($0 / totalDuration) }
+        // Avoid sub-pixel zero-width tiles when a split is close to a sample.
+        let minimumTile: CGFloat = min(6, totalWidth / CGFloat(thumbnails.count))
+        for index in widths.indices where widths[index] < minimumTile {
+            let deficit = minimumTile - widths[index]
+            guard let donor = widths.indices.max(by: { widths[$0] < widths[$1] }),
+                  widths[donor] - deficit >= minimumTile else { continue }
+            widths[donor] -= deficit
+            widths[index] = minimumTile
+        }
+        return widths
     }
 
     private func timelineClipTooltip(_ clip: VideoTimelineClip, index: Int) -> String {
@@ -1133,7 +1217,7 @@ struct VideoCuttingModalView: View {
                     if metrics.width > 120 {
                         Text("\(startText) - \(endText)  ·  \(durationText)")
                             .font(.caption2.monospacedDigit())
-                            .foregroundStyle(Color.white.opacity(0.95))
+                            .foregroundStyle(themeForeground.opacity(0.95))
                             .lineLimit(1)
                             .padding(.horizontal, 8)
                     }
@@ -1170,10 +1254,10 @@ struct VideoCuttingModalView: View {
     private func deleteTrackHandle(systemName: String) -> some View {
         ZStack {
             Rectangle()
-                .fill(Color.black.opacity(0.28))
+                .fill(themeSurfaceBackground.opacity(0.65))
             Image(systemName: systemName)
                 .font(.caption2.weight(.bold))
-                .foregroundStyle(Color.white.opacity(0.88))
+                .foregroundStyle(themeForeground.opacity(0.88))
                 .rotationEffect(.degrees(90))
         }
         .frame(width: 14)
@@ -1336,7 +1420,7 @@ struct VideoCuttingModalView: View {
             HStack(spacing: 10) {
                 Text(L10n.tr("legacy.key_186"))
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(Color.white.opacity(0.92))
+                    .foregroundStyle(themeForeground.opacity(0.92))
 
                 Spacer(minLength: 0)
 
@@ -1345,6 +1429,7 @@ struct VideoCuttingModalView: View {
                 } label: {
                     Image(systemName: viewModel.isApplyingCrop ? "hourglass" : "crop")
                         .font(.headline.weight(.semibold))
+                        .foregroundStyle(themeForeground.opacity(0.9))
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)
@@ -1371,6 +1456,7 @@ struct VideoCuttingModalView: View {
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
                         .font(.headline.weight(.semibold))
+                        .foregroundStyle(themeForeground.opacity(0.9))
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)
@@ -1380,11 +1466,11 @@ struct VideoCuttingModalView: View {
                 if viewModel.isCropNoOp {
                     Text(L10n.tr("legacy.key_103"))
                         .font(.caption)
-                        .foregroundStyle(Color.white.opacity(0.5))
+                        .foregroundStyle(themeForeground.opacity(0.5))
                 }
             }
 
-            Divider().overlay(Color.white.opacity(0.08))
+            Divider().overlay(themeBorder.opacity(0.45))
                 .padding(.vertical, 4)
 
             audioSection
@@ -1394,7 +1480,7 @@ struct VideoCuttingModalView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 20)
         .frame(width: sidePanelWidth)
-        .background(Color(red: 0.11, green: 0.12, blue: 0.14))
+        .background(themePanelBackground)
     }
 
     private func aspectCard(for preset: VideoCuttingAspectPreset) -> some View {
@@ -1404,14 +1490,14 @@ struct VideoCuttingModalView: View {
         } label: {
             VStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .stroke(Color.white.opacity(0.5), lineWidth: 1.2)
+                    .stroke(themeForeground.opacity(0.5), lineWidth: 1.2)
                     .frame(width: 28, height: 18)
                 Text(preset.title)
                     .font(.callout.weight(.medium))
-                    .foregroundStyle(Color.white.opacity(0.8))
+                    .foregroundStyle(themeForeground.opacity(0.8))
             }
             .frame(width: aspectCardSize, height: aspectCardSize)
-            .background(Color.white.opacity(0.06))
+            .background(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.4 : 0.92))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(selected ? Color.cyan.opacity(0.95) : Color.clear, lineWidth: 2)
@@ -1432,22 +1518,22 @@ struct VideoCuttingModalView: View {
             HStack(spacing: 10) {
                 Text(L10n.tr("video.cut.export_size.title"))
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(Color.white.opacity(0.9))
+                    .foregroundStyle(themeForeground.opacity(0.9))
                     .lineLimit(1)
 
                 exportSizeModeButton(.source, titleKey: "video.cut.export_size.mode.default")
                 exportSizeModeButton(.custom, titleKey: "video.cut.export_size.mode.custom")
 
                 if appCoordinator.resolvedLanguage == .zhHans {
-                    Text(L10n.tr("video.cut.export_size.video_size"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.white.opacity(0.62))
+                        Text(L10n.tr("video.cut.export_size.video_size"))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(themeForeground.opacity(0.62))
                         .lineLimit(1)
                 }
 
                 Text(viewModel.currentRealSizeText)
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(Color.white.opacity(0.58))
+                    .foregroundStyle(themeForeground.opacity(0.58))
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
@@ -1464,7 +1550,7 @@ struct VideoCuttingModalView: View {
 
                     Text("×")
                         .font(.body.weight(.medium))
-                        .foregroundStyle(Color.white.opacity(0.68))
+                        .foregroundStyle(themeForeground.opacity(0.68))
 
                     TextField(
                         L10n.tr("video.cut.export_size.height"),
@@ -1495,10 +1581,10 @@ struct VideoCuttingModalView: View {
         } label: {
             HStack(alignment: .center, spacing: 6) {
                 Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(isSelected ? Color.cyan.opacity(0.96) : Color.white.opacity(0.5))
+                    .foregroundStyle(isSelected ? Color.cyan.opacity(0.96) : themeForeground.opacity(0.5))
                 Text(L10n.tr(titleKey))
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.white.opacity(0.88))
+                    .foregroundStyle(themeForeground.opacity(0.88))
                     .lineLimit(1)
             }
         }
@@ -1509,13 +1595,13 @@ struct VideoCuttingModalView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L10n.tr("legacy.key_45"))
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(Color.white.opacity(0.92))
+                .foregroundStyle(themeForeground.opacity(0.92))
 
             VStack(spacing: 10) {
                 HStack(spacing: 10) {
                     Text(L10n.tr("legacy.key_193"))
                         .font(.body.weight(.medium))
-                        .foregroundStyle(Color.white.opacity(0.78))
+                        .foregroundStyle(themeForeground.opacity(0.78))
 
                     Toggle("", isOn: Binding(
                         get: { viewModel.isNoiseReductionEnabled },
@@ -1529,7 +1615,7 @@ struct VideoCuttingModalView: View {
 
                     Text("\(Int(viewModel.noiseReductionPercent.rounded())) %")
                         .font(.body.monospacedDigit())
-                        .foregroundStyle(Color.white.opacity(0.82))
+                        .foregroundStyle(themeForeground.opacity(0.82))
                 }
 
                 Slider(
@@ -1545,13 +1631,13 @@ struct VideoCuttingModalView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(Color.white.opacity(0.06))
+            .background(themeSurfaceBackground.opacity(colorScheme == .dark ? 0.4 : 0.92))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             HStack(spacing: 10) {
                 Text(L10n.tr("legacy.key_44"))
                     .font(.body.weight(.medium))
-                    .foregroundStyle(Color.white.opacity(0.78))
+                    .foregroundStyle(themeForeground.opacity(0.78))
                 Spacer(minLength: 0)
                 Picker(
                     "",
@@ -1598,7 +1684,7 @@ struct VideoCuttingModalView: View {
 
             Text(viewModel.statusMessage)
                 .font(.footnote)
-                .foregroundStyle(Color.white.opacity(0.64))
+                .foregroundStyle(themeForeground.opacity(0.64))
                 .lineLimit(1)
 
             Spacer(minLength: 0)
@@ -1611,7 +1697,7 @@ struct VideoCuttingModalView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(Color(red: 0.19, green: 0.20, blue: 0.23))
+        .background(themeSurfaceBackground)
     }
 
     private func dismissCuttingWindow() {

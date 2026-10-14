@@ -10,9 +10,9 @@ private let subDubConfigurationContentWidth: CGFloat = 330
 /// Single source of truth for the right-column video preview so all four
 /// panels (video dubbing / video conversion / subtitle burn / audio
 /// replacement) keep the same size when the user switches tabs.
-private let subDubVideoPreviewMaxWidth: CGFloat = 520
-private let subDubVideoPreviewMaxHeight: CGFloat = 320
-private let subDubVideoPreviewPlaceholder: CGSize = CGSize(width: 520, height: 292.5)
+let subDubVideoPreviewMaxWidth: CGFloat = 520
+let subDubVideoPreviewMaxHeight: CGFloat = 320
+let subDubVideoPreviewPlaceholder: CGSize = CGSize(width: 520, height: 292.5)
 
 func subDubVideoPreviewSize(for sourceSize: CGSize) -> CGSize {
     guard sourceSize.width > 0, sourceSize.height > 0 else {
@@ -62,6 +62,16 @@ struct SubDubSettingsView: View {
                     onImportDroppedProviders: viewModel.importDroppedProviders,
                     onRemoveVideo: viewModel.removeSharedVideo
                 )
+            case .videoComposition:
+                VideoCompositionPanel(
+                    viewModel: viewModel.videoCompositionViewModel,
+                    onImportVideos: viewModel.importCompositionByPanel,
+                    onImportDroppedProviders: viewModel.importCompositionDroppedProviders,
+                    onRemoveVideo: viewModel.removeSharedVideo
+                )
+                .onAppear {
+                    viewModel.synchronizeCompositionWithSharedVideo()
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1500,7 +1510,7 @@ private struct VideoDubbingPanel: View {
         .frame(height: 94)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color(red: 0.09, green: 0.10, blue: 0.11))
+        .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -2052,7 +2062,7 @@ private struct AudioReplacementPanel: View {
                             cueEditorRow(for: cue)
                             HStack(spacing: 6) {
                                 Circle()
-                                    .fill(cueStatusColor(viewModel.cueStatuses[cue.id] ?? .pending))
+                                    .fill(cueStatusColor(viewModel.effectiveCueStatus(for: cue.id)))
                                     .frame(width: 6, height: 6)
                                 Text(viewModel.cueStatusText(for: cue.id))
                                     .font(.caption2)
@@ -2066,6 +2076,14 @@ private struct AudioReplacementPanel: View {
                                 )
                             }
                             .padding(.horizontal, 8)
+                            if let failure = viewModel.cueFailureMessage(for: cue.id) {
+                                Text(failure)
+                                    .font(.caption2)
+                                    .foregroundStyle(.red.opacity(0.9))
+                                    .lineLimit(2)
+                                    .help(failure)
+                                    .padding(.horizontal, 8)
+                            }
                         }
                     }
                 }
@@ -2211,9 +2229,13 @@ private struct AudioReplacementPanel: View {
     private var audioPreviewControl: some View {
         HStack(spacing: 2) {
             audioModeButton(.original)
-            if viewModel.hasReplacementAudio {
-                audioModeButton(.replacement)
-            }
+            // Keep the mode visible before generation so the preview choices
+            // do not change layout. It becomes active as soon as the TTS
+            // mixdown is ready.
+            audioModeButton(
+                .replacement,
+                isAvailable: viewModel.hasReplacementAudio
+            )
             Button(action: viewModel.handleImportedAudioButton) {
                 Label(
                     L10n.tr("subdub.action.import_replacement_audio"),
@@ -2271,7 +2293,10 @@ private struct AudioReplacementPanel: View {
         )
     }
 
-    private func audioModeButton(_ mode: AudioPreviewMode) -> some View {
+    private func audioModeButton(
+        _ mode: AudioPreviewMode,
+        isAvailable: Bool = true
+    ) -> some View {
         Button {
             viewModel.setPreviewMode(mode)
         } label: {
@@ -2289,7 +2314,19 @@ private struct AudioReplacementPanel: View {
                 : Color.clear
         )
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .disabled(viewModel.state.isBusy || !viewModel.hasSource)
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        // Keep the mode button clickable even before a mixdown exists. The
+        // view model then reports what is missing instead of silently ignoring
+        // the click, which also makes a restored/stale session recoverable.
+        // Preview mode is independent from TTS generation/export. Keeping it
+        // enabled also lets a user switch back to the original track while a
+        // background generation task is running.
+        .disabled(!viewModel.hasSource)
+        .help(
+            isAvailable
+                ? L10n.tr(mode.titleKey)
+                : L10n.tr("subdub.action.generate_replacement_audio")
+        )
     }
 
     private func cueStatusColor(_ status: AudioReplacementCueStatus) -> Color {
@@ -2517,7 +2554,7 @@ private struct SubtitleBurnTimelineView: View {
         .frame(height: 94)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color(red: 0.09, green: 0.10, blue: 0.11))
+        .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -2534,6 +2571,12 @@ private struct SubtitleBurnWaveformCanvas: View {
     let selectedCueID: UUID?
     let overlaySamples: [Double]
     let overlayDuration: Double
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var waveformForeground: Color {
+        colorScheme == .dark ? .white : .black
+    }
 
     var body: some View {
         Canvas { context, size in
@@ -2579,7 +2622,7 @@ private struct SubtitleBurnWaveformCanvas: View {
                     )
                     context.fill(
                         Path(roundedRect: rect, cornerRadius: 1),
-                        with: .color(Color.secondary.opacity(0.58))
+                        with: .color(waveformForeground.opacity(0.68))
                     )
                 }
             }
@@ -3180,6 +3223,12 @@ private struct WatermarkVideoSurface: View {
 private struct SubDubTimelineRuler: View {
     let duration: Double
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var rulerForeground: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
     private var majorStep: Double {
         let candidates = [5.0, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
         let target = max(duration / 5, 5)
@@ -3210,14 +3259,14 @@ private struct SubDubTimelineRuler: View {
                     let isMajor = isMajorTick(value)
 
                     Rectangle()
-                        .fill(Color.white.opacity(isMajor ? 0.32 : 0.14))
+                        .fill(rulerForeground.opacity(isMajor ? 0.46 : 0.24))
                         .frame(width: isMajor ? 1.5 : 1, height: isMajor ? 10 : 6)
                         .position(x: x, y: isMajor ? 5 : 3)
 
                     if isMajor {
                         Text(formatRulerTime(value))
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(Color.white.opacity(0.62))
+                            .foregroundStyle(rulerForeground.opacity(0.72))
                             .frame(width: 56, alignment: .leading)
                             .position(
                                 x: min(max(x + 30, 30), max(width - 26, 30)),
@@ -3254,13 +3303,19 @@ private struct SubDubWaveformView: View {
     let dubbingWaveformSamples: [Double]
     let liveWaveformSamples: [Double]
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var waveformForeground: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
     var body: some View {
         Canvas { context, size in
             let barCount = max(32, Int(size.width / 6))
             let progress = duration > 0
                 ? min(max(position / duration, 0), 1)
                 : 0
-            let sourceColor = Color.secondary.opacity(0.48)
+            let sourceColor = waveformForeground.opacity(0.70)
             let dubbingColor = Color.accentColor.opacity(0.92)
 
             var baseline = Path()
@@ -3315,6 +3370,12 @@ private struct SubDubTimelinePlayhead: View {
     let isDraggable: Bool
     let onScrubEnded: (Double) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var timelineBackground: Color {
+        Color(nsColor: .textBackgroundColor)
+    }
+
     @State private var dragPreview: Double?
 
     /// 视觉位置：拖动时跟随手指，松手后回落到 VM 真实位置。
@@ -3337,7 +3398,7 @@ private struct SubDubTimelinePlayhead: View {
                     .position(x: x, y: proxy.size.height / 2)
 
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(Color(red: 0.09, green: 0.10, blue: 0.11))
+                    .fill(timelineBackground)
                     .frame(width: 10, height: 11)
                     .overlay {
                         RoundedRectangle(cornerRadius: 3, style: .continuous)
