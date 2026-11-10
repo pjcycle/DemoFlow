@@ -59,7 +59,7 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
 
     var onTargetWindowOccluded: (() -> Void)?
     var onTargetWindowUnoccluded: (() -> Void)?
-    /// 录制中窗口 frame 变化（应用并集 frame 实时更新）—— AppCoordinator 用于同步虚线框
+    /// 录制中目标窗口 frame 变化——AppCoordinator 用于同步虚线框。
     var onTargetWindowFrameUpdated: ((CGDirectDisplayID, CGRect) -> Void)?
 
     func setMicrophoneMuted(_ muted: Bool) {
@@ -151,12 +151,12 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             }
             // 应用录制：启动窗口位置跟踪
             if request.captureMode == .window, let windowSel = request.windowSelection {
-                let trackIDs = windowSel.windowIDs.isEmpty ? [windowSel.windowID] : windowSel.windowIDs
                 startWindowTracking(
-                    windowIDs: trackIDs,
+                    // “录应用”录制的是用户点选的单个窗口。旧版本会把同一
+                    // 应用的其它窗口一起跟踪，导致录制区域变大。
+                    windowIDs: [windowSel.windowID],
                     displayID: windowSel.displayID,
-                    initialFrameInDisplayPoints: windowSel.frameInDisplayPoints,
-                    stream: streamBundle.stream
+                    initialFrameInDisplayPoints: windowSel.frameInDisplayPoints
                 )
             }
             let recordingStatus = cameraTrackEnabled ? L10n.tr("legacy.key_114") : L10n.tr("legacy.key_113")
@@ -319,6 +319,24 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
                     matchedWindowIDs: []
                 )
             }
+            let isWindowCapture = currentRequest?.captureMode == .window
+            if isWindowCapture {
+                // 窗口模式仍保留目标窗口，并把显式白名单中的 PiP/画图窗口
+                // 作为叠加层加入；普通遮挡窗口不会被加入过滤器。
+                let targetWindowIDs = [currentRequest?.windowSelection?.windowID].compactMap { $0 }
+                let filterContext = makeDisplayFilterContext(
+                    from: content,
+                    display: display,
+                    pipWindowID: windowID,
+                    extraIncludedWindowIDs: extraWindowIDs,
+                    includeAppWindowsInCapture: false,
+                    windowOnly: true,
+                    baseIncludedWindowIDs: targetWindowIDs
+                )
+                try await stream.updateContentFilter(filterContext.filter)
+                includesPiPWindowInScreenCapture = filterContext.includesPiPWindowInScreenCapture
+                return filterContext.windowCaptureResolution
+            }
             let filterContext = makeDisplayFilterContext(
                 from: content,
                 display: display,
@@ -362,11 +380,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
     private func startWindowTracking(
         windowIDs: [CGWindowID],
         displayID: CGDirectDisplayID,
-        initialFrameInDisplayPoints: CGRect,
-        stream: SCStream
+        initialFrameInDisplayPoints: CGRect
     ) {
-        let weakStreamRef = WeakStream(stream: stream)
-        // 用第一个 windowID 作为 occlusion 检测的参考（应用整体检测）
+        // 窗口模式只跟踪被点选的单一目标窗口。
         let referenceWindowID = windowIDs.first ?? 0
         windowOcclusionMonitor.startMonitoring(
             windowID: referenceWindowID,
@@ -384,12 +400,9 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             onUpdate: { [weak self] update in
                 guard let self else { return }
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    guard let liveStream = weakStreamRef.stream,
-                          liveStream === self.stream else { return }
+                    guard let self, let liveStream = self.stream else { return }
                     let newConfig = SCStreamConfiguration()
                     newConfig.sourceRect = update.frameInDisplayPoints
-                    // 其他字段保持引擎启动时的默认；updateConfiguration 整体替换需要包含所有
                     if let baseConfig = self.lastStreamConfiguration {
                         newConfig.width = baseConfig.width
                         newConfig.height = baseConfig.height
@@ -402,13 +415,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
                             newConfig.microphoneCaptureDeviceID = micID
                         }
                     }
-                    do {
-                        try await liveStream.updateConfiguration(newConfig)
-                    } catch {
-                        // 更新失败时不影响录制继续；下一轮 0.5s 会再尝试
-                    }
-                    // 通知 AppCoordinator 同步虚线框（跟随窗口大小变化）
-                    self.onTargetWindowFrameUpdated?(displayID, update.frameInDisplayPoints)
+                    try? await liveStream.updateConfiguration(newConfig)
+                    self.onTargetWindowFrameUpdated?(update.displayID, update.frameInDisplayPoints)
                 }
             },
             onLost: { [weak self] in
@@ -450,25 +458,27 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             throw RecorderError.regionDisplayUnavailable
         }
 
-        // 录应用下：filter 只保留目标应用的所有可见窗口；window 不强制等于 preferredDisplayID（窗口可能被拖动）
+        // 窗口模式只保留用户点选的窗口和显式加入的 PiP/画图白名单；
+        // 遮挡它的其它普通窗口不会出现在过滤器中。
         let filterPipWindowID: CGWindowID?
         let filterExtraWindowIDs: [CGWindowID]
         let filterIncludeAppWindows: Bool
+        let targetWindowID: CGWindowID?
         if request.captureMode == .window, let windowSel = request.windowSelection {
-            // 应用录制：保留所有 windowIDs；其中至少一个要存在
-            let validIDs = windowSel.windowIDs.filter { id in
-                content.windows.contains(where: { $0.windowID == id && $0.isOnScreen })
-            }
-            guard !validIDs.isEmpty else {
+            guard content.windows.contains(where: {
+                $0.windowID == windowSel.windowID && $0.isOnScreen
+            }) else {
                 throw RecorderError.windowUnavailable
             }
-            filterPipWindowID = nil
-            filterExtraWindowIDs = validIDs
+            filterPipWindowID = request.pipWindowID
+            filterExtraWindowIDs = request.screenDrawWindowIDs
             filterIncludeAppWindows = false
+            targetWindowID = windowSel.windowID
         } else {
             filterPipWindowID = request.pipWindowID
             filterExtraWindowIDs = request.screenDrawWindowIDs
             filterIncludeAppWindows = request.includeAppWindowsInCapture
+            targetWindowID = nil
         }
 
         let filterContext = makeDisplayFilterContext(
@@ -477,7 +487,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             pipWindowID: filterPipWindowID,
             extraIncludedWindowIDs: filterExtraWindowIDs,
             includeAppWindowsInCapture: filterIncludeAppWindows,
-            windowOnly: request.captureMode == .window
+            windowOnly: request.captureMode == .window,
+            baseIncludedWindowIDs: targetWindowID.map { [$0] } ?? []
         )
 
         let configuration = SCStreamConfiguration()
@@ -498,26 +509,17 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             configuration.sourceRect = clampedRect
             captureRectInDisplayPoints = clampedRect
         } else if request.captureMode == .window, let selection = request.windowSelection {
-            // 应用录制：实时按当前所有可见窗口的并集计算 sourceRect
-            let validIDs = selection.windowIDs
-            let liveRects = validIDs.compactMap { id -> CGRect? in
-                guard let w = content.windows.first(where: { $0.windowID == id && $0.isOnScreen }) else { return nil }
-                return w.frame
-            }
-            var unionRect: CGRect
-            if liveRects.isEmpty {
-                unionRect = selection.frameInDisplayPoints
-            } else {
-                let localRects = liveRects.map {
+            let targetRect = content.windows
+                .first(where: { $0.windowID == selection.windowID && $0.isOnScreen })
+                .map {
                     RecordingWindowCoordinateSpace.captureLocalFrame(
-                        forCaptureFrame: $0,
+                        forCaptureFrame: $0.frame,
                         displayID: selection.displayID
                     )
                 }
-                unionRect = localRects.dropFirst().reduce(localRects[0]) { $0.union($1) }
-            }
+                ?? selection.frameInDisplayPoints
             let clampedRect = clampedRegionRect(
-                unionRect,
+                targetRect,
                 displaySizeInPoints: CGSize(width: CGFloat(display.width), height: CGFloat(display.height))
             )
             guard clampedRect.width >= 2, clampedRect.height >= 2 else {
@@ -572,7 +574,6 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: recordingSampleQueue)
         }
         lastStreamConfiguration = configuration
-
         return (
             stream: stream,
             fileWriter: fileWriter,
@@ -614,7 +615,8 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         pipWindowID: CGWindowID?,
         extraIncludedWindowIDs: [CGWindowID],
         includeAppWindowsInCapture: Bool,
-        windowOnly: Bool = false
+        windowOnly: Bool = false,
+        baseIncludedWindowIDs: [CGWindowID] = []
     ) -> DisplayFilterContext {
         let mainBundleID = Bundle.main.bundleIdentifier
         let excludedApplicationBundleIDs = Set(
@@ -628,7 +630,10 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             excludedApplicationBundleIDs.contains(application.bundleIdentifier)
         }
         let requestedWindowIDs = Set(([pipWindowID].compactMap { $0 }) + extraIncludedWindowIDs)
+        // baseIncludedWindowIDs 用于窗口录制在运行中刷新 PiP/画图白名单时，
+        // 保持原始目标窗口仍在过滤器内；否则刷新会意外切换成整屏过滤。
         var filterAllowedWindowIDs = requestedWindowIDs
+        filterAllowedWindowIDs.formUnion(baseIncludedWindowIDs)
         if includeAppWindowsInCapture, let mainBundleID {
             let appOwnedWindowIDs = content.windows.compactMap { window -> CGWindowID? in
                 guard window.owningApplication?.bundleIdentifier == mainBundleID else {
@@ -649,9 +654,6 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
             let missingWindowIDs = requestedWindowIDs.subtracting(matchedRequestedWindowIDs).sorted()
             print("[RecordingWhitelist] unresolved windowIDs=\(missingWindowIDs)")
         }
-        // 窗口录制必须使用 includingWindows。excludingApplications +
-        // exceptingWindows 的语义仍然是“捕获整块显示器”，因此会把桌面和 Dock
-        // 带进来，即使 exceptingWindows 里只有用户点击的窗口。
         let filter: SCContentFilter
         if windowOnly {
             filter = SCContentFilter(display: display, including: includedWindows)
@@ -917,7 +919,6 @@ final class ScreenRecorderEngine: NSObject, ObservableObject {
         }
     }
 }
-
 extension ScreenRecorderEngine: SCStreamDelegate {
     nonisolated func stream(_ stream: SCStream, didStopWithError error: any Error) {
         Task { @MainActor [weak self] in
@@ -1348,13 +1349,5 @@ private final class ScreenCaptureFileWriter: @unchecked Sendable {
         guard !didEmitFailureEvent else { return }
         didEmitFailureEvent = true
         eventHandler(.failed(error))
-    }
-}
-
-private final class WeakStream {
-    weak var stream: SCStream?
-
-    init(stream: SCStream) {
-        self.stream = stream
     }
 }

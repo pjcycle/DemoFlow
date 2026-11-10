@@ -222,7 +222,7 @@ final class RecordingWindowSelectionWindowController: NSObject {
 
         // 实时监测选中窗口的尺寸/位置；关闭或最小化时清除选择。
         selectedWindowValidityMonitor.startMonitoring(
-            windowIDs: selection.windowIDs,
+            windowIDs: [selection.windowID],
             displayID: selection.displayID,
             onUpdate: { [weak self] update in
                 self?.updateHighlightedFrame(update)
@@ -469,37 +469,11 @@ final class RecordingWindowSelectionWindowController: NSObject {
         selectedWindowID = windowID
 
         let title = owningApp?.applicationName ?? pickedWindow?.title ?? ""
-        let selectedApplicationWindows: [SCWindow] = {
-            guard let bundleID, let content else {
-                return pickedWindow.map { [$0] } ?? []
-            }
-            let windows = content.windows.filter { window in
-                guard window.isOnScreen,
-                      window.owningApplication?.bundleIdentifier == bundleID else {
-                    return false
-                }
-                let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
-                return RecordingWindowCoordinateSpace.displayID(containingCapturePoint: center) == displayID
-            }
-            return windows.isEmpty ? (pickedWindow.map { [$0] } ?? []) : windows
-        }()
-        let selectedWindowIDs = selectedApplicationWindows.map(\.windowID)
-        let selectedFrames = selectedApplicationWindows.map {
-            RecordingWindowCoordinateSpace.captureLocalFrame(
-                forCaptureFrame: $0.frame,
-                displayID: displayID
-            )
-        }
-        let selectedFrame = selectedFrames.dropFirst().reduce(
-            selectedFrames.first ?? frameInDisplayPoints
-        ) { $0.union($1) }
         let selection = RecordingWindowSelection(
             windowID: windowID,
-            windowIDs: selectedWindowIDs.contains(windowID)
-                ? selectedWindowIDs
-                : [windowID] + selectedWindowIDs,
+            windowIDs: [windowID],
             displayID: displayID,
-            frameInDisplayPoints: selectedFrame,
+            frameInDisplayPoints: frameInDisplayPoints,
             ownerBundleID: bundleID,
             title: String(title.prefix(64))
         )
@@ -561,7 +535,7 @@ final class RecordingWindowSelectionWindowController: NSObject {
 
         selection = RecordingWindowSelection(
             windowID: selection.windowID,
-            windowIDs: selection.windowIDs,
+            windowIDs: [selection.windowID],
             displayID: update.displayID,
             frameInDisplayPoints: update.frameInDisplayPoints,
             ownerBundleID: selection.ownerBundleID,

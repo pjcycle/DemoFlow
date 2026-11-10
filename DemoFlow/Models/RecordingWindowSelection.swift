@@ -71,7 +71,7 @@ enum RecordingWindowCoordinateSpace {
 struct RecordingWindowSelection: Equatable, Codable {
     /// 用户点击的主窗口——用于显示录制目标名称。
     let windowID: CGWindowID
-    /// 当前屏幕上属于所选应用的全部可见窗口，供 ScreenCaptureKit 录制与窗口跟踪复用。
+    /// 兼容旧版本保存的数据；当前录制始终只使用 windowID 对应的单个窗口。
     let windowIDs: [CGWindowID]
     let displayID: CGDirectDisplayID
     /// 当前选中窗口 frame（display 本地坐标点）；引擎在 buildScreenStream 阶段会重新校准。

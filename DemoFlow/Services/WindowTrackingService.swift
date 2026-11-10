@@ -14,6 +14,7 @@ import Foundation
 @MainActor
 final class WindowTrackingService {
     struct Update {
+        let displayID: CGDirectDisplayID
         let frameInDisplayPoints: CGRect
     }
 
@@ -73,7 +74,7 @@ final class WindowTrackingService {
 
     private func pollOnce() async {
         guard !targetWindowIDs.isEmpty,
-              let displayID = targetDisplayID else { return }
+              let previousDisplayID = targetDisplayID else { return }
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(
@@ -84,31 +85,28 @@ final class WindowTrackingService {
             notifyLost()
             return
         }
-        // 应用的所有目标窗口中至少一个要还在 onScreen
-        let liveFrames = content.windows.compactMap { window -> CGRect? in
-            guard window.isOnScreen, targetWindowIDs.contains(window.windowID) else { return nil }
-            return window.frame
-        }
-        guard !liveFrames.isEmpty else {
+        guard let targetWindow = content.windows.first(where: {
+            $0.isOnScreen && targetWindowIDs.contains($0.windowID)
+        }) else {
             notifyLost()
             return
         }
+        let center = CGPoint(x: targetWindow.frame.midX, y: targetWindow.frame.midY)
+        let displayID = RecordingWindowCoordinateSpace.displayID(containingCapturePoint: center)
+            ?? previousDisplayID
+        targetDisplayID = displayID
         guard NSScreen.screen(with: displayID) != nil else {
             notifyLost()
             return
         }
-        let localFrames = liveFrames.map {
-            RecordingWindowCoordinateSpace.captureLocalFrame(
-                forCaptureFrame: $0,
-                displayID: displayID
-            )
-        }
-        guard let firstFrame = localFrames.first else { return }
-        let newFrame = localFrames.dropFirst().reduce(firstFrame) { $0.union($1) }
+        let newFrame = RecordingWindowCoordinateSpace.captureLocalFrame(
+            forCaptureFrame: targetWindow.frame,
+            displayID: displayID
+        )
         // frame 没变就不回调
         if newFrame.equalTo(lastFrameInDisplayPoints) { return }
         lastFrameInDisplayPoints = newFrame
-        onUpdate?(Update(frameInDisplayPoints: newFrame))
+        onUpdate?(Update(displayID: displayID, frameInDisplayPoints: newFrame))
     }
 
     private func notifyLost() {

@@ -101,13 +101,10 @@ final class SelectedWindowValidityMonitor {
         guard let displayID, NSScreen.screen(with: displayID) != nil else { return }
         targetDisplayID = displayID
 
-        let frames = targetWindows.map {
-            RecordingWindowCoordinateSpace.captureLocalFrame(
-                forCaptureFrame: $0.frame,
-                displayID: displayID
-            )
-        }
-        let frameInDisplayPoints = frames.dropFirst().reduce(frames[0]) { $0.union($1) }
+        let frameInDisplayPoints = RecordingWindowCoordinateSpace.captureLocalFrame(
+            forCaptureFrame: targetWindow.frame,
+            displayID: displayID
+        )
         guard lastDisplayID != displayID
                 || lastFrameInDisplayPoints?.equalTo(frameInDisplayPoints) != true else {
             return

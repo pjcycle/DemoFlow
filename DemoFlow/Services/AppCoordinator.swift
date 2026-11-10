@@ -3994,7 +3994,7 @@ private extension AppCoordinator {
         // 用新 frame 重建 selection，触发 presentHighlight 重画虚线框跟随窗口
         let updated = RecordingWindowSelection(
             windowID: active.windowID,
-            windowIDs: active.windowIDs,
+            windowIDs: [active.windowID],
             displayID: displayID,
             frameInDisplayPoints: frame,
             ownerBundleID: active.ownerBundleID,
